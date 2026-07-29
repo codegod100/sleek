@@ -10,6 +10,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck disable=SC1091
+if [[ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]]; then
+  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+elif [[ -f "$HOME/.nix-profile/etc/profile.d/nix.sh" ]]; then
+  . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+fi
+export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
+
 # Already inside a nix develop / nix-shell for this project?
 if [[ -n "${IN_NIX_SHELL:-}" || -n "${SLEEK_NIX_SHELL:-}" ]]; then
   if [[ $# -gt 0 ]]; then
@@ -20,6 +28,15 @@ fi
 
 if ! command -v nix >/dev/null 2>&1; then
   echo "sleek: nix not found. Run: bash scripts/codespace-bootstrap.sh" >&2
+  exit 1
+fi
+
+# Multi-user without daemon → clear error instead of big-lock noise.
+if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+  echo "sleek: nix-daemon is not running (socket missing)." >&2
+  echo "  Fix:  bash scripts/codespace-bootstrap.sh" >&2
+  echo "  Or:   sudo systemctl start nix-daemon.socket" >&2
+  echo "  Or:   sudo /nix/var/nix/profiles/default/bin/nix-daemon --daemon &" >&2
   exit 1
 fi
 

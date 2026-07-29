@@ -51,6 +51,16 @@ case "${_sleek_cwd}/" in
     ;;
 esac
 
+# shellcheck disable=SC1091
+if [[ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]]; then
+  # shellcheck disable=SC1091
+  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+elif [[ -f "${HOME}/.nix-profile/etc/profile.d/nix.sh" ]]; then
+  # shellcheck disable=SC1091
+  . "${HOME}/.nix-profile/etc/profile.d/nix.sh"
+fi
+export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
+
 # Prefer direnv when available (non-exec path; keeps nested shells happy).
 if command -v direnv >/dev/null 2>&1 && [[ -f "${_sleek_root}/.envrc" ]]; then
   # direnv hook should already be in bashrc; force a reload if needed.
@@ -75,6 +85,16 @@ fi
 
 # Opt out: SLEEK_NO_AUTO_NIX=1 gh codespace ssh ...
 if [[ -n "${SLEEK_NO_AUTO_NIX:-}" ]]; then
+  unset _sleek_root _sleek_cwd
+  return 0 2>/dev/null || true
+fi
+
+# Multi-user install without daemon: do not exec into a failing nix develop.
+if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+  if [[ -z "${SLEEK_NIX_HINT:-}" ]]; then
+    export SLEEK_NIX_HINT=1
+    echo "sleek: nix-daemon not running — run: bash ${_sleek_root}/scripts/codespace-bootstrap.sh" >&2
+  fi
   unset _sleek_root _sleek_cwd
   return 0 2>/dev/null || true
 fi
