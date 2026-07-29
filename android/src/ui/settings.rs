@@ -12,6 +12,7 @@ use crate::ui::widgets::{avatar_circle, card, section_label};
 pub enum SettingsAction {
     None,
     Disconnect,
+    Logout,
     ToggleTheme,
 }
 
@@ -43,6 +44,9 @@ pub fn settings_tab(
                         .strong(),
                 );
                 ui.add_space(sp.xs);
+                if let Some(handle) = &state.handle {
+                    dim_label(ui, th, &format!("@{handle}"));
+                }
                 if let Some(did) = &state.did {
                     let short = if did.len() > 28 {
                         format!("{}…", &did[..28])
@@ -137,6 +141,12 @@ pub fn settings_tab(
     if state.connection != ConnectionState::Disconnected {
         if destructive_button(ui, th, "Disconnect").clicked() {
             action = SettingsAction::Disconnect;
+        }
+        if state.broker_token.is_some() || state.did.is_some() {
+            ui.add_space(sp.sm);
+            if button(ui, th, "Sign out").clicked() {
+                action = SettingsAction::Logout;
+            }
         }
     } else if primary_button(ui, th, "Back to connect").clicked() {
         // no-op: already disconnected shell shows connect

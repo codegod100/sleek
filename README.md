@@ -27,11 +27,39 @@ nix develop        # or: direnv allow  (after .envrc)
 # or: ./scripts/enter
 just host          # desktop window (cargo run)
 just lib           # build android package as rlib (desktop target)
-just waydroid      # APK → install → launch on Waydroid
+just waydroid      # APK → install → launch on Waydroid (x86_64)
 
 # Or via the flake (builds desktop host into ./result):
 nix build          # → ./result/bin/sleek
 nix run            # build + run desktop host
+
+# Phone APK (aarch64) + adb install:
+just android                   # nix build .#android — auto-pushes to Cachix when auth is set
+nix run .#install-android      # adb install -r that APK
+nix run .#install-android -- --launch
+
+# Manual push of an existing out-link:
+just push ./result-android
+```
+
+### Cachix (Codespaces)
+
+Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
+
+With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
+
+| Secret / env | Purpose |
+|--------------|---------|
+| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) |
+| `CACHIX_CACHE` | Cache name (default `codegod100`) |
+| `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
+| `SLEEK_SKIP_CACHIX=1` | Skip Cachix setup in bootstrap |
+
+```bash
+# Codespace secret → then:
+just bootstrap
+just android                   # build + push
+SLEEK_CACHIX_PUSH=0 just android   # build only
 ```
 
 The dev shell does **not** set ambient `LD_LIBRARY_PATH` (that broke Ubuntu

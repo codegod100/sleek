@@ -348,6 +348,121 @@ install_bashrc_nix_env
 ensure_nix_flakes
 log "nix flakes enabled (user + system conf + NIX_CONFIG)"
 
+# ── Cachix: codegod100 (pull always; push when CACHIX_AUTH_TOKEN is set) ─
+# Public cache: https://codegod100.cachix.org
+# Push auth: set GitHub Codespaces secret CACHIX_AUTH_TOKEN (personal/org/repo).
+CACHIX_CACHE="${CACHIX_CACHE:-codegod100}"
+CACHIX_SUBSTITUTER="https://${CACHIX_CACHE}.cachix.org"
+CACHIX_PUBKEY="codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA="
+
+ensure_nix_conf_kv() {
+  # ensure_nix_conf_kv FILE KEY VALUE
+  # Appends or merges space-separated values for KEY without duplicating VALUE.
+  local file="$1" key="$2" value="$3"
+  local line cur
+  touch "$file"
+  if grep -qE "^${key}[[:space:]]*=" "$file" 2>/dev/null; then
+    line="$(grep -E "^${key}[[:space:]]*=" "$file" | tail -1)"
+    cur="${line#*=}"
+    cur="${cur#"${cur%%[![:space:]]*}"}"
+    case " $cur " in
+      *" $value "*) ;;
+      *)
+        # Rewrite last occurrence of key with value appended.
+        local tmp
+        tmp="$(mktemp)"
+        # Drop all lines for this key, re-add merged once.
+        grep -vE "^${key}[[:space:]]*=" "$file" >"$tmp" || true
+        echo "${key} = ${cur} ${value}" >>"$tmp"
+        mv "$tmp" "$file"
+        ;;
+    esac
+  else
+    echo "${key} = ${value}" >>"$file"
+  fi
+}
+
+configure_cachix_pull() {
+  # User-level conf works for single-user Codespace installs.
+  NIX_USER_CONF="${NIX_USER_CONF:-$HOME/.config/nix/nix.conf}"
+  mkdir -p "$(dirname "$NIX_USER_CONF")"
+  ensure_nix_conf_kv "$NIX_USER_CONF" "extra-substituters" "$CACHIX_SUBSTITUTER"
+  ensure_nix_conf_kv "$NIX_USER_CONF" "extra-trusted-public-keys" "$CACHIX_PUBKEY"
+  # Also accept flake-provided nixConfig without prompting.
+  if ! grep -qE '^accept-flake-config' "$NIX_USER_CONF" 2>/dev/null; then
+    echo "accept-flake-config = true" >>"$NIX_USER_CONF"
+  fi
+
+  # System conf when we have root (multi-user / Determinate) so the daemon
+  # trusts the cache too.
+  if have_sudo || [[ "$(id -u)" -eq 0 ]]; then
+    if [[ -f /etc/nix/nix.conf ]] || run_root mkdir -p /etc/nix 2>/dev/null; then
+      run_root touch /etc/nix/nix.conf 2>/dev/null || true
+      # Best-effort: append if missing (avoid complex in-place merge as root).
+      if ! grep -qF "$CACHIX_SUBSTITUTER" /etc/nix/nix.conf 2>/dev/null; then
+        {
+          echo "extra-substituters = $CACHIX_SUBSTITUTER"
+          echo "extra-trusted-public-keys = $CACHIX_PUBKEY"
+        } | run_root tee -a /etc/nix/nix.conf >/dev/null || true
+        log "added $CACHIX_CACHE substituter to /etc/nix/nix.conf"
+      fi
+    fi
+  fi
+  log "nix pull configured: $CACHIX_SUBSTITUTER"
+}
+
+install_cachix_cli() {
+  if command -v cachix >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! nix_store_ok; then
+    log "skipping cachix install (nix store not ready)"
+    return 1
+  fi
+  log "installing cachix via nix profile…"
+  if nix profile install nixpkgs#cachix 2>/dev/null \
+    || nix-env -iA nixpkgs.cachix 2>/dev/null; then
+    load_nix_env
+    log "cachix installed"
+    return 0
+  fi
+  log "could not install cachix (optional for push)"
+  return 1
+}
+
+configure_cachix_push() {
+  # Prefer env (Codespaces secret). Never echo the token.
+  if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+    log "CACHIX_AUTH_TOKEN unset — pull-only (no push to $CACHIX_CACHE)"
+    log "  Add Codespace secret CACHIX_AUTH_TOKEN to enable: cachix push $CACHIX_CACHE"
+    return 0
+  fi
+  if ! command -v cachix >/dev/null 2>&1; then
+    log "cachix CLI missing; cannot store authtoken"
+    return 1
+  fi
+  # Writes ~/.config/cachix/cachix.dhall — not printed.
+  if printf '%s' "$CACHIX_AUTH_TOKEN" | cachix authtoken --stdin >/dev/null 2>&1; then
+    log "cachix authtoken configured — auto-push on: just android"
+    log "  (manual: cachix push $CACHIX_CACHE <paths>; opt out: SLEEK_CACHIX_PUSH=0)"
+  else
+    # Older/newer CLI flag variants
+    if printf '%s' "$CACHIX_AUTH_TOKEN" | cachix authtoken >/dev/null 2>&1; then
+      log "cachix authtoken configured — auto-push on: just android"
+      log "  (manual: cachix push $CACHIX_CACHE <paths>; opt out: SLEEK_CACHIX_PUSH=0)"
+    else
+      log "cachix authtoken failed (token invalid or CLI mismatch)"
+      return 1
+    fi
+  fi
+}
+
+configure_cachix_pull
+if [[ "${SLEEK_SKIP_CACHIX:-}" != "1" ]]; then
+  install_cachix_cli || true
+  configure_cachix_push || true
+fi
+
 # Apply mode for this process
 if [[ -S "$SOCKET" ]] && nix store ping --store daemon >/dev/null 2>&1; then
   export NIX_REMOTE=daemon

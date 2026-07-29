@@ -12,11 +12,13 @@
   "postCreateCommand": "bash scripts/codespace-bootstrap.sh",
   "postStartCommand": "bash scripts/codespace-bootstrap.sh --quiet",
   "containerEnv": {
-    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true"
+    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
+    "CACHIX_CACHE": "codegod100"
   },
   "remoteEnv": {
     "SLEEK_CODESPACE": "1",
-    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true"
+    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
+    "CACHIX_CACHE": "codegod100"
   },
   "customizations": {
     "vscode": {

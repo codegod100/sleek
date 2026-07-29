@@ -1,6 +1,7 @@
 //! Sleek — freeq mobile client (desktop + Android NativeActivity).
 
 mod app;
+mod auth;
 mod net;
 mod state;
 mod ui;

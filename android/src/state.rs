@@ -193,7 +193,11 @@ pub const POPULAR_CHANNELS: &[(&str, &str)] = &[
 ];
 
 pub fn default_server() -> String {
-    "irc.freeq.at:6697".into()
+    crate::auth::DEFAULT_IRC_SERVER.into()
+}
+
+pub fn default_auth_broker() -> String {
+    crate::auth::DEFAULT_AUTH_BROKER.into()
 }
 
 pub fn default_nick() -> String {
@@ -218,6 +222,15 @@ pub fn websocket_url_for(server: &str) -> String {
     format!("wss://{host}/irc")
 }
 
+/// Which panel is shown on the connect screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectMode {
+    /// Primary: Bluesky / AT Protocol via auth broker.
+    Bluesky,
+    /// Guest nick + server (no SASL).
+    Guest,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub connection: ConnectionState,
@@ -226,9 +239,16 @@ pub struct AppState {
     pub use_tls: bool,
     pub use_websocket: bool,
     pub did: Option<String>,
+    /// Bluesky handle when known (from OAuth callback / session).
+    pub handle: Option<String>,
+    /// Durable auth-broker token for `/session` refresh (not the SASL web-token).
+    pub broker_token: Option<String>,
+    pub auth_broker: String,
     pub error: Option<String>,
     pub toast: Option<String>,
     pub status_line: String,
+    /// True while the loopback browser OAuth flow is waiting.
+    pub awaiting_oauth: bool,
 
     pub channels: HashMap<String, Buffer>,
     /// Ordered keys for list UI (channel names / dm keys).
@@ -243,6 +263,9 @@ pub struct AppState {
     pub discover_input: String,
 
     /// Connect form fields (editable while disconnected).
+    pub connect_mode: ConnectMode,
+    pub form_handle: String,
+    pub form_callback: String,
     pub form_nick: String,
     pub form_server: String,
     pub form_tls: bool,
@@ -254,16 +277,20 @@ impl AppState {
         let nick = default_nick();
         let server = default_server();
         let use_ws = cfg!(target_os = "android");
-        Self {
+        let mut state = Self {
             connection: ConnectionState::Disconnected,
             nick: nick.clone(),
             server: server.clone(),
             use_tls: true,
             use_websocket: use_ws,
             did: None,
+            handle: None,
+            broker_token: None,
+            auth_broker: default_auth_broker(),
             error: None,
             toast: None,
             status_line: "Not connected".into(),
+            awaiting_oauth: false,
             channels: HashMap::new(),
             channel_order: Vec::new(),
             active_channel: None,
@@ -273,11 +300,78 @@ impl AppState {
             search: String::new(),
             join_input: String::new(),
             discover_input: String::new(),
+            connect_mode: ConnectMode::Bluesky,
+            form_handle: String::new(),
+            form_callback: String::new(),
             form_nick: nick,
             form_server: server,
             form_tls: true,
             form_websocket: use_ws,
+        };
+        if let Some(saved) = crate::auth::SavedSession::load() {
+            if saved.has_session() {
+                state.broker_token = Some(saved.broker_token);
+                state.did = if saved.did.is_empty() {
+                    None
+                } else {
+                    Some(saved.did)
+                };
+                state.handle = if saved.handle.is_empty() {
+                    None
+                } else {
+                    Some(saved.handle.clone())
+                };
+                if !saved.nick.is_empty() && !saved.nick.starts_with("Guest") {
+                    state.nick = saved.nick.clone();
+                    state.form_nick = saved.nick;
+                }
+                if !saved.server.is_empty() {
+                    state.server = saved.server.clone();
+                    state.form_server = saved.server;
+                }
+                if let Some(h) = &state.handle {
+                    state.form_handle = h.clone();
+                }
+            }
         }
+        state
+    }
+
+    pub fn has_saved_session(&self) -> bool {
+        self.broker_token
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
+    }
+
+    pub fn persist_session(&self) {
+        let Some(broker_token) = self.broker_token.clone() else {
+            return;
+        };
+        // Never poison storage with a Guest temp nick while DID-authenticated
+        // (freeq-android AuthRecoveryTest).
+        let nick = if self.did.is_some() && self.nick.starts_with("Guest") {
+            self.handle.clone().unwrap_or_default()
+        } else {
+            self.nick.clone()
+        };
+        let session = crate::auth::SavedSession {
+            broker_token,
+            did: self.did.clone().unwrap_or_default(),
+            handle: self.handle.clone().unwrap_or_default(),
+            nick,
+            server: self.server.clone(),
+            last_login_unix: chrono::Utc::now().timestamp(),
+        };
+        if let Err(e) = session.save() {
+            log::warn!("failed to save session: {e}");
+        }
+    }
+
+    pub fn clear_auth(&mut self) {
+        self.broker_token = None;
+        self.did = None;
+        self.handle = None;
+        crate::auth::SavedSession::clear();
     }
 
     pub fn is_connected(&self) -> bool {
@@ -333,7 +427,8 @@ impl AppState {
 
     pub fn clear_session(&mut self) {
         self.connection = ConnectionState::Disconnected;
-        self.did = None;
+        self.awaiting_oauth = false;
+        // Keep did / broker_token so reconnect can re-auth; use clear_auth for logout.
         self.channels.clear();
         self.channel_order.clear();
         self.active_channel = None;
@@ -341,6 +436,12 @@ impl AppState {
         self.tab = Tab::Chats;
         self.compose.clear();
         self.status_line = "Disconnected".into();
+    }
+
+    pub fn logout(&mut self) {
+        self.clear_session();
+        self.clear_auth();
+        self.status_line = "Signed out".into();
     }
 
     pub fn normalize_channel(input: &str) -> String {

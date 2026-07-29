@@ -1,11 +1,13 @@
 //! Async freeq-sdk bridge: background tokio runtime ↔ egui UI thread.
 
 use std::thread;
+use std::time::Duration;
 
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 
+use crate::auth::{self, AuthTokens};
 use crate::state::{prefer_websocket, websocket_url_for};
 
 /// Commands from the UI into the network thread.
@@ -17,6 +19,18 @@ pub enum NetCmd {
         tls: bool,
         websocket: bool,
         auto_join: Vec<String>,
+        /// One-shot SASL web-token from auth broker (consumed on first connect).
+        web_token: Option<String>,
+    },
+    /// Open browser OAuth via auth broker loopback capture.
+    BlueskyLogin {
+        handle: String,
+        auth_broker: String,
+    },
+    /// Mint a fresh web-token from durable broker_token (UI then Connects).
+    ReconnectSession {
+        broker_token: String,
+        auth_broker: String,
     },
     Join(String),
     Part(String),
@@ -33,6 +47,8 @@ pub enum NetEvent {
     Sdk(Event),
     Status(String),
     Failed(String),
+    /// Browser OAuth completed (or pasted freeq://auth was applied client-side).
+    AuthReady(AuthTokens),
 }
 
 /// Sync façade used by the egui app.
@@ -166,88 +182,67 @@ async fn apply_cmd(
     event_tx: &std::sync::mpsc::Sender<NetEvent>,
 ) {
     match cmd {
+        NetCmd::BlueskyLogin {
+            handle: bsky_handle,
+            auth_broker,
+        } => {
+            let _ = event_tx.send(NetEvent::Status(
+                "Opening browser for Bluesky sign-in…".into(),
+            ));
+            match auth::bluesky_login_loopback(
+                &auth_broker,
+                &bsky_handle,
+                Duration::from_secs(5 * 60),
+            )
+            .await
+            {
+                Ok(tokens) => {
+                    let _ = event_tx.send(NetEvent::Status("Sign-in complete".into()));
+                    let _ = event_tx.send(NetEvent::AuthReady(tokens));
+                }
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Sign-in failed: {e}")));
+                }
+            }
+        }
+        NetCmd::ReconnectSession {
+            broker_token,
+            auth_broker,
+        } => {
+            // Mint a fresh web-token; UI applies AuthReady and issues Connect.
+            let _ = event_tx.send(NetEvent::Status("Refreshing session…".into()));
+            match auth::fetch_broker_session(&auth_broker, &broker_token).await {
+                Ok(tokens) => {
+                    let _ = event_tx.send(NetEvent::AuthReady(tokens));
+                }
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Session refresh failed: {e}")));
+                }
+            }
+        }
         NetCmd::Connect {
             nick,
             server,
             tls,
             websocket,
             auto_join,
+            web_token,
         } => {
-            // Tear down any prior session.
-            if let Some(h) = handle.take() {
-                let _ = h.quit(Some("reconnecting")).await;
-            }
-            *events = None;
-            *pending_joins = auto_join;
-
-            let use_ws = websocket || prefer_websocket(&server);
-            let ws_url = if use_ws {
-                Some(websocket_url_for(&server))
-            } else {
-                None
-            };
-
-            let config = ConnectConfig {
-                server_addr: server.clone(),
-                nick: nick.clone(),
-                user: nick.clone(),
-                realname: "Sleek freeq client".into(),
-                tls: if ws_url.is_some() { false } else { tls },
-                tls_insecure: false,
-                web_token: None,
-                websocket_url: ws_url.clone(),
-            };
-
-            let via = if let Some(ref u) = ws_url {
-                format!("via {u}")
-            } else if tls {
-                format!("TLS {server}")
-            } else {
-                format!("TCP {server}")
-            };
-            let _ = event_tx.send(NetEvent::Status(format!("Connecting to {via} as {nick}…")));
-
-            match client::establish_connection(&config).await {
-                Ok(conn) => {
-                    let (h, rx) = client::connect_with_stream(conn, config, None);
-                    *handle = Some(h);
-                    *events = Some(rx);
-                    let _ = event_tx.send(NetEvent::Status("Socket up — registering…".into()));
-                }
-                Err(e) => {
-                    // If TLS TCP failed and we didn't try WS, retry WSS once.
-                    if ws_url.is_none() && tls {
-                        let _ = event_tx.send(NetEvent::Status(format!(
-                            "TCP failed ({e}); retrying WebSocket…"
-                        )));
-                        let cfg = ConnectConfig {
-                            server_addr: server.clone(),
-                            nick: nick.clone(),
-                            user: nick.clone(),
-                            realname: "Sleek freeq client".into(),
-                            tls: false,
-                            tls_insecure: false,
-                            web_token: None,
-                            websocket_url: Some(websocket_url_for(&server)),
-                        };
-                        match client::establish_connection(&cfg).await {
-                            Ok(conn) => {
-                                let (h, rx) = client::connect_with_stream(conn, cfg, None);
-                                *handle = Some(h);
-                                *events = Some(rx);
-                                let _ = event_tx
-                                    .send(NetEvent::Status("WebSocket up — registering…".into()));
-                            }
-                            Err(e2) => {
-                                let _ = event_tx
-                                    .send(NetEvent::Failed(format!("Connect failed: {e2}")));
-                            }
-                        }
-                    } else {
-                        let _ = event_tx.send(NetEvent::Failed(format!("Connect failed: {e}")));
-                    }
-                }
-            }
+            do_connect(
+                handle,
+                events,
+                pending_joins,
+                event_tx,
+                ConnectArgs {
+                    nick,
+                    server,
+                    tls,
+                    websocket,
+                    auto_join,
+                    web_token,
+                },
+            )
+            .await;
         }
         NetCmd::Join(channel) => {
             if let Some(h) = handle {
@@ -284,6 +279,106 @@ async fn apply_cmd(
             let _ = event_tx.send(NetEvent::Sdk(Event::Disconnected {
                 reason: "quit".into(),
             }));
+        }
+    }
+}
+
+struct ConnectArgs {
+    nick: String,
+    server: String,
+    tls: bool,
+    websocket: bool,
+    auto_join: Vec<String>,
+    web_token: Option<String>,
+}
+
+async fn do_connect(
+    handle: &mut Option<ClientHandle>,
+    events: &mut Option<mpsc::Receiver<Event>>,
+    pending_joins: &mut Vec<String>,
+    event_tx: &std::sync::mpsc::Sender<NetEvent>,
+    args: ConnectArgs,
+) {
+    // Tear down any prior session.
+    if let Some(h) = handle.take() {
+        let _ = h.quit(Some("reconnecting")).await;
+    }
+    *events = None;
+    *pending_joins = args.auto_join;
+
+    let use_ws = args.websocket || prefer_websocket(&args.server);
+    let ws_url = if use_ws {
+        Some(websocket_url_for(&args.server))
+    } else {
+        None
+    };
+
+    let config = ConnectConfig {
+        server_addr: args.server.clone(),
+        nick: args.nick.clone(),
+        user: args.nick.clone(),
+        realname: "Sleek freeq client".into(),
+        tls: if ws_url.is_some() { false } else { args.tls },
+        tls_insecure: false,
+        web_token: args.web_token.clone(),
+        websocket_url: ws_url.clone(),
+    };
+
+    let via = if let Some(ref u) = ws_url {
+        format!("via {u}")
+    } else if args.tls {
+        format!("TLS {}", args.server)
+    } else {
+        format!("TCP {}", args.server)
+    };
+    let auth_note = if args.web_token.is_some() {
+        " (SASL)"
+    } else {
+        " (guest)"
+    };
+    let _ = event_tx.send(NetEvent::Status(format!(
+        "Connecting to {via} as {}{auth_note}…",
+        args.nick
+    )));
+
+    match client::establish_connection(&config).await {
+        Ok(conn) => {
+            let (h, rx) = client::connect_with_stream(conn, config, None);
+            *handle = Some(h);
+            *events = Some(rx);
+            let _ = event_tx.send(NetEvent::Status("Socket up — registering…".into()));
+        }
+        Err(e) => {
+            // If TLS TCP failed and we didn't try WS, retry WSS once.
+            if ws_url.is_none() && args.tls {
+                let _ = event_tx.send(NetEvent::Status(format!(
+                    "TCP failed ({e}); retrying WebSocket…"
+                )));
+                let cfg = ConnectConfig {
+                    server_addr: args.server.clone(),
+                    nick: args.nick.clone(),
+                    user: args.nick.clone(),
+                    realname: "Sleek freeq client".into(),
+                    tls: false,
+                    tls_insecure: false,
+                    web_token: args.web_token,
+                    websocket_url: Some(websocket_url_for(&args.server)),
+                };
+                match client::establish_connection(&cfg).await {
+                    Ok(conn) => {
+                        let (h, rx) = client::connect_with_stream(conn, cfg, None);
+                        *handle = Some(h);
+                        *events = Some(rx);
+                        let _ =
+                            event_tx.send(NetEvent::Status("WebSocket up — registering…".into()));
+                    }
+                    Err(e2) => {
+                        let _ = event_tx.send(NetEvent::Failed(format!("Connect failed: {e2}")));
+                    }
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed(format!("Connect failed: {e}")));
+            }
         }
     }
 }

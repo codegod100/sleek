@@ -7,7 +7,9 @@ license = "MIT"
 publish = false
 
 # Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
+# cargo-apk / newer cargo require explicit members (empty [workspace] fails parse).
 [workspace]
+members = ["."]
 
 [lib]
 name = "sleek"
@@ -34,6 +36,13 @@ tokio = { version = "1", features = [
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 anyhow = "1"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+open = "5"
+urlencoding = "2"
+base64 = "0.22"
+dirs = "5"
 
 # Shared glow + fonts only — do NOT enable wayland/x11 here (feature unification
 # would pull them into the Android build and can make the activity exit immediately).
@@ -63,7 +72,8 @@ winit = { version = "0.30", default-features = false, features = ["android-nativ
 [package.metadata.android]
 package = "uk.nandi.sleek"
 apk_name = "sleek"
-build_targets = ["x86_64-linux-android"]
+# aarch64 = physical phones; x86_64 = Waydroid / emulators
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
 
 [package.metadata.android.sdk]
 min_sdk_version = 28

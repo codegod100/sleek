@@ -1,18 +1,18 @@
-//! Connect / guest login screen (freeq-android ConnectScreen inspired).
+//! Connect screen — Bluesky OAuth (auth broker) + guest, freeq-android inspired.
 
 use eframe::egui::{self, Align, Layout, RichText};
 use vidya::{
     body, button, checkbox, dim_label, primary_button, text_field_singleline, title, title_2, Theme,
 };
 
-use crate::state::{AppState, ConnectionState};
+use crate::state::{AppState, ConnectMode, ConnectionState};
 use crate::ui::widgets::card;
 
 pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ConnectAction {
     let mut action = ConnectAction::None;
     let sp = &th.spacing;
     let p = &th.palette;
-    let loading = state.connection == ConnectionState::Connecting;
+    let loading = state.connection == ConnectionState::Connecting || state.awaiting_oauth;
 
     ui.vertical_centered(|ui| {
         ui.add_space(sp.xl + sp.lg);
@@ -39,57 +39,145 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
     });
 
     card(ui, th, |ui| {
-        title_2(ui, th, "Guest connect");
-        ui.add_space(sp.sm);
-        body(
-            ui,
-            th,
-            "Join freeq as a guest. Your nick is a display alias — sign in with Bluesky later for a portable DID.",
-        );
-        ui.add_space(sp.lg);
+        match state.connect_mode {
+            ConnectMode::Bluesky => {
+                title_2(ui, th, "Sign in with Bluesky");
+                ui.add_space(sp.sm);
+                body(
+                    ui,
+                    th,
+                    "AT Protocol identity via the freeq auth broker. Your handle is verified with SASL on IRC.",
+                );
+                ui.add_space(sp.lg);
 
-        body(ui, th, "Nickname");
-        ui.add_space(sp.xs);
-        let _ = text_field_singleline(ui, th, &mut state.form_nick);
-        ui.add_space(sp.md);
+                body(ui, th, "Bluesky handle");
+                ui.add_space(sp.xs);
+                let _ = text_field_singleline(ui, th, &mut state.form_handle);
+                ui.add_space(sp.md);
 
-        body(ui, th, "Server");
-        ui.add_space(sp.xs);
-        let _ = text_field_singleline(ui, th, &mut state.form_server);
-        ui.add_space(sp.md);
+                if let Some(err) = &state.error {
+                    ui.label(
+                        RichText::new(err)
+                            .size(th.type_scale.caption)
+                            .color(p.destructive),
+                    );
+                    ui.add_space(sp.sm);
+                }
 
-        checkbox(ui, th, &mut state.form_tls, "Use TLS (recommended)");
-        ui.add_space(sp.sm);
-        checkbox(
-            ui,
-            th,
-            &mut state.form_websocket,
-            "WebSocket transport (good on mobile)",
-        );
+                if !state.status_line.is_empty() && loading {
+                    dim_label(ui, th, &state.status_line);
+                    ui.add_space(sp.sm);
+                }
 
-        if let Some(err) = &state.error {
-            ui.add_space(sp.md);
-            ui.label(
-                RichText::new(err)
-                    .size(th.type_scale.caption)
-                    .color(p.destructive),
-            );
-        }
+                ui.horizontal(|ui| {
+                    ui.set_width(ui.available_width());
+                    let label = if loading {
+                        "Signing in…"
+                    } else {
+                        "Sign in with Bluesky"
+                    };
+                    let resp = primary_button(ui, th, label);
+                    if resp.clicked() && !loading {
+                        action = ConnectAction::BlueskyLogin;
+                    }
+                });
 
-        if !state.status_line.is_empty() && loading {
-            ui.add_space(sp.sm);
-            dim_label(ui, th, &state.status_line);
-        }
+                ui.add_space(sp.md);
+                dim_label(
+                    ui,
+                    th,
+                    "A browser window opens. After you approve, return here — or paste a freeq://auth link below.",
+                );
+                ui.add_space(sp.sm);
+                body(ui, th, "Paste callback (optional)");
+                ui.add_space(sp.xs);
+                let _ = text_field_singleline(ui, th, &mut state.form_callback);
+                ui.add_space(sp.sm);
+                if button(ui, th, "Apply pasted link").clicked() && !loading {
+                    action = ConnectAction::ApplyCallback;
+                }
 
-        ui.add_space(sp.lg);
-        ui.horizontal(|ui| {
-            ui.set_width(ui.available_width());
-            let label = if loading { "Connecting…" } else { "Connect" };
-            let resp = primary_button(ui, th, label);
-            if resp.clicked() && !loading {
-                action = ConnectAction::Connect;
+                if state.has_saved_session() {
+                    ui.add_space(sp.md);
+                    if button(ui, th, "Reconnect saved session").clicked() && !loading {
+                        action = ConnectAction::ReconnectSession;
+                    }
+                }
             }
-        });
+            ConnectMode::Guest => {
+                title_2(ui, th, "Guest connect");
+                ui.add_space(sp.sm);
+                body(
+                    ui,
+                    th,
+                    "Join freeq as a guest. Your nick is a display alias — no DID until you sign in with Bluesky.",
+                );
+                ui.add_space(sp.lg);
+
+                body(ui, th, "Nickname");
+                ui.add_space(sp.xs);
+                let _ = text_field_singleline(ui, th, &mut state.form_nick);
+                ui.add_space(sp.md);
+
+                body(ui, th, "Server");
+                ui.add_space(sp.xs);
+                let _ = text_field_singleline(ui, th, &mut state.form_server);
+                ui.add_space(sp.md);
+
+                checkbox(ui, th, &mut state.form_tls, "Use TLS (recommended)");
+                ui.add_space(sp.sm);
+                checkbox(
+                    ui,
+                    th,
+                    &mut state.form_websocket,
+                    "WebSocket transport (good on mobile)",
+                );
+
+                if let Some(err) = &state.error {
+                    ui.add_space(sp.md);
+                    ui.label(
+                        RichText::new(err)
+                            .size(th.type_scale.caption)
+                            .color(p.destructive),
+                    );
+                }
+
+                if !state.status_line.is_empty() && loading {
+                    ui.add_space(sp.sm);
+                    dim_label(ui, th, &state.status_line);
+                }
+
+                ui.add_space(sp.lg);
+                ui.horizontal(|ui| {
+                    ui.set_width(ui.available_width());
+                    let label = if loading { "Connecting…" } else { "Connect as guest" };
+                    let resp = primary_button(ui, th, label);
+                    if resp.clicked() && !loading {
+                        action = ConnectAction::ConnectGuest;
+                    }
+                });
+            }
+        }
+    });
+
+    ui.add_space(sp.md);
+
+    // Toggle Bluesky ↔ guest
+    ui.horizontal(|ui| {
+        match state.connect_mode {
+            ConnectMode::Bluesky => {
+                if button(ui, th, "Continue as guest").clicked() {
+                    state.connect_mode = ConnectMode::Guest;
+                    state.error = None;
+                }
+            }
+            ConnectMode::Guest => {
+                if button(ui, th, "Sign in with Bluesky instead").clicked() {
+                    state.connect_mode = ConnectMode::Bluesky;
+                    state.error = None;
+                }
+            }
+        }
     });
 
     ui.add_space(sp.md);
@@ -120,5 +208,8 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectAction {
     None,
-    Connect,
+    ConnectGuest,
+    BlueskyLogin,
+    ApplyCallback,
+    ReconnectSession,
 }

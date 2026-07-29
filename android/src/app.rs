@@ -4,6 +4,7 @@ use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Vec2};
 use freeq_sdk::event::Event;
 use vidya::{apply, body, button, dim_label, reserve_system_chrome, title, Mode, Theme};
 
+use crate::auth::{self, AuthTokens};
 use crate::net::{NetBridge, NetCmd, NetEvent};
 use crate::state::{
     AppState, ChatMessage, ConnectionState, Route, Tab,
@@ -58,11 +59,18 @@ impl SleekApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let theme = Theme::dark();
         apply(&cc.egui_ctx, &theme);
-        Self {
+        let state = AppState::new();
+        let net = NetBridge::start();
+        let mut app = Self {
             mode: Mode::Dark,
-            state: AppState::new(),
-            net: NetBridge::start(),
+            state,
+            net,
+        };
+        // freeq-android FreeqApp: auto-reconnect saved broker session on launch.
+        if app.state.has_saved_session() {
+            app.do_reconnect_session();
         }
+        app
     }
 
     fn theme(&self) -> Theme {
@@ -84,6 +92,7 @@ impl SleekApp {
         // Keep UI live while connecting / connected so events paint promptly.
         if self.state.connection == ConnectionState::Connecting
             || self.state.connection.is_live()
+            || self.state.awaiting_oauth
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -97,11 +106,37 @@ impl SleekApp {
             NetEvent::Failed(s) => {
                 self.state.error = Some(s.clone());
                 self.state.toast = Some(s);
+                self.state.awaiting_oauth = false;
                 if self.state.connection == ConnectionState::Connecting {
                     self.state.connection = ConnectionState::Disconnected;
                 }
             }
+            NetEvent::AuthReady(tokens) => {
+                self.state.awaiting_oauth = false;
+                self.apply_auth_tokens(tokens, /*connect=*/ true);
+            }
             NetEvent::Sdk(event) => self.handle_sdk_event(event),
+        }
+    }
+
+    /// Apply broker tokens to state (and optionally IRC-connect with the web-token).
+    fn apply_auth_tokens(&mut self, tokens: AuthTokens, connect: bool) {
+        self.state.broker_token = Some(tokens.broker_token.clone());
+        self.state.did = Some(tokens.did.clone());
+        if !tokens.handle.is_empty() {
+            self.state.handle = Some(tokens.handle.clone());
+            self.state.form_handle = tokens.handle.clone();
+        }
+        if !tokens.nick.is_empty() {
+            self.state.nick = tokens.nick.clone();
+            self.state.form_nick = tokens.nick.clone();
+        }
+        self.state.error = None;
+        self.state.form_callback.clear();
+        self.state.persist_session();
+
+        if connect {
+            self.do_connect_with_token(Some(tokens.token));
         }
     }
 
@@ -113,11 +148,23 @@ impl SleekApp {
                 self.state.error = None;
             }
             Event::Registered { nick } => {
+                // freeq-android: DID user who got Guest nick → stale web-token; refresh.
+                if self.state.did.is_some() && nick.starts_with("Guest") {
+                    self.state.toast =
+                        Some("Guest nick after auth — refreshing broker session…".into());
+                    self.net.send(NetCmd::Quit);
+                    self.state.connection = ConnectionState::Disconnected;
+                    if self.state.has_saved_session() {
+                        self.do_reconnect_session();
+                    }
+                    return;
+                }
                 self.state.connection = ConnectionState::Registered;
                 self.state.nick = nick.clone();
                 self.state.status_line = format!("Online as {nick}");
                 self.state.error = None;
                 self.state.toast = Some(format!("Connected as {nick}"));
+                self.state.persist_session();
                 // Seed status buffer
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(format!("Registered as {nick}")));
@@ -125,10 +172,12 @@ impl SleekApp {
             Event::Authenticated { did } => {
                 self.state.did = Some(did.clone());
                 self.state.toast = Some("Authenticated".into());
+                self.state.persist_session();
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(format!("DID {did}")));
             }
             Event::AuthFailed { reason } => {
+                self.state.error = Some(format!("Auth failed: {reason}"));
                 self.state.toast = Some(format!("Auth failed: {reason}"));
             }
             Event::Joined {
@@ -312,6 +361,11 @@ impl SleekApp {
     }
 
     fn do_connect(&mut self) {
+        // Guest path — no SASL web-token.
+        self.do_connect_with_token(None);
+    }
+
+    fn do_connect_with_token(&mut self, web_token: Option<String>) {
         let nick = self.state.form_nick.trim().to_string();
         let server = self.state.form_server.trim().to_string();
         if nick.is_empty() || server.is_empty() {
@@ -320,13 +374,13 @@ impl SleekApp {
         }
         self.state.error = None;
         self.state.connection = ConnectionState::Connecting;
+        self.state.awaiting_oauth = false;
         self.state.nick = nick.clone();
         self.state.server = server.clone();
         self.state.use_tls = self.state.form_tls;
         self.state.use_websocket = self.state.form_websocket;
         self.state.status_line = "Connecting…".into();
 
-        // Auto-join a friendly default if none yet.
         let auto_join = vec!["#freeq".into()];
 
         self.net.send(NetCmd::Connect {
@@ -335,6 +389,59 @@ impl SleekApp {
             tls: self.state.form_tls,
             websocket: self.state.form_websocket,
             auto_join,
+            web_token,
+        });
+    }
+
+    fn do_bluesky_login(&mut self) {
+        let handle = self
+            .state
+            .form_handle
+            .trim()
+            .trim_start_matches('@')
+            .to_string();
+        if handle.is_empty() {
+            self.state.error = Some("Enter your Bluesky handle".into());
+            return;
+        }
+        self.state.error = None;
+        self.state.awaiting_oauth = true;
+        self.state.connection = ConnectionState::Connecting;
+        self.state.status_line = "Waiting for browser sign-in…".into();
+        self.net.send(NetCmd::BlueskyLogin {
+            handle,
+            auth_broker: self.state.auth_broker.clone(),
+        });
+    }
+
+    fn do_apply_callback(&mut self) {
+        let raw = self.state.form_callback.trim().to_string();
+        if raw.is_empty() {
+            self.state.error = Some("Paste a freeq://auth?… link from the browser".into());
+            return;
+        }
+        match auth::parse_freeq_auth_url(&raw) {
+            Ok(tokens) => {
+                self.state.awaiting_oauth = false;
+                self.apply_auth_tokens(tokens, /*connect=*/ true);
+            }
+            Err(e) => {
+                self.state.error = Some(format!("Invalid callback: {e}"));
+            }
+        }
+    }
+
+    fn do_reconnect_session(&mut self) {
+        let Some(broker_token) = self.state.broker_token.clone() else {
+            self.state.error = Some("No saved session".into());
+            return;
+        };
+        self.state.error = None;
+        self.state.connection = ConnectionState::Connecting;
+        self.state.status_line = "Restoring session…".into();
+        self.net.send(NetCmd::ReconnectSession {
+            broker_token,
+            auth_broker: self.state.auth_broker.clone(),
         });
     }
 
@@ -478,8 +585,10 @@ impl eframe::App for SleekApp {
                                 format!("{} · {}", self.state.nick, self.state.server)
                             } else if self.state.connection == ConnectionState::Connecting {
                                 "Connecting…".into()
+                            } else if self.state.has_saved_session() {
+                                "freeq · saved session".into()
                             } else {
-                                "freeq · guest client".into()
+                                "freeq · sign in or guest".into()
                             };
                             dim_label(ui, &th, &blurb);
                         });
@@ -564,6 +673,10 @@ impl eframe::App for SleekApp {
                                                 self.net.send(NetCmd::Quit);
                                                 self.state.clear_session();
                                             }
+                                            SettingsAction::Logout => {
+                                                self.net.send(NetCmd::Quit);
+                                                self.state.logout();
+                                            }
                                             SettingsAction::ToggleTheme => {
                                                 let next = match self.mode {
                                                     Mode::Dark => Mode::Light,
@@ -592,7 +705,10 @@ impl eframe::App for SleekApp {
                             } else {
                                 match ui::connect_screen(ui, &th, &mut self.state) {
                                     ConnectAction::None => {}
-                                    ConnectAction::Connect => self.do_connect(),
+                                    ConnectAction::ConnectGuest => self.do_connect(),
+                                    ConnectAction::BlueskyLogin => self.do_bluesky_login(),
+                                    ConnectAction::ApplyCallback => self.do_apply_callback(),
+                                    ConnectAction::ReconnectSession => self.do_reconnect_session(),
                                 }
                             }
                         }
