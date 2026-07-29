@@ -34,6 +34,13 @@ nix build          # → ./result/bin/sleek
 nix run            # build + run desktop host
 ```
 
+If a **system** tool (Ubuntu `git`, etc.) dies with `GLIBC_ABI_DT_X86_64_PLT` inside
+`nix develop`, either re-enter the shell (flake ships nix `git`/`curl`) or:
+
+```bash
+env -u LD_LIBRARY_PATH git pull
+```
+
 Guest connect defaults:
 
 - Server: `irc.freeq.at:6697` (TLS)

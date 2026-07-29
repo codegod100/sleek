@@ -178,8 +178,16 @@
               cargo-apk
               pkg-config
               openssl
+              # Same glibc as LD_LIBRARY_PATH — system git/curl break with
+              # GLIBC_ABI_DT_X86_64_PLT when nix libs are injected.
+              git
+              openssh
+              curl
+              cacert
             ];
             buildInputs = libs;
+            # Needed for egui host (wayland/x11/gl). Prefer nix-provided CLI
+            # tools above so they link against this stack, not Ubuntu's.
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libs;
             OPENSSL_NO_VENDOR = "1";
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
@@ -194,6 +202,9 @@
               export CC_x86_64_linux_android="''${CC_x86_64_linux_android:-x86_64-linux-android28-clang}"
               export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$CC_x86_64_linux_android"
               export AR_x86_64_linux_android="''${AR_x86_64_linux_android:-llvm-ar}"
+              # SSL for nix-packaged curl/git against system certs if needed.
+              export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"
+              export NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-$SSL_CERT_FILE}"
               if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
                 echo "sleek — just host | just waydroid | just lib | nix build | ./scripts/enter"
               fi
