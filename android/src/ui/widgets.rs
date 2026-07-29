@@ -178,7 +178,7 @@ pub fn message_bubble(ui: &mut egui::Ui, th: &Theme, msg: &ChatMessage, own_nick
 
     egui::Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0, p.border_soft))
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {

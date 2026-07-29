@@ -220,7 +220,7 @@ async fn apply_cmd(
                         let _ = event_tx.send(NetEvent::Status(format!(
                             "TCP failed ({e}); retrying WebSocket…"
                         )));
-                        let mut cfg = ConnectConfig {
+                        let cfg = ConnectConfig {
                             server_addr: server.clone(),
                             nick: nick.clone(),
                             user: nick.clone(),

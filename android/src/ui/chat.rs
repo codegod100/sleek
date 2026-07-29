@@ -95,7 +95,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // Compose bar
     egui::Frame::new()
         .fill(p.headerbar_bg)
-        .stroke(egui::Stroke::new(1.0, p.border_soft))
+        .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.sm as i8, sp.sm as i8))
         .show(ui, |ui| {

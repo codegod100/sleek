@@ -1,6 +1,6 @@
 //! Chats tab — conversation list (freeq-android ChatsTab inspired).
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Layout};
 use vidya::{button, dim_label, primary_button, text_field_singleline, title, title_2, Theme};
 
 use crate::state::AppState;
@@ -115,7 +115,7 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
         ui.painter().hline(
             ui.min_rect().left() + sp.md..=ui.min_rect().left() + w - sp.md,
             y,
-            egui::Stroke::new(1.0, p.border_soft),
+            egui::Stroke::new(1.0_f32, p.border_soft),
         );
     }
 

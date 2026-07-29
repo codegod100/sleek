@@ -7,9 +7,9 @@ mod discover;
 mod settings;
 mod widgets;
 
-pub use chat::chat_screen;
-pub use chats::chats_tab;
-pub use connect::connect_screen;
-pub use discover::discover_tab;
-pub use settings::settings_tab;
+pub use chat::{chat_screen, ChatAction};
+pub use chats::{chats_tab, ChatsAction};
+pub use connect::{connect_screen, ConnectAction};
+pub use discover::{discover_tab, DiscoverAction};
+pub use settings::{settings_tab, SettingsAction};
 pub use widgets::{avatar_circle, card, conversation_row, message_bubble, section_label};

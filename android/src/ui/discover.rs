@@ -57,7 +57,7 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
 
         let resp = egui::Frame::new()
             .fill(p.card_bg)
-            .stroke(egui::Stroke::new(1.0, p.border_soft))
+            .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
             .corner_radius(sp.radius_md)
             .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.md as i8))
             .show(ui, |ui| {

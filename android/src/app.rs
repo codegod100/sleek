@@ -8,12 +8,9 @@ use crate::net::{NetBridge, NetCmd, NetEvent};
 use crate::state::{
     AppState, ChatMessage, ConnectionState, Route, Tab,
 };
-use crate::ui;
-use crate::ui::chat::ChatAction;
-use crate::ui::chats::ChatsAction;
-use crate::ui::connect::ConnectAction;
-use crate::ui::discover::DiscoverAction;
-use crate::ui::settings::SettingsAction;
+use crate::ui::{
+    self, ChatAction, ChatsAction, ConnectAction, DiscoverAction, SettingsAction,
+};
 
 /// Desktop / host entry.
 pub fn run_desktop() -> eframe::Result {
@@ -176,9 +173,10 @@ impl SleekApp {
                 tags,
                 dm_key,
             } => {
-                let is_action = text.starts_with('\u{1}ACTION ') && text.ends_with('\u{1}');
+                // CTCP ACTION: \x01ACTION …\x01 (must be str prefixes, not char literals).
+                let is_action = text.starts_with("\u{1}ACTION ") && text.ends_with('\u{1}');
                 let body = if is_action {
-                    text.trim_start_matches('\u{1}ACTION ')
+                    text.trim_start_matches("\u{1}ACTION ")
                         .trim_end_matches('\u{1}')
                         .to_string()
                 } else {
@@ -399,7 +397,7 @@ impl eframe::App for SleekApp {
                     egui::Frame::new()
                         .fill(p.accent.gamma_multiply(0.22))
                         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8))
-                        .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.55))),
+                        .stroke(Stroke::new(1.0_f32, p.accent.gamma_multiply(0.55))),
                 )
                 .show_separator_line(false)
                 .show(ctx, |ui| {
