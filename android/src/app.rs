@@ -140,12 +140,7 @@ impl SleekApp {
                 let buf = self.state.ensure_buffer(&channel);
                 if own {
                     buf.append(ChatMessage::system(format!("Joined {channel}")));
-                    // Open chat when we join
-                    if self.state.active_channel.is_none()
-                        || matches!(self.state.route, Route::Tabs)
-                    {
-                        // stay on tabs; user can open
-                    }
+                    // Stay on tabs; user opens the channel from the list.
                 } else {
                     buf.append(ChatMessage::system(format!("{nick} joined")));
                 }
