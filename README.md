@@ -92,9 +92,12 @@ SLEEK_NO_AUTO_NIX=1 gh codespace ssh
 ./scripts/enter just host
 ```
 
-First create installs the Nix feature into the container, then runs
-`codespace-bootstrap.sh` (flake warm can take a few minutes). Later SSH
-sessions re-enter the shell only.
+First create runs `codespace-bootstrap.sh` (nix install + flake warm can take
+a few minutes). Later SSH sessions re-enter the shell only.
+
+If you land on **Alpine** (“Welcome to Alpine!”) with no `nix`, the dev
+container failed and Codespaces is in recovery mode. Delete that codespace and
+create a new one from `main` after the Ubuntu+bootstrap config is pushed.
 
 ## Layout
 
