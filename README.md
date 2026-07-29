@@ -25,9 +25,13 @@ Layout and flows take cues from the freeq Android app: connect (guest), chats li
 ```bash
 nix develop        # or: direnv allow  (after .envrc)
 # or: ./scripts/enter
-just host          # desktop window
+just host          # desktop window (cargo run)
 just lib           # build android package as rlib (desktop target)
 just waydroid      # APK → install → launch on Waydroid
+
+# Or via the flake (builds desktop host into ./result):
+nix build          # → ./result/bin/sleek
+nix run            # build + run desktop host
 ```
 
 Guest connect defaults:

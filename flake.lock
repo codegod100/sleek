@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "freeq": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785144955,
+        "narHash": "sha256-7vpp+bIwvAamo3EIrLLmaUR39CMa0k+i4rgJ4P5McpE=",
+        "owner": "codegod100",
+        "repo": "freeq",
+        "rev": "1b5bd537ab49f27b40c5d2382e7a9b82d2040b3d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "codegod100",
+        "repo": "freeq",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1785318670,
@@ -18,8 +34,10 @@
     },
     "root": {
       "inputs": {
+        "freeq": "freeq",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "vidya": "vidya"
       }
     },
     "rust-overlay": {
@@ -40,6 +58,22 @@
         "owner": "oxalica",
         "repo": "rust-overlay",
         "type": "github"
+      }
+    },
+    "vidya": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785315128,
+        "narHash": "sha256-ejtalYjmRNDJnzcY6var56eFth8zrFN7mniFeTFYj+U=",
+        "ref": "refs/heads/main",
+        "rev": "e856cf248f5812fb634c9f0a2adc59b8d35f4663",
+        "revCount": 7,
+        "type": "git",
+        "url": "https://tangled.org/nandi.uk/vidya"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://tangled.org/nandi.uk/vidya"
       }
     }
   },
