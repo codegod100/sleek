@@ -24,8 +24,17 @@ log() {
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+SOCKET="/nix/var/nix/daemon-socket/socket"
+DAEMON_LOG="/tmp/nix-daemon.log"
+
 have_sudo() {
-  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null
+  command -v sudo >/dev/null 2>&1 || return 1
+  # Codespaces is passwordless; -n avoids hanging if not.
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  # Fallback (may prompt); still useful in interactive recovery.
+  sudo true 2>/dev/null
 }
 
 run_root() {
@@ -46,87 +55,178 @@ load_nix_env() {
   elif [[ -f "$HOME/.nix-profile/etc/profile.d/nix.sh" ]]; then
     . "$HOME/.nix-profile/etc/profile.d/nix.sh"
   fi
-  # Common install locations when PATH was not updated yet.
   export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
 }
 
-nix_works() {
+# True only when the store is usable (never trust `nix --version` alone).
+nix_store_ok() {
   command -v nix >/dev/null 2>&1 || return 1
-  # Prefer a real store ping; fall back to --version if offline.
-  if nix store ping --store daemon 2>/dev/null; then
+  if [[ -S "$SOCKET" ]]; then
+    export NIX_REMOTE=daemon
+    nix store ping --store daemon >/dev/null 2>&1 && return 0
+  fi
+  # Local store (single-user) — must not be the multi-user "big-lock denied" path.
+  if NIX_REMOTE= nix store ping --store local >/dev/null 2>&1; then
     return 0
   fi
-  if nix store ping 2>/dev/null; then
-    return 0
-  fi
-  # Last resort: version only (does not prove store access).
-  nix --version >/dev/null 2>&1
+  nix store ping >/dev/null 2>&1
 }
 
-# Multi-user installs need the daemon; Codespaces often finish install without
-# starting it (missing socket → later "big-lock: Permission denied").
+find_nix_daemon() {
+  local c
+  for c in \
+    nix-daemon \
+    /nix/var/nix/profiles/default/bin/nix-daemon \
+    /run/current-system/sw/bin/nix-daemon \
+    "$(command -v nix-daemon 2>/dev/null || true)"
+  do
+    if [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1; then
+      echo "$c"
+      return 0
+    fi
+    if [[ -n "$c" && -x "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  # Modern Determinate: `nix daemon` subcommand
+  if [[ -x /nix/var/nix/profiles/default/bin/nix ]]; then
+    echo "/nix/var/nix/profiles/default/bin/nix"
+    return 0
+  fi
+  if command -v nix >/dev/null 2>&1; then
+    command -v nix
+    return 0
+  fi
+  return 1
+}
+
+start_daemon_manual() {
+  local bin mode
+  bin="$(find_nix_daemon)" || {
+    log "no nix-daemon / nix binary found to start"
+    return 1
+  }
+
+  run_root mkdir -p /nix/var/nix/daemon-socket || true
+  run_root chmod 755 /nix/var/nix/daemon-socket || true
+
+  # Wipe a dead socket file (not a live socket).
+  if [[ -e "$SOCKET" && ! -S "$SOCKET" ]]; then
+    run_root rm -f "$SOCKET" || true
+  fi
+
+  if [[ -S "$SOCKET" ]]; then
+    return 0
+  fi
+
+  : >"$DAEMON_LOG"
+  run_root chmod 666 "$DAEMON_LOG" 2>/dev/null || true
+
+  if [[ "$(basename "$bin")" == "nix" ]]; then
+    mode="daemon"
+    log "starting: sudo $bin daemon  (log: $DAEMON_LOG)"
+    # Use setsid so the daemon survives this script.
+    run_root bash -c "setsid '$bin' daemon >>'$DAEMON_LOG' 2>&1 < /dev/null & echo \$!" \
+      || run_root bash -c "nohup '$bin' daemon >>'$DAEMON_LOG' 2>&1 & echo \$!" \
+      || true
+  else
+    mode="--daemon"
+    log "starting: sudo $bin --daemon  (log: $DAEMON_LOG)"
+    run_root bash -c "setsid '$bin' --daemon >>'$DAEMON_LOG' 2>&1 < /dev/null & echo \$!" \
+      || run_root bash -c "nohup '$bin' --daemon >>'$DAEMON_LOG' 2>&1 & echo \$!" \
+      || true
+  fi
+
+  local i
+  for i in $(seq 1 60); do
+    if [[ -S "$SOCKET" ]]; then
+      log "nix-daemon socket is up ($mode)"
+      export NIX_REMOTE=daemon
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  log "daemon did not create $SOCKET after 15s"
+  if [[ -s "$DAEMON_LOG" ]]; then
+    log "--- $DAEMON_LOG ---"
+    tail -n 40 "$DAEMON_LOG" >&2 || true
+  fi
+  return 1
+}
+
+# Multi-user installs need the daemon. Codespaces often install Nix but leave
+# the daemon dead → "big-lock: Permission denied".
 ensure_nix_daemon() {
-  local socket="/nix/var/nix/daemon-socket/socket"
-  local daemon_bin=""
-
-  if [[ -S "$socket" ]] && nix_works; then
+  if nix_store_ok; then
     return 0
   fi
 
-  # Single-user / init=none layouts have no daemon socket by design.
-  if [[ ! -d /nix/var/nix/daemon-socket ]] && [[ -d /nix/store ]] && nix_works; then
-    return 0
+  log "nix store not usable; repairing daemon…"
+  log "  socket exists: $([[ -S "$SOCKET" ]] && echo yes || echo no)"
+  log "  sudo: $(have_sudo && echo yes || echo no)"
+  log "  uid: $(id -u) ($(id -un))"
+
+  if ! have_sudo && [[ "$(id -u)" -ne 0 ]]; then
+    log "need passwordless sudo to start nix-daemon"
+    return 1
   fi
 
-  if command -v nix-daemon >/dev/null 2>&1; then
-    daemon_bin="$(command -v nix-daemon)"
-  elif [[ -x /nix/var/nix/profiles/default/bin/nix-daemon ]]; then
-    daemon_bin="/nix/var/nix/profiles/default/bin/nix-daemon"
-  elif [[ -x /nix/var/nix/profiles/default/bin/nix ]]; then
-    # Newer installs: `nix daemon`
-    daemon_bin="/nix/var/nix/profiles/default/bin/nix"
-  fi
-
-  log "ensuring nix-daemon is running…"
-
-  # systemd (when available and units exist)
-  if command -v systemctl >/dev/null 2>&1 && run_root true 2>/dev/null; then
+  # systemd first (when units exist and actually work)
+  if command -v systemctl >/dev/null 2>&1; then
     run_root systemctl daemon-reload 2>/dev/null || true
-    if run_root systemctl start nix-daemon.socket 2>/dev/null \
-      || run_root systemctl start nix-daemon.service 2>/dev/null; then
+    if run_root systemctl enable --now nix-daemon.socket 2>/dev/null \
+      || run_root systemctl start nix-daemon.socket 2>/dev/null \
+      || run_root systemctl start nix-daemon.service 2>/dev/null \
+      || run_root systemctl start nix-daemon 2>/dev/null; then
       sleep 1
-      if [[ -S "$socket" ]]; then
+      if [[ -S "$SOCKET" ]] && nix_store_ok; then
         log "nix-daemon started via systemd"
         return 0
       fi
+      log "systemd start returned ok but store still broken; trying manual daemon"
+    else
+      log "systemd units unavailable or failed; trying manual daemon"
     fi
   fi
 
-  # Manual daemon (Codespaces / containers without working user systemd)
-  if [[ -n "$daemon_bin" ]] && run_root true 2>/dev/null; then
-    run_root mkdir -p /nix/var/nix/daemon-socket 2>/dev/null || true
-    # Kill a stale non-listening process only if socket is missing.
-    if [[ ! -S "$socket" ]]; then
-      if [[ "$(basename "$daemon_bin")" == "nix" ]]; then
-        run_root bash -c "nohup '$daemon_bin' daemon >>/tmp/nix-daemon.log 2>&1 &" || true
-      else
-        run_root bash -c "nohup '$daemon_bin' --daemon >>/tmp/nix-daemon.log 2>&1 &" || true
-      fi
-      local i
-      for i in $(seq 1 40); do
-        if [[ -S "$socket" ]]; then
-          log "nix-daemon started (manual); logs: /tmp/nix-daemon.log"
-          return 0
-        fi
-        sleep 0.25
-      done
-      log "daemon socket still missing after start; see /tmp/nix-daemon.log"
-      if [[ -f /tmp/nix-daemon.log ]]; then
-        tail -n 20 /tmp/nix-daemon.log >&2 || true
-      fi
+  start_daemon_manual || true
+
+  export NIX_REMOTE=daemon
+  load_nix_env
+
+  if nix_store_ok; then
+    log "nix store OK after daemon repair"
+    return 0
+  fi
+
+  # Last resort for disposable Codespaces: make the local store writable so
+  # non-root can use single-user mode without a daemon.
+  if [[ ! -S "$SOCKET" ]] && have_sudo; then
+    log "falling back to single-user store ownership (Codespace repair)…"
+    # Drop build-users requirement if present so local builds work.
+    if [[ -f /etc/nix/nix.conf ]] && grep -q '^build-users-group' /etc/nix/nix.conf 2>/dev/null; then
+      run_root sed -i 's/^build-users-group.*/build-users-group =/' /etc/nix/nix.conf 2>/dev/null || true
     fi
-  else
-    log "cannot start nix-daemon (need passwordless sudo or root)"
+    run_root chown -R "$(id -u):$(id -g)" /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots 2>/dev/null || true
+    # Store paths stay root-owned; only need write on the DB for many ops.
+    # For full single-user, also own the store meta:
+    run_root chown -R "$(id -u):$(id -g)" /nix/store 2>/dev/null || true
+    unset NIX_REMOTE
+    export NIX_REMOTE=""
+    if NIX_REMOTE= nix store ping --store local >/dev/null 2>&1; then
+      log "single-user local store works (NIX_REMOTE unset)"
+      # Persist for interactive shells.
+      if ! grep -qF 'sleek-nix-single-user' "$HOME/.bashrc" 2>/dev/null; then
+        {
+          echo ""
+          echo "# sleek-nix-single-user"
+          echo "unset NIX_REMOTE"
+        } >>"$HOME/.bashrc"
+      fi
+      return 0
+    fi
   fi
 
   return 1
@@ -137,8 +237,6 @@ load_nix_env
 
 if ! command -v nix >/dev/null 2>&1; then
   log "installing nix (Determinate installer)…"
-  # Prefer multi-user + systemd when we can manage the daemon later.
-  # --no-confirm for non-interactive codespace create.
   curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
     | sh -s -- install --no-confirm
   load_nix_env
@@ -150,24 +248,23 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
-# Repair / start daemon (fixes half-installed multi-user on Codespaces).
-if ! nix_works; then
+# Always attempt repair when the store is broken (do not trust nix --version).
+if ! nix_store_ok; then
   ensure_nix_daemon || true
   load_nix_env
 fi
 
-if ! nix_works; then
-  # Second chance: start daemon again after profile load.
-  ensure_nix_daemon || true
-fi
-
-if ! nix store ping 2>/dev/null && ! nix store ping --store daemon 2>/dev/null; then
+if ! nix_store_ok; then
   echo "sleek-bootstrap: nix is installed but cannot talk to the store." >&2
-  echo "  Socket: /nix/var/nix/daemon-socket/socket" >&2
+  echo "  Socket: $SOCKET  (exists=$([[ -e $SOCKET ]] && echo yes || echo no), socket=$([[ -S $SOCKET ]] && echo yes || echo no))" >&2
   echo "  Try:    sudo systemctl start nix-daemon.socket" >&2
+  echo "  Or:     sudo \$(command -v nix) daemon &" >&2
   echo "  Or:     sudo /nix/var/nix/profiles/default/bin/nix-daemon --daemon &" >&2
-  echo "  Logs:   /tmp/nix-daemon.log" >&2
-  # Keep going so hooks still get installed; enter will show the same hint.
+  echo "  Logs:   $DAEMON_LOG" >&2
+  if [[ -s "$DAEMON_LOG" ]]; then
+    echo "  --- last log lines ---" >&2
+    tail -n 20 "$DAEMON_LOG" >&2 || true
+  fi
 fi
 
 # Persist PATH for non-login shells that don't source nix-daemon.sh.
@@ -192,13 +289,17 @@ fi
 
 # ── direnv ───────────────────────────────────────────────────────────
 if ! command -v direnv >/dev/null 2>&1; then
-  log "installing direnv via nix profile…"
-  if nix profile install nixpkgs#direnv 2>/dev/null \
-    || nix-env -iA nixpkgs.direnv 2>/dev/null; then
-    load_nix_env
-    log "direnv installed"
+  if nix_store_ok; then
+    log "installing direnv via nix profile…"
+    if nix profile install nixpkgs#direnv 2>/dev/null \
+      || nix-env -iA nixpkgs.direnv 2>/dev/null; then
+      load_nix_env
+      log "direnv installed"
+    else
+      log "could not install direnv (optional); login shim will use nix develop"
+    fi
   else
-    log "could not install direnv (optional); login shim will use nix develop"
+    log "skipping direnv install (nix store not ready)"
   fi
 fi
 
@@ -211,7 +312,6 @@ ensure_hook() {
   mkdir -p "$(dirname "$rc")"
   touch "$rc"
   if grep -qF "$HOOK_MARKER" "$rc" 2>/dev/null; then
-    # Refresh path if repo moved (rebuild codespace).
     if ! grep -qF "$ROOT/scripts/codespace-env.sh" "$rc" 2>/dev/null; then
       local tmp
       tmp="$(mktemp)"
@@ -231,7 +331,6 @@ ensure_hook() {
 
 ensure_hook "$HOME/.bashrc"
 
-# direnv bash hook (if present)
 if command -v direnv >/dev/null 2>&1; then
   DIRENV_HOOK='eval "$(direnv hook bash)"'
   if ! grep -qF 'direnv hook bash' "$HOME/.bashrc" 2>/dev/null; then
@@ -247,7 +346,7 @@ fi
 
 # ── warm the flake (best-effort; speeds first `enter`) ───────────────
 if [[ "${SLEEK_SKIP_FLAKE_WARM:-}" != "1" ]]; then
-  if nix store ping 2>/dev/null || nix store ping --store daemon 2>/dev/null; then
+  if nix_store_ok; then
     log "warming flake devShell (nix develop -c true)…"
     if nix develop "$ROOT" -c true; then
       log "flake ready"
@@ -255,13 +354,16 @@ if [[ "${SLEEK_SKIP_FLAKE_WARM:-}" != "1" ]]; then
       log "flake warm failed (network?). You can still run: ./scripts/enter"
     fi
   else
-    log "skipping flake warm — nix store unreachable (start nix-daemon first)"
+    log "skipping flake warm — nix store unreachable"
   fi
 fi
 
 log "done. SSH: gh codespace ssh  →  auto nix shell (or ./scripts/enter)"
 log "opt out: SLEEK_NO_AUTO_NIX=1"
-if ! nix store ping 2>/dev/null && ! nix store ping --store daemon 2>/dev/null; then
-  log "REPAIR: bash scripts/codespace-bootstrap.sh   # re-run to start daemon"
+if ! nix_store_ok; then
+  log "FAILED: store still broken. Paste output of:"
+  log "  ls -la /nix/var/nix/daemon-socket; cat $DAEMON_LOG; sudo systemctl status nix-daemon"
   exit 1
 fi
+
+log "nix store OK ($(nix --version 2>/dev/null | head -1))"

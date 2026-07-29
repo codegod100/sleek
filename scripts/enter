@@ -31,16 +31,32 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
-# Multi-user without daemon → clear error instead of big-lock noise.
+# Multi-user without daemon → try a quick repair, then clear error.
+if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    echo "sleek: starting nix-daemon…" >&2
+    if [[ -x /nix/var/nix/profiles/default/bin/nix-daemon ]]; then
+      sudo bash -c 'setsid /nix/var/nix/profiles/default/bin/nix-daemon --daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' || true
+    else
+      sudo bash -c 'setsid nix daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' || true
+    fi
+    for _ in $(seq 1 40); do
+      [[ -S /nix/var/nix/daemon-socket/socket ]] && break
+      sleep 0.25
+    done
+  fi
+fi
+
 if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
   echo "sleek: nix-daemon is not running (socket missing)." >&2
   echo "  Fix:  bash scripts/codespace-bootstrap.sh" >&2
+  echo "  Or:   sudo nix daemon &" >&2
   echo "  Or:   sudo systemctl start nix-daemon.socket" >&2
-  echo "  Or:   sudo /nix/var/nix/profiles/default/bin/nix-daemon --daemon &" >&2
   exit 1
 fi
 
 export SLEEK_NIX_SHELL=1
+export NIX_REMOTE="${NIX_REMOTE:-daemon}"
 
 if [[ $# -gt 0 ]]; then
   exec nix develop "$ROOT" --command "$@"

@@ -89,17 +89,35 @@ if [[ -n "${SLEEK_NO_AUTO_NIX:-}" ]]; then
   return 0 2>/dev/null || true
 fi
 
-# Multi-user install without daemon: do not exec into a failing nix develop.
+# Multi-user install without daemon: try a quick start, else hint (do not hang login).
+if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    if [[ -x /nix/var/nix/profiles/default/bin/nix-daemon ]]; then
+      sudo bash -c 'setsid /nix/var/nix/profiles/default/bin/nix-daemon --daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' 2>/dev/null || true
+    else
+      sudo bash -c 'setsid nix daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' 2>/dev/null || true
+    fi
+    _i=0
+    while [[ $_i -lt 20 && ! -S /nix/var/nix/daemon-socket/socket ]]; do
+      sleep 0.25
+      _i=$((_i + 1))
+    done
+    unset _i
+  fi
+fi
+
 if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
   if [[ -z "${SLEEK_NIX_HINT:-}" ]]; then
     export SLEEK_NIX_HINT=1
     echo "sleek: nix-daemon not running — run: bash ${_sleek_root}/scripts/codespace-bootstrap.sh" >&2
+    echo "  or:  sudo nix daemon &" >&2
   fi
   unset _sleek_root _sleek_cwd
   return 0 2>/dev/null || true
 fi
 
 export SLEEK_NIX_SHELL=1
+export NIX_REMOTE="${NIX_REMOTE:-daemon}"
 cd "${_sleek_root}" || true
 unset _sleek_cwd
 # Replace this interactive shell with the flake shell (args: none → user shell).
