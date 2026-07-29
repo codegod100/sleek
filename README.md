@@ -55,19 +55,20 @@ On Android, the client prefers WebSocket (`wss://host/irc`) when the host looks 
 
 ## Codespaces / `gh codespace ssh`
 
-Codespaces uses a **nix-codespace** setup: Ubuntu + the official [Nix
-devcontainer feature](https://github.com/devcontainers/features/tree/main/src/nix),
-with **flakes and `nix-command` always enabled** (no
+Codespaces uses a **nix-codespace** setup: Ubuntu 24.04 base, Nix installed
+by bootstrap (not the official Nix *feature* — that feature’s `/nix` volume
+mount often fails Codespace create and drops you into Alpine recovery), with
+**flakes and `nix-command` always enabled** (no
 `--extra-experimental-features` flags).
 
 | Piece | Role |
 |-------|------|
-| `.devcontainer/devcontainer.json` | base image + Nix feature (`experimental-features = nix-command flakes`) + `NIX_CONFIG` |
+| `.devcontainer/devcontainer.json` | Ubuntu base + `NIX_CONFIG` + postCreate bootstrap |
 | `scripts/ensure-nix-flakes.sh` | writes user/system `nix.conf` + `NIX_CONFIG` so flakes stay on |
 | `.envrc` | direnv `use flake` |
 | `scripts/enter` | manual / scripted re-exec into `nix develop` |
 | `scripts/codespace-env.sh` | sourced from `~/.bashrc` on interactive login |
-| `scripts/codespace-bootstrap.sh` | ensures flakes config, direnv, bashrc hook, warms flake |
+| `scripts/codespace-bootstrap.sh` | installs nix (Determinate), flakes config, direnv, bashrc hook, warms flake |
 
 Bare commands work after bootstrap:
 
