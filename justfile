@@ -16,8 +16,13 @@ enter *args:
 bootstrap:
     bash scripts/codespace-bootstrap.sh
 
-# Desktop window
+# Desktop window (egui needs SLEEK_LD_LIBRARY_PATH from nix develop — not ambient)
 host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "${SLEEK_LD_LIBRARY_PATH:-}" ]]; then
+      export LD_LIBRARY_PATH="${SLEEK_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     cargo run --manifest-path host/Cargo.toml {{args}}
 
 # Check / build the Android package as a library (desktop target)

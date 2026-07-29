@@ -34,11 +34,16 @@ nix build          # → ./result/bin/sleek
 nix run            # build + run desktop host
 ```
 
-If a **system** tool (Ubuntu `git`, etc.) dies with `GLIBC_ABI_DT_X86_64_PLT` inside
-`nix develop`, either re-enter the shell (flake ships nix `git`/`curl`) or:
+The dev shell does **not** set ambient `LD_LIBRARY_PATH` (that broke Ubuntu
+`git pull` on Codespaces via nix openssl/glibc). Runtime libs for the desktop
+host live in `SLEEK_LD_LIBRARY_PATH` and are applied by `just host` only.
+
+If you still see `GLIBC_ABI_DT_X86_64_PLT` on an old session:
 
 ```bash
-env -u LD_LIBRARY_PATH git pull
+unset LD_LIBRARY_PATH
+./scripts/enter          # re-enter flake shell (nix git/curl on PATH)
+git pull
 ```
 
 Guest connect defaults:

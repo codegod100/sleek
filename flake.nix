@@ -160,6 +160,17 @@
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          # Runtime libs for the egui host only — do NOT export as ambient
+          # LD_LIBRARY_PATH. On Codespaces/Ubuntu, that makes system
+          # git-remote-https load nix openssl/glibc and die with
+          # GLIBC_ABI_DT_X86_64_PLT.
+          sleekLibPath = pkgs.lib.makeLibraryPath libs;
+          cliTools = with pkgs; [
+            git
+            openssh
+            curl
+            cacert
+          ];
           rust = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
@@ -171,38 +182,43 @@
         in
         {
           default = pkgs.mkShell {
-            packages = with pkgs; [
+            packages = [
               rust
-              just
-              android-tools
-              cargo-apk
-              pkg-config
-              openssl
-              # Same glibc as LD_LIBRARY_PATH — system git/curl break with
-              # GLIBC_ABI_DT_X86_64_PLT when nix libs are injected.
-              git
-              openssh
-              curl
-              cacert
-            ];
+              pkgs.just
+              pkgs.android-tools
+              pkgs.cargo-apk
+              pkgs.pkg-config
+              pkgs.openssl
+            ]
+            ++ cliTools;
             buildInputs = libs;
-            # Needed for egui host (wayland/x11/gl). Prefer nix-provided CLI
-            # tools above so they link against this stack, not Ubuntu's.
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libs;
             OPENSSL_NO_VENDOR = "1";
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+            # Available to justfile / scripts; not injected into every process.
+            SLEEK_LD_LIBRARY_PATH = sleekLibPath;
             shellHook = ''
               # Marker for scripts/enter + codespace-env.sh (avoid nested re-exec).
               export SLEEK_NIX_SHELL=1
+              export SLEEK_LD_LIBRARY_PATH="${sleekLibPath}"
+              # Never leave a stale ambient LD_LIBRARY_PATH from an older shell
+              # or direnv that pointed at nix openssl (breaks system git).
+              if [[ -n "''${LD_LIBRARY_PATH:-}" ]]; then
+                case ":''${LD_LIBRARY_PATH}:" in
+                  *"/nix/store/"*) unset LD_LIBRARY_PATH ;;
+                esac
+              fi
+              # After NDK / cargo PATH prepends, keep nix git/curl/ssh first so
+              # Codespaces /usr/local/git is never used with mixed loaders.
               export PATH="$HOME/.cargo/bin:$PATH"
               export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-$HOME/.local/share/android-ndk-r29}"
               export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
               export ANDROID_HOME="''${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
               export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$ANDROID_HOME/platform-tools:$PATH"
+              export PATH="${pkgs.lib.makeBinPath cliTools}:$PATH"
+              unset GIT_EXEC_PATH
               export CC_x86_64_linux_android="''${CC_x86_64_linux_android:-x86_64-linux-android28-clang}"
               export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$CC_x86_64_linux_android"
               export AR_x86_64_linux_android="''${AR_x86_64_linux_android:-llvm-ar}"
-              # SSL for nix-packaged curl/git against system certs if needed.
               export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"
               export NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-$SSL_CERT_FILE}"
               if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
