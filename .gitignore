@@ -1,0 +1,6 @@
+/target/
+**/target/
+*.apk
+.direnv/
+result
+result-*
