@@ -23,7 +23,8 @@ Layout and flows take cues from the freeq Android app: connect (guest), chats li
 ## Run
 
 ```bash
-nix develop
+nix develop        # or: direnv allow  (after .envrc)
+# or: ./scripts/enter
 just host          # desktop window
 just lib           # build android package as rlib (desktop target)
 just waydroid      # APK → install → launch on Waydroid
@@ -36,13 +37,42 @@ Guest connect defaults:
 
 On Android, the client prefers WebSocket (`wss://host/irc`) when the host looks like a freeq public server; desktop uses TLS TCP by default and can fall back to WebSocket via the connect form.
 
+## Codespaces / `gh codespace ssh`
+
+The repo ships a small nix **shim** so an SSH session lands in the flake shell:
+
+| Piece | Role |
+|-------|------|
+| `.envrc` | direnv `use flake` |
+| `scripts/enter` | manual / scripted re-exec into `nix develop` |
+| `scripts/codespace-env.sh` | sourced from `~/.bashrc` on interactive login |
+| `scripts/codespace-bootstrap.sh` | installs nix + direnv, hooks bashrc, warms flake |
+| `.devcontainer/devcontainer.json` | Codespace image + `postCreate` / `postStart` bootstrap |
+
+```bash
+# Create / open a codespace on this repo, then:
+gh codespace ssh
+# → bashrc sources codespace-env.sh → nix develop (rustc, just, …)
+
+# Opt out for one session:
+SLEEK_NO_AUTO_NIX=1 gh codespace ssh
+
+# Force enter without login hook:
+./scripts/enter
+./scripts/enter just host
+```
+
+First create runs `codespace-bootstrap.sh` (nix install can take a few minutes). Later SSH sessions reuse the profile and only re-enter the shell.
+
 ## Layout
 
 ```
 sleek/
-  android/     # shared lib: UI + freeq-sdk bridge (cdylib for APK)
-  host/        # desktop binary
-  scripts/     # Waydroid install/launch
+  android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
+  host/             # desktop binary
+  scripts/          # enter, codespace shim, Waydroid
+  .devcontainer/    # GitHub Codespaces
+  .envrc            # direnv → flake
   justfile
   flake.nix
 ```

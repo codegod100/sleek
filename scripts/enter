@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Shim: re-exec into the sleek flake shell if we are not already in it.
+#
+# Usage:
+#   ./scripts/enter              # interactive shell
+#   ./scripts/enter just host    # one-shot command
+#   source scripts/codespace-env.sh   # auto path used by login hook
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# Already inside a nix develop / nix-shell for this project?
+if [[ -n "${IN_NIX_SHELL:-}" || -n "${SLEEK_NIX_SHELL:-}" ]]; then
+  if [[ $# -gt 0 ]]; then
+    exec "$@"
+  fi
+  exec "${SHELL:-bash}" -l
+fi
+
+if ! command -v nix >/dev/null 2>&1; then
+  echo "sleek: nix not found. Run: bash scripts/codespace-bootstrap.sh" >&2
+  exit 1
+fi
+
+export SLEEK_NIX_SHELL=1
+
+if [[ $# -gt 0 ]]; then
+  exec nix develop "$ROOT" --command "$@"
+fi
+
+# Interactive: prefer the user's login shell inside the flake.
+exec nix develop "$ROOT" --command "${SHELL:-bash}"

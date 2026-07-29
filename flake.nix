@@ -72,6 +72,8 @@
             OPENSSL_NO_VENDOR = "1";
             PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
             shellHook = ''
+              # Marker for scripts/enter + codespace-env.sh (avoid nested re-exec).
+              export SLEEK_NIX_SHELL=1
               export PATH="$HOME/.cargo/bin:$PATH"
               export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-$HOME/.local/share/android-ndk-r29}"
               export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
@@ -80,7 +82,9 @@
               export CC_x86_64_linux_android="''${CC_x86_64_linux_android:-x86_64-linux-android28-clang}"
               export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$CC_x86_64_linux_android"
               export AR_x86_64_linux_android="''${AR_x86_64_linux_android:-llvm-ar}"
-              echo "sleek — just host | just waydroid | just lib"
+              if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
+                echo "sleek — just host | just waydroid | just lib | ./scripts/enter"
+              fi
             '';
           };
         }

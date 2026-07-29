@@ -1,5 +1,5 @@
 # Sleek — mobile freeq client (Vidya + freeq-sdk)
-#   nix develop
+#   nix develop   |  ./scripts/enter
 #   just host
 #   just waydroid
 
@@ -7,6 +7,14 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 default:
     @just --list
+
+# Re-exec into flake shell (or run a command inside it)
+enter *args:
+    ./scripts/enter {{args}}
+
+# Codespace / VM: install nix, direnv, bashrc hook, warm flake
+bootstrap:
+    bash scripts/codespace-bootstrap.sh
 
 # Desktop window
 host *args:

@@ -1,0 +1,34 @@
+{
+  "name": "sleek",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": false,
+      "upgradePackages": false
+    }
+  },
+  "forwardPorts": [],
+  "postCreateCommand": "bash scripts/codespace-bootstrap.sh",
+  "postStartCommand": "bash scripts/codespace-bootstrap.sh --quiet",
+  "remoteEnv": {
+    "SLEEK_CODESPACE": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.cwd": "${containerWorkspaceFolder}"
+      },
+      "extensions": [
+        "jnoortheen.nix-ide",
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  },
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "4gb",
+    "storage": "32gb"
+  }
+}
