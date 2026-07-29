@@ -116,8 +116,23 @@ if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/soc
   return 0 2>/dev/null || true
 fi
 
+# Daemon if socket is up; else single-user (must own /nix). Never leave NIX_REMOTE
+# pointing at a dead multi-user layout — that yields gc.lock Permission denied.
+if [[ -S /nix/var/nix/daemon-socket/socket ]]; then
+  export NIX_REMOTE=daemon
+else
+  unset NIX_REMOTE || true
+  if [[ ! -w /nix/var/nix ]]; then
+    if [[ -z "${SLEEK_NIX_HINT:-}" ]]; then
+      export SLEEK_NIX_HINT=1
+      echo "sleek: nix store not usable — run: bash ${_sleek_root}/scripts/codespace-bootstrap.sh" >&2
+    fi
+    unset _sleek_root _sleek_cwd
+    return 0 2>/dev/null || true
+  fi
+fi
+
 export SLEEK_NIX_SHELL=1
-export NIX_REMOTE="${NIX_REMOTE:-daemon}"
 cd "${_sleek_root}" || true
 unset _sleek_cwd
 # Replace this interactive shell with the flake shell (args: none → user shell).

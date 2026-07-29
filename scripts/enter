@@ -4,11 +4,11 @@
 # Usage:
 #   ./scripts/enter              # interactive shell
 #   ./scripts/enter just host    # one-shot command
-#   source scripts/codespace-env.sh   # auto path used by login hook
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+SOCKET="/nix/var/nix/daemon-socket/socket"
 
 # shellcheck disable=SC1091
 if [[ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]]; then
@@ -31,36 +31,53 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
-# Multi-user without daemon → try a quick repair, then clear error.
-if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+# Prefer daemon when present; otherwise single-user (must own /nix/var/nix).
+if [[ -S "$SOCKET" ]]; then
+  export NIX_REMOTE=daemon
+elif [[ -w /nix/var/nix ]]; then
+  unset NIX_REMOTE || true
+else
+  # Try quick daemon start, then single-user chown.
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    echo "sleek: starting nix-daemon…" >&2
+    echo "sleek: repairing nix access…" >&2
     if [[ -x /nix/var/nix/profiles/default/bin/nix-daemon ]]; then
       sudo bash -c 'setsid /nix/var/nix/profiles/default/bin/nix-daemon --daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' || true
     else
       sudo bash -c 'setsid nix daemon >>/tmp/nix-daemon.log 2>&1 < /dev/null &' || true
     fi
-    for _ in $(seq 1 40); do
-      [[ -S /nix/var/nix/daemon-socket/socket ]] && break
+    for _ in $(seq 1 20); do
+      [[ -S "$SOCKET" ]] && break
       sleep 0.25
     done
+    if [[ -S "$SOCKET" ]]; then
+      export NIX_REMOTE=daemon
+    else
+      # Full single-user — fixes gc.lock Permission denied on Codespaces.
+      sudo chown -R "$(id -u):$(id -g)" /nix 2>/dev/null || true
+      if [[ -f /etc/nix/nix.conf ]]; then
+        sudo sed -i 's/^build-users-group.*/build-users-group =/' /etc/nix/nix.conf 2>/dev/null || true
+      fi
+      unset NIX_REMOTE || true
+    fi
   fi
 fi
 
-if [[ -d /nix/var/nix/daemon-socket ]] && [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
-  echo "sleek: nix-daemon is not running (socket missing)." >&2
+if [[ -S "$SOCKET" ]]; then
+  export NIX_REMOTE=daemon
+elif [[ ! -w /nix/var/nix ]]; then
+  echo "sleek: cannot use nix store (not daemon, /nix/var/nix not writable)." >&2
   echo "  Fix:  bash scripts/codespace-bootstrap.sh" >&2
-  echo "  Or:   sudo nix daemon &" >&2
-  echo "  Or:   sudo systemctl start nix-daemon.socket" >&2
+  echo "  Or:   sudo chown -R \"\$(id -u):\$(id -g)\" /nix && unset NIX_REMOTE" >&2
+  echo "  Or:   sudo nix daemon & && export NIX_REMOTE=daemon" >&2
   exit 1
+else
+  unset NIX_REMOTE || true
 fi
 
 export SLEEK_NIX_SHELL=1
-export NIX_REMOTE="${NIX_REMOTE:-daemon}"
 
 if [[ $# -gt 0 ]]; then
   exec nix develop "$ROOT" --command "$@"
 fi
 
-# Interactive: prefer the user's login shell inside the flake.
 exec nix develop "$ROOT" --command "${SHELL:-bash}"
