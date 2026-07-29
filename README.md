@@ -55,15 +55,28 @@ On Android, the client prefers WebSocket (`wss://host/irc`) when the host looks 
 
 ## Codespaces / `gh codespace ssh`
 
-The repo ships a small nix **shim** so an SSH session lands in the flake shell:
+Codespaces uses a **nix-codespace** setup: Ubuntu + the official [Nix
+devcontainer feature](https://github.com/devcontainers/features/tree/main/src/nix),
+with **flakes and `nix-command` always enabled** (no
+`--extra-experimental-features` flags).
 
 | Piece | Role |
 |-------|------|
+| `.devcontainer/devcontainer.json` | base image + Nix feature (`experimental-features = nix-command flakes`) + `NIX_CONFIG` |
+| `scripts/ensure-nix-flakes.sh` | writes user/system `nix.conf` + `NIX_CONFIG` so flakes stay on |
 | `.envrc` | direnv `use flake` |
 | `scripts/enter` | manual / scripted re-exec into `nix develop` |
 | `scripts/codespace-env.sh` | sourced from `~/.bashrc` on interactive login |
-| `scripts/codespace-bootstrap.sh` | installs nix + direnv, hooks bashrc, warms flake |
-| `.devcontainer/devcontainer.json` | Codespace image + `postCreate` / `postStart` bootstrap |
+| `scripts/codespace-bootstrap.sh` | ensures flakes config, direnv, bashrc hook, warms flake |
+
+Bare commands work after bootstrap:
+
+```bash
+nix develop          # no flags
+nix build
+nix run
+just host
+```
 
 ```bash
 # Create / open a codespace on this repo, then:
@@ -78,7 +91,9 @@ SLEEK_NO_AUTO_NIX=1 gh codespace ssh
 ./scripts/enter just host
 ```
 
-First create runs `codespace-bootstrap.sh` (nix install can take a few minutes). Later SSH sessions reuse the profile and only re-enter the shell.
+First create installs the Nix feature into the container, then runs
+`codespace-bootstrap.sh` (flake warm can take a few minutes). Later SSH
+sessions re-enter the shell only.
 
 ## Layout
 
@@ -86,8 +101,8 @@ First create runs `codespace-bootstrap.sh` (nix install can take a few minutes).
 sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
-  scripts/          # enter, codespace shim, Waydroid
-  .devcontainer/    # GitHub Codespaces
+  scripts/          # enter, codespace shim, flakes ensure, Waydroid
+  .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake
   justfile
   flake.nix

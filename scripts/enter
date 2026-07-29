@@ -18,6 +18,10 @@ elif [[ -f "$HOME/.nix-profile/etc/profile.d/nix.sh" ]]; then
 fi
 export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
 
+# shellcheck disable=SC1091
+. "$ROOT/scripts/ensure-nix-flakes.sh"
+ensure_nix_flakes
+
 # Already inside a nix develop / nix-shell for this project?
 if [[ -n "${IN_NIX_SHELL:-}" || -n "${SLEEK_NIX_SHELL:-}" ]]; then
   if [[ $# -gt 0 ]]; then

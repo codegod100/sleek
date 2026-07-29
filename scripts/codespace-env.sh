@@ -61,6 +61,13 @@ elif [[ -f "${HOME}/.nix-profile/etc/profile.d/nix.sh" ]]; then
 fi
 export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
 
+# Flakes without flags (user conf + NIX_CONFIG; no sudo required at login).
+if [[ -f "${_sleek_root}/scripts/ensure-nix-flakes.sh" ]]; then
+  # shellcheck disable=SC1091
+  . "${_sleek_root}/scripts/ensure-nix-flakes.sh"
+  ensure_nix_flakes
+fi
+
 # Prefer direnv when available (non-exec path; keeps nested shells happy).
 if command -v direnv >/dev/null 2>&1 && [[ -f "${_sleek_root}/.envrc" ]]; then
   # direnv hook should already be in bashrc; force a reload if needed.

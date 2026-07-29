@@ -185,16 +185,17 @@ convert_to_single_user() {
   run_root rm -f "$SOCKET" 2>/dev/null || true
 
   # Empty build-users-group → builds as calling user (single-user style).
-  if [[ -f /etc/nix/nix.conf ]]; then
-    if grep -qE '^build-users-group' /etc/nix/nix.conf 2>/dev/null; then
+  if [[ -f /etc/nix/nix.conf ]] || [[ -d /etc/nix ]]; then
+    run_root mkdir -p /etc/nix || true
+    if [[ -f /etc/nix/nix.conf ]] && grep -qE '^build-users-group' /etc/nix/nix.conf 2>/dev/null; then
       run_root sed -i 's/^build-users-group.*/build-users-group =/' /etc/nix/nix.conf || true
     else
       echo 'build-users-group =' | run_root tee -a /etc/nix/nix.conf >/dev/null || true
     fi
-    if ! grep -q 'experimental-features' /etc/nix/nix.conf 2>/dev/null; then
-      echo 'experimental-features = nix-command flakes' | run_root tee -a /etc/nix/nix.conf >/dev/null || true
-    fi
   fi
+  # shellcheck disable=SC1091
+  . "$ROOT/scripts/ensure-nix-flakes.sh"
+  ensure_nix_flakes
 
   # Full ownership — partial chown left gc.lock unwritable.
   run_root chown -R "$(id -u):$(id -g)" /nix
@@ -265,16 +266,24 @@ ensure_nix_daemon_or_single_user() {
 install_bashrc_nix_env() {
   local block
   block=$(
-    cat <<'EOF'
+    cat <<EOF
 # sleek-nix-env
 if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
   . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 fi
-export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
+export PATH="/nix/var/nix/profiles/default/bin:\${HOME}/.nix-profile/bin:\${PATH}"
 if [ -S /nix/var/nix/daemon-socket/socket ]; then
   export NIX_REMOTE=daemon
 else
   unset NIX_REMOTE
+fi
+# flakes / nix-command without CLI flags
+export NIX_CONFIG="experimental-features = nix-command flakes
+extra-experimental-features = nix-command flakes
+accept-flake-config = true"
+if [ -f "$ROOT/scripts/ensure-nix-flakes.sh" ]; then
+  . "$ROOT/scripts/ensure-nix-flakes.sh"
+  ensure_nix_flakes 2>/dev/null || true
 fi
 EOF
   )
@@ -333,11 +342,11 @@ fi
 
 install_bashrc_nix_env
 
-# Flakes + new CLI in user conf
-mkdir -p "$HOME/.config/nix"
-if [[ ! -f "$HOME/.config/nix/nix.conf" ]] || ! grep -q 'experimental-features' "$HOME/.config/nix/nix.conf" 2>/dev/null; then
-  echo "experimental-features = nix-command flakes" >>"$HOME/.config/nix/nix.conf"
-fi
+# Flakes + nix-command always on (no --extra-experimental-features flags needed).
+# shellcheck disable=SC1091
+. "$ROOT/scripts/ensure-nix-flakes.sh"
+ensure_nix_flakes
+log "nix flakes enabled (user + system conf + NIX_CONFIG)"
 
 # Apply mode for this process
 if [[ -S "$SOCKET" ]] && nix store ping --store daemon >/dev/null 2>&1; then

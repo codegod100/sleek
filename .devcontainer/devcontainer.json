@@ -1,24 +1,35 @@
 {
-  "name": "sleek",
+  "name": "sleek (nix-codespace)",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "remoteUser": "vscode",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": false,
       "upgradePackages": false
+    },
+    "ghcr.io/devcontainers/features/nix:1": {
+      "version": "latest",
+      "multiUser": true,
+      "packages": "direnv",
+      "extraNixConfig": "experimental-features = nix-command flakes,extra-experimental-features = nix-command flakes,accept-flake-config = true,sandbox = false"
     }
   },
   "forwardPorts": [],
   "postCreateCommand": "bash scripts/codespace-bootstrap.sh",
   "postStartCommand": "bash scripts/codespace-bootstrap.sh --quiet",
+  "containerEnv": {
+    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true"
+  },
   "remoteEnv": {
-    "SLEEK_CODESPACE": "1"
+    "SLEEK_CODESPACE": "1",
+    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true"
   },
   "customizations": {
     "vscode": {
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
-        "terminal.integrated.cwd": "${containerWorkspaceFolder}"
+        "terminal.integrated.cwd": "${containerWorkspaceFolder}",
+        "nix.enableLanguageServer": true
       },
       "extensions": [
         "jnoortheen.nix-ide",
