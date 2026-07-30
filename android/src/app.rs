@@ -29,11 +29,27 @@ pub fn run_desktop() -> eframe::Result {
         )
         .try_init();
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+    // Phone-shaped default for local desktop; on Codespaces / noVNC fill the
+    // X display so the app matches the browser viewport (not a 390×780 island).
+    // Override: SLEEK_FIT_VIEWPORT=1 always maximize; =0 force phone size.
+    let fit_viewport = match std::env::var("SLEEK_FIT_VIEWPORT").as_deref() {
+        Ok("1") | Ok("true") | Ok("yes") => true,
+        Ok("0") | Ok("false") | Ok("no") => false,
+        _ => std::env::var_os("SLEEK_CODESPACE").is_some(),
+    };
+    let viewport = if fit_viewport {
+        egui::ViewportBuilder::default()
+            .with_title("Sleek")
+            .with_maximized(true)
+            .with_min_inner_size([320.0, 400.0])
+    } else {
+        egui::ViewportBuilder::default()
+            .with_title("Sleek")
             .with_inner_size([390.0, 780.0])
             .with_min_inner_size([320.0, 560.0])
-            .with_title("Sleek"),
+    };
+    let options = eframe::NativeOptions {
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
