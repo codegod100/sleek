@@ -30,14 +30,14 @@
   "containerEnv": {
     "DISPLAY": ":1",
     "LIBGL_ALWAYS_SOFTWARE": "1",
-    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
+    "NIX_CONFIG": "experimental-features = nix-command flakes",
     "CACHIX_CACHE": "codegod100"
   },
   "remoteEnv": {
     "SLEEK_CODESPACE": "1",
     "DISPLAY": ":1",
     "LIBGL_ALWAYS_SOFTWARE": "1",
-    "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
+    "NIX_CONFIG": "experimental-features = nix-command flakes",
     "CACHIX_CACHE": "codegod100"
   },
   "customizations": {
