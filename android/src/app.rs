@@ -32,7 +32,8 @@ fn fit_viewport_enabled() -> bool {
 /// Best-effort screen size in points (Codespace VNC / X11 when maximize is ignored).
 fn detect_screen_size() -> Option<egui::Vec2> {
     if let Ok(s) = std::env::var("SLEEK_VIEWPORT") {
-        let mut parts = s.to_lowercase().split('x');
+        let lower = s.to_lowercase();
+        let mut parts = lower.split('x');
         let w: f32 = parts.next()?.trim().parse().ok()?;
         let h: f32 = parts.next()?.trim().parse().ok()?;
         if w > 0.0 && h > 0.0 {
