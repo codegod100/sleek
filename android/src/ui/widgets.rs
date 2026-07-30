@@ -1,11 +1,14 @@
 //! Shared Vidya-styled widgets.
 
-use eframe::egui::{self, Align, Color32, CursorIcon, Layout, RichText, Sense, Stroke, Vec2};
-use vidya::{dim_label, title_2, Theme};
+use eframe::egui::{
+    self, Align, Color32, CursorIcon, Layout, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
+};
+use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
 
 use crate::preview::{self, Embed};
 use crate::state::{
-    Buffer, ChatMessage, ImageState, LinkMeta, LinkState, MediaCache, QUICK_REACT_EMOJIS,
+    display_emoji, emoji_matches_search, Buffer, ChatMessage, EmojiPickerGroup, ImageState,
+    LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT, QUICK_REACT_EMOJIS,
 };
 
 /// Interaction from a chat message bubble.
@@ -15,9 +18,9 @@ pub enum MessageBubbleAction {
     None,
     /// Toggle (add/remove) our reaction on this message.
     ToggleReaction { msgid: String, emoji: String },
-    /// Open the quick-react strip for this message.
+    /// Open the full emoji reaction picker for this message.
     OpenReactPicker { msgid: String },
-    /// Dismiss the quick-react strip.
+    /// Dismiss the emoji reaction picker.
     CloseReactPicker,
 }
 
@@ -179,6 +182,9 @@ fn badge(ui: &mut egui::Ui, th: &Theme, text: &str) {
 }
 
 /// Message bubble / row in chat detail (with optional image / OG link embed).
+///
+/// When the reaction picker is open, pass mutable search + category so the
+/// full emoji grid can filter without reopening the bubble.
 pub fn message_bubble(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -186,6 +192,8 @@ pub fn message_bubble(
     own_nick: &str,
     media: &mut MediaCache,
     react_picker_open: bool,
+    react_search: &mut String,
+    react_group: &mut EmojiPickerGroup,
 ) -> MessageBubbleAction {
     let p = &th.palette;
     let sp = &th.spacing;
@@ -248,20 +256,16 @@ pub fn message_bubble(
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if can_react {
-                        let react_btn = ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("☺")
-                                        .size(th.type_scale.caption)
-                                        .color(if react_picker_open {
-                                            p.accent
-                                        } else {
-                                            p.text_secondary
-                                        }),
-                                )
-                                .frame(false)
-                                .min_size(Vec2::new(22.0, 18.0)),
-                            )
+                        let react_size = (th.type_scale.caption * 1.2).max(16.0);
+                        let react_color = if react_picker_open {
+                            p.accent
+                        } else {
+                            p.text_secondary
+                        };
+                        let (r, react_resp) =
+                            ui.allocate_exact_size(Vec2::splat(react_size + 4.0), Sense::click());
+                        paint_emoji_in(ui, r.shrink(2.0), "😂", react_color);
+                        let react_btn = react_resp
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .on_hover_text(if react_picker_open {
                                 "Hide reactions"
@@ -290,7 +294,7 @@ pub fn message_bubble(
                 });
             });
             ui.add_space(sp.xs);
-            // Sense on the body only — double-click ❤️, right-click / long-press picker
+            // Sense on the body only — double-click heart, right-click / long-press picker
             // (freeq-android parity). Keeps chips / embeds / ☺ free of click steal.
             let body_resp = ui.add(
                 egui::Label::new(
@@ -306,14 +310,15 @@ pub fn message_bubble(
                 }),
             );
             if can_react {
-                let body_resp = body_resp.on_hover_text(
-                    "Double-click ❤️ · right-click / long-press to react",
-                );
+                let heart = display_emoji(DEFAULT_REACT_EMOJI);
+                let body_resp = body_resp.on_hover_text(format!(
+                    "Double-click {heart} · right-click / long-press to react"
+                ));
                 if matches!(action, MessageBubbleAction::None) {
                     if body_resp.double_clicked() {
                         action = MessageBubbleAction::ToggleReaction {
                             msgid: msg.id.clone(),
-                            emoji: "❤️".to_string(),
+                            emoji: DEFAULT_REACT_EMOJI.to_string(),
                         };
                     } else if body_resp.secondary_clicked() || body_resp.long_touched() {
                         action = if react_picker_open {
@@ -344,13 +349,14 @@ pub fn message_bubble(
         });
     let _ = frame_resp;
 
-    // Reaction tallies (outside body hit-target).
+    // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
     if !msg.reactions.is_empty() {
         ui.add_space(sp.xs);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let mut entries: Vec<_> = msg.reactions.iter().collect();
             entries.sort_by(|(a, na), (b, nb)| nb.len().cmp(&na.len()).then_with(|| a.cmp(b)));
+            let icon_size = (th.type_scale.caption * 1.15).max(14.0);
             for (emoji, nicks) in entries {
                 let count = nicks.len();
                 let mine = nicks.iter().any(|n| n.eq_ignore_ascii_case(own_nick));
@@ -364,17 +370,13 @@ pub fn message_bubble(
                 } else {
                     Stroke::new(1.0_f32, p.border_soft)
                 };
-                let label = if count > 1 {
-                    format!("{emoji} {count}")
-                } else {
-                    emoji.clone()
-                };
+                let shown_emoji = display_emoji(emoji);
                 let tip = {
                     let mut names: Vec<_> = nicks.iter().cloned().collect();
                     names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                     let shown: Vec<_> = names.into_iter().take(12).collect();
                     let extra = count.saturating_sub(shown.len());
-                    let mut s = format!("reacted with {emoji}: {}", shown.join(", "));
+                    let mut s = format!("reacted with {shown_emoji}: {}", shown.join(", "));
                     if extra > 0 {
                         s.push_str(&format!(" +{extra} more"));
                     }
@@ -386,11 +388,19 @@ pub fn message_bubble(
                     .corner_radius(12.0)
                     .inner_margin(egui::Margin::symmetric(8, 3))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(label)
-                                .size(th.type_scale.caption)
-                                .color(p.text),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let (ir, _) =
+                                ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
+                            paint_emoji_in(ui, ir, emoji, p.text);
+                            if count > 1 {
+                                ui.label(
+                                    RichText::new(count.to_string())
+                                        .size(th.type_scale.caption)
+                                        .color(p.text),
+                                );
+                            }
+                        });
                     });
                 let resp = ui
                     .interact(
@@ -408,18 +418,14 @@ pub fn message_bubble(
                 }
             }
             if can_react {
+                let add_size = (th.type_scale.caption * 1.15).max(14.0);
                 let add = egui::Frame::new()
                     .fill(p.headerbar_bg)
                     .stroke(Stroke::new(1.0_f32, p.border_soft))
                     .corner_radius(12.0)
                     .inner_margin(egui::Margin::symmetric(8, 3))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("+")
-                                .size(th.type_scale.caption)
-                                .color(p.text_secondary)
-                                .strong(),
-                        );
+                        icon_colored(ui, p.text_secondary, Icon::Plus, add_size);
                     });
                 let resp = ui
                     .interact(
@@ -438,49 +444,261 @@ pub fn message_bubble(
         });
     }
 
-    // Quick-react strip.
+    // Full emoji reaction picker (quick row + search + category grid).
     if react_picker_open && can_react {
-        ui.add_space(sp.xs);
-        egui::Frame::new()
-            .fill(p.headerbar_bg)
-            .stroke(Stroke::new(1.0_f32, p.border_soft))
-            .corner_radius(sp.radius_sm)
-            .inner_margin(egui::Margin::symmetric(6, 4))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for emoji in QUICK_REACT_EMOJIS {
-                        let mine = msg.has_reaction_from(emoji, own_nick);
-                        let fill = if mine {
-                            p.accent.gamma_multiply(0.4)
-                        } else {
-                            Color32::TRANSPARENT
-                        };
-                        let btn = ui
-                            .add(
-                                egui::Button::new(RichText::new(*emoji).size(th.type_scale.body))
-                                    .fill(fill)
-                                    .frame(true)
-                                    .min_size(Vec2::new(32.0, 28.0)),
-                            )
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text(if mine {
-                                format!("Remove {emoji}")
-                            } else {
-                                format!("React {emoji}")
-                            });
-                        if btn.clicked() {
-                            action = MessageBubbleAction::ToggleReaction {
-                                msgid: msg.id.clone(),
-                                emoji: (*emoji).to_string(),
-                            };
-                        }
-                    }
-                });
-            });
+        if let Some(picked) = emoji_react_picker(
+            ui,
+            th,
+            msg,
+            own_nick,
+            react_search,
+            react_group,
+        ) {
+            action = MessageBubbleAction::ToggleReaction {
+                msgid: msg.id.clone(),
+                emoji: picked,
+            };
+        }
     }
 
     action
+}
+
+/// Full emoji reaction picker: quick reacts, search, category tabs, scrollable grid.
+/// Returns the chosen emoji string when the user picks one.
+fn emoji_react_picker(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    msg: &ChatMessage,
+    own_nick: &str,
+    search: &mut String,
+    group: &mut EmojiPickerGroup,
+) -> Option<String> {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let pick_size = (th.type_scale.body * 1.25).max(18.0);
+    let mut picked: Option<String> = None;
+
+    ui.add_space(sp.xs);
+    egui::Frame::new()
+        .fill(p.headerbar_bg)
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(sp.radius_sm)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
+
+            // Header + search
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Add reaction")
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary)
+                        .strong(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let search_w = (ui.available_width() - 8.0).clamp(120.0, 220.0);
+                    ui.add(
+                        egui::TextEdit::singleline(search)
+                            .id_salt(("react_emoji_search", msg.id.as_str()))
+                            .desired_width(search_w)
+                            .hint_text("Search emoji…")
+                            .font(egui::TextStyle::Body),
+                    );
+                });
+            });
+
+            ui.add_space(sp.xs);
+
+            // Quick-react strip (freeq-android parity).
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for emoji in QUICK_REACT_EMOJIS {
+                    if emoji_pick_button(ui, th, emoji, msg, own_nick, pick_size) {
+                        picked = Some((*emoji).to_string());
+                    }
+                }
+            });
+
+            ui.add_space(sp.xs);
+
+            let searching = !search.trim().is_empty();
+
+            // Category tabs (hidden while searching — results span all groups).
+            if !searching {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let tab_icon = (th.type_scale.caption * 1.15).max(14.0);
+                    for g in EmojiPickerGroup::ALL {
+                        let selected = *group == *g;
+                        let fill = if selected {
+                            p.accent.gamma_multiply(0.35)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let stroke = if selected {
+                            Stroke::new(1.0_f32, p.accent.gamma_multiply(0.65))
+                        } else {
+                            Stroke::NONE
+                        };
+                        let btn_size = Vec2::new(32.0, 28.0);
+                        let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect(
+                                rect,
+                                sp.radius_sm,
+                                fill,
+                                stroke,
+                                egui::StrokeKind::Inside,
+                            );
+                            let ir = Rect::from_center_size(rect.center(), Vec2::splat(tab_icon));
+                            paint_emoji_in(ui, ir, g.tab_emoji(), p.text);
+                        }
+                        let resp = resp
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(g.label());
+                        if resp.clicked() {
+                            *group = *g;
+                        }
+                    }
+                });
+                ui.add_space(sp.xs);
+            } else {
+                dim_label(ui, th, &format!("Results for “{}”", search.trim()));
+                ui.add_space(2.0);
+            }
+
+            // Scrollable emoji grid.
+            let grid_h = 220.0_f32;
+            let cell = Vec2::new(36.0, 34.0);
+            ScrollArea::vertical()
+                .id_salt(("react_emoji_grid", msg.id.as_str(), searching))
+                .max_height(grid_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                        if searching {
+                            let q = search.clone();
+                            let mut count = 0usize;
+                            for emoji in emojis::iter() {
+                                if !emoji_matches_search(emoji, &q) {
+                                    continue;
+                                }
+                                if emoji_pick_cell(
+                                    ui,
+                                    th,
+                                    emoji.as_str(),
+                                    msg,
+                                    own_nick,
+                                    cell,
+                                    pick_size,
+                                ) {
+                                    picked = Some(emoji.as_str().to_string());
+                                }
+                                count += 1;
+                                if count >= EMOJI_SEARCH_LIMIT {
+                                    break;
+                                }
+                            }
+                            if count == 0 {
+                                dim_label(ui, th, "No matching emoji");
+                            } else if count >= EMOJI_SEARCH_LIMIT {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Showing first {EMOJI_SEARCH_LIMIT} — refine search"
+                                    ))
+                                    .size(th.type_scale.caption)
+                                    .color(p.text_secondary),
+                                );
+                            }
+                        } else {
+                            for emoji in group.emojis() {
+                                if emoji_pick_cell(
+                                    ui,
+                                    th,
+                                    emoji.as_str(),
+                                    msg,
+                                    own_nick,
+                                    cell,
+                                    pick_size,
+                                ) {
+                                    picked = Some(emoji.as_str().to_string());
+                                }
+                            }
+                        }
+                    });
+                });
+        });
+
+    picked
+}
+
+/// Compact quick-react button; returns true when clicked.
+fn emoji_pick_button(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    emoji: &str,
+    msg: &ChatMessage,
+    own_nick: &str,
+    pick_size: f32,
+) -> bool {
+    emoji_pick_cell(
+        ui,
+        th,
+        emoji,
+        msg,
+        own_nick,
+        Vec2::new(36.0, 32.0),
+        pick_size,
+    )
+}
+
+/// One tappable cell in the emoji grid; returns true when clicked.
+fn emoji_pick_cell(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    emoji: &str,
+    msg: &ChatMessage,
+    own_nick: &str,
+    btn_size: Vec2,
+    pick_size: f32,
+) -> bool {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let mine = msg.has_reaction_from(emoji, own_nick);
+    let fill = if mine {
+        p.accent.gamma_multiply(0.4)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let shown = display_emoji(emoji);
+    let name = emojis::get(emoji).map(|e| e.name()).unwrap_or(emoji);
+    let (rect, btn) = ui.allocate_exact_size(btn_size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(
+            rect,
+            sp.radius_sm,
+            fill,
+            if mine {
+                Stroke::new(1.0_f32, p.accent.gamma_multiply(0.6))
+            } else {
+                Stroke::NONE
+            },
+            egui::StrokeKind::Inside,
+        );
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(pick_size));
+        paint_emoji_in(ui, icon_rect, emoji, p.text);
+    }
+    let btn = btn
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(if mine {
+            format!("Remove {shown} ({name})")
+        } else {
+            format!("React {shown} ({name})")
+        });
+    btn.clicked()
 }
 
 /// Max width for inline image / link cards inside a bubble.

@@ -56,6 +56,8 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
     "bmp",
 ] }
+# Full Unicode emoji set with names + shortcodes for the reaction picker.
+emojis = "0.6"
 
 # Shared glow + fonts only — do NOT enable wayland/x11 here (feature unification
 # would pull them into the Android build and can make the activity exit immediately).

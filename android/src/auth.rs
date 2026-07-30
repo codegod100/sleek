@@ -42,9 +42,15 @@ fn default_true() -> bool {
     true
 }
 
+fn default_recent_channels() -> Vec<String> {
+    vec!["#general".into()]
+}
+
 /// Disk-persisted app preferences (independent of auth session).
 ///
-/// Survives logout / guest clear so mic/camera intent stays across launches.
+/// Survives logout / guest clear so mic/camera intent and recently visited
+/// rooms stay across launches. Channel membership is client-side because the
+/// server does not reliably restore joins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPrefs {
     /// Join / start next call with mic muted.
@@ -53,6 +59,10 @@ pub struct SavedPrefs {
     /// Publish camera when hardware is available (desktop MoQ).
     #[serde(default = "default_true")]
     pub av_pref_camera: bool,
+    /// Channels the user has visited / joined — auto-rejoined on connect.
+    /// MRU order (most recent first). Default lobby is `#general`.
+    #[serde(default = "default_recent_channels")]
+    pub recent_channels: Vec<String>,
 }
 
 impl Default for SavedPrefs {
@@ -60,6 +70,7 @@ impl Default for SavedPrefs {
         Self {
             av_pref_muted: false,
             av_pref_camera: true,
+            recent_channels: default_recent_channels(),
         }
     }
 }
@@ -527,12 +538,24 @@ mod tests {
         let d = SavedPrefs::default();
         assert!(!d.av_pref_muted);
         assert!(d.av_pref_camera);
+        assert_eq!(d.recent_channels, vec!["#general".to_string()]);
         // Missing camera field should default to true (join with camera ready).
         let partial: SavedPrefs = serde_json::from_str(r#"{"av_pref_muted":true}"#).unwrap();
         assert!(partial.av_pref_muted);
         assert!(partial.av_pref_camera);
+        assert_eq!(partial.recent_channels, vec!["#general".to_string()]);
         let empty: SavedPrefs = serde_json::from_str("{}").unwrap();
         assert!(!empty.av_pref_muted);
         assert!(empty.av_pref_camera);
+        assert_eq!(empty.recent_channels, vec!["#general".to_string()]);
+        // Explicit list round-trips (escape JSON so `#` is not inside a raw string).
+        let with_ch: SavedPrefs = serde_json::from_str(
+            "{\"av_pref_muted\":false,\"av_pref_camera\":true,\"recent_channels\":[\"#test\",\"#general\"]}",
+        )
+        .unwrap();
+        assert_eq!(
+            with_ch.recent_channels,
+            vec!["#test".to_string(), "#general".to_string()]
+        );
     }
 }

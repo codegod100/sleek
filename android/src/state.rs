@@ -60,8 +60,8 @@ impl Tab {
     pub fn short(self) -> &'static str {
         match self {
             Tab::Chats => "Chats",
-            Tab::Discover => "Find",
-            Tab::Settings => "More",
+            Tab::Discover => "Discover",
+            Tab::Settings => "Settings",
         }
     }
 }
@@ -408,10 +408,118 @@ pub fn parse_reactions_tag(raw: &str) -> HashMap<String, HashSet<String>> {
     out
 }
 
-/// Quick-react set (mirrors freeq-android MessageList).
-pub const QUICK_REACT_EMOJIS: &[&str] = &[
-    "👍", "❤️", "😂", "😮", "😢", "👎", "🕺", "💃", "🎶", "🎷",
-];
+/// Quick-react set — same six as freeq-android `MessageList` (no dance/music extras).
+/// Wire form keeps emoji-presentation VS16 where freeq does (`❤️`); strip for display
+/// via [`display_emoji`] so egui's NotoEmoji fallback doesn't draw a tofu box for `U+FE0F`.
+pub const QUICK_REACT_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "👎"];
+
+/// Double-click default reaction (freeq-android parity: heavy black heart + VS16).
+pub const DEFAULT_REACT_EMOJI: &str = "❤️";
+
+/// Category tabs for the full reaction emoji picker (Unicode CLDR groups).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmojiPickerGroup {
+    #[default]
+    Smileys,
+    People,
+    Animals,
+    Food,
+    Travel,
+    Activities,
+    Objects,
+    Symbols,
+    Flags,
+}
+
+impl EmojiPickerGroup {
+    pub const ALL: &'static [EmojiPickerGroup] = &[
+        EmojiPickerGroup::Smileys,
+        EmojiPickerGroup::People,
+        EmojiPickerGroup::Animals,
+        EmojiPickerGroup::Food,
+        EmojiPickerGroup::Travel,
+        EmojiPickerGroup::Activities,
+        EmojiPickerGroup::Objects,
+        EmojiPickerGroup::Symbols,
+        EmojiPickerGroup::Flags,
+    ];
+
+    /// Tab glyph (rendered via Twemoji).
+    pub fn tab_emoji(self) -> &'static str {
+        match self {
+            EmojiPickerGroup::Smileys => "😀",
+            EmojiPickerGroup::People => "👋",
+            EmojiPickerGroup::Animals => "🐶",
+            EmojiPickerGroup::Food => "🍔",
+            EmojiPickerGroup::Travel => "✈️",
+            EmojiPickerGroup::Activities => "⚽",
+            EmojiPickerGroup::Objects => "💡",
+            EmojiPickerGroup::Symbols => "💯",
+            EmojiPickerGroup::Flags => "🏁",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EmojiPickerGroup::Smileys => "Smileys & emotion",
+            EmojiPickerGroup::People => "People & body",
+            EmojiPickerGroup::Animals => "Animals & nature",
+            EmojiPickerGroup::Food => "Food & drink",
+            EmojiPickerGroup::Travel => "Travel & places",
+            EmojiPickerGroup::Activities => "Activities",
+            EmojiPickerGroup::Objects => "Objects",
+            EmojiPickerGroup::Symbols => "Symbols",
+            EmojiPickerGroup::Flags => "Flags",
+        }
+    }
+
+    fn unicode_group(self) -> emojis::Group {
+        match self {
+            EmojiPickerGroup::Smileys => emojis::Group::SmileysAndEmotion,
+            EmojiPickerGroup::People => emojis::Group::PeopleAndBody,
+            EmojiPickerGroup::Animals => emojis::Group::AnimalsAndNature,
+            EmojiPickerGroup::Food => emojis::Group::FoodAndDrink,
+            EmojiPickerGroup::Travel => emojis::Group::TravelAndPlaces,
+            EmojiPickerGroup::Activities => emojis::Group::Activities,
+            EmojiPickerGroup::Objects => emojis::Group::Objects,
+            EmojiPickerGroup::Symbols => emojis::Group::Symbols,
+            EmojiPickerGroup::Flags => emojis::Group::Flags,
+        }
+    }
+
+    /// Default-skin-tone emojis in this category (Unicode CLDR order).
+    pub fn emojis(self) -> impl Iterator<Item = &'static emojis::Emoji> {
+        self.unicode_group().emojis()
+    }
+}
+
+/// Match an emoji against a picker search query (name, shortcodes, or the glyph itself).
+pub fn emoji_matches_search(emoji: &emojis::Emoji, query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return true;
+    }
+    if emoji.as_str().contains(q) {
+        return true;
+    }
+    let q = q.to_ascii_lowercase();
+    if emoji.name().to_ascii_lowercase().contains(&q) {
+        return true;
+    }
+    emoji.shortcodes().any(|s| s.to_ascii_lowercase().contains(&q))
+}
+
+/// Max search hits shown in the picker grid (keeps scroll responsive).
+pub const EMOJI_SEARCH_LIMIT: usize = 240;
+
+/// Strip variation selectors that NotoEmoji / egui cannot draw (they show as □).
+/// Keeps the wire/storage form unchanged — only for labels in chips / picker buttons.
+pub fn display_emoji(emoji: &str) -> String {
+    emoji
+        .chars()
+        .filter(|&c| c != '\u{FE0E}' && c != '\u{FE0F}')
+        .collect()
+}
 
 /// Popular channels shown on Discover (mirrors freeq-android).
 pub const POPULAR_CHANNELS: &[(&str, &str)] = &[
@@ -722,8 +830,12 @@ pub struct AppState {
     pub discover_input: String,
     /// Channel member list open (chat detail only).
     pub show_members: bool,
-    /// Message id whose quick-react picker is open (active chat only).
+    /// Message id whose emoji reaction picker is open (active chat only).
     pub react_picker_msg: Option<String>,
+    /// Search query for the full emoji picker (cleared when the picker closes).
+    pub react_picker_search: String,
+    /// Active category tab in the full emoji picker.
+    pub react_picker_group: EmojiPickerGroup,
 
     /// Connect form fields (editable while disconnected).
     pub connect_mode: ConnectMode,
@@ -753,6 +865,10 @@ pub struct AppState {
     /// Focused/enlarged video tile nick (`"__local__"` for self). `None` = equal grid.
     /// Click a tile to focus; click the focused tile again to restore the grid.
     pub av_focused_video: Option<String>,
+
+    /// Recently visited channels (MRU first). Persisted in prefs.json and
+    /// auto-rejoined on connect — server membership restore is unreliable.
+    pub recent_channels: Vec<String>,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -820,6 +936,8 @@ impl AppState {
             discover_input: String::new(),
             show_members: false,
             react_picker_msg: None,
+            react_picker_search: String::new(),
+            react_picker_group: EmojiPickerGroup::default(),
             connect_mode: ConnectMode::Bluesky,
             form_handle: String::new(),
             form_callback: String::new(),
@@ -834,6 +952,7 @@ impl AppState {
             av_video: None,
             av_video_textures: AvVideoTextures::default(),
             av_focused_video: None,
+            recent_channels: normalize_recent_channels(prefs.recent_channels),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -985,14 +1104,68 @@ impl AppState {
         true
     }
 
-    /// Persist mic/camera join prefs to disk (independent of session logout).
-    pub fn persist_av_prefs(&self) {
+    /// Persist app prefs (AV + recent rooms) to disk (independent of session logout).
+    pub fn persist_prefs(&self) {
         let prefs = crate::auth::SavedPrefs {
             av_pref_muted: self.av_pref_muted,
             av_pref_camera: self.av_pref_camera,
+            recent_channels: self.recent_channels.clone(),
         };
         if let Err(e) = prefs.save() {
-            log::warn!("failed to save av prefs: {e}");
+            log::warn!("failed to save prefs: {e}");
+        }
+    }
+
+    /// Alias kept for call sites that only touch AV toggles.
+    pub fn persist_av_prefs(&self) {
+        self.persist_prefs();
+    }
+
+    /// Channels to auto-join after registration (client-side room memory).
+    pub fn auto_join_channels(&self) -> Vec<String> {
+        if self.recent_channels.is_empty() {
+            vec!["#general".into()]
+        } else {
+            self.recent_channels.clone()
+        }
+    }
+
+    /// Record a successfully visited channel and persist.
+    /// Channels only — DMs are not auto-joined. No-op if already listed
+    /// (avoids reshuffling order / rewriting prefs on every reconnect join).
+    pub fn remember_channel(&mut self, channel: &str) {
+        let ch = Self::normalize_channel(channel);
+        if ch.is_empty() || !(ch.starts_with('#') || ch.starts_with('&')) {
+            return;
+        }
+        // Skip status / special buffers.
+        if ch == "*status" {
+            return;
+        }
+        if self
+            .recent_channels
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&ch))
+        {
+            return;
+        }
+        // New rooms go to the front of the auto-join list.
+        self.recent_channels.insert(0, ch);
+        const MAX_RECENT: usize = 50;
+        if self.recent_channels.len() > MAX_RECENT {
+            self.recent_channels.truncate(MAX_RECENT);
+        }
+        self.persist_prefs();
+    }
+
+    /// Drop a channel from the auto-rejoin list (user left / kicked).
+    pub fn forget_channel(&mut self, channel: &str) {
+        let before = self.recent_channels.len();
+        self.recent_channels
+            .retain(|c| !c.eq_ignore_ascii_case(channel));
+        if self.recent_channels.len() != before {
+            // Empty list is fine — `auto_join_channels` falls back to #general.
+            self.persist_prefs();
         }
     }
 
@@ -1230,7 +1403,7 @@ impl AppState {
         self.active_channel = Some(key.clone());
         self.route = Route::Chat(key.clone());
         self.show_members = false;
-        self.react_picker_msg = None;
+        self.close_react_picker();
         if let Some(buf) = self.channels.get_mut(&key) {
             buf.mark_read();
         }
@@ -1241,10 +1414,22 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
-        self.react_picker_msg = None;
+        self.close_react_picker();
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
+    }
+
+    /// Open the full emoji reaction picker on `msgid` (clears any prior search).
+    pub fn open_react_picker(&mut self, msgid: String) {
+        self.react_picker_msg = Some(msgid);
+        self.react_picker_search.clear();
+    }
+
+    /// Dismiss the emoji reaction picker and reset its search field.
+    pub fn close_react_picker(&mut self) {
+        self.react_picker_msg = None;
+        self.react_picker_search.clear();
     }
 
     pub fn sorted_conversations(&self) -> Vec<&Buffer> {
@@ -1279,7 +1464,7 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
-        self.react_picker_msg = None;
+        self.close_react_picker();
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
@@ -1323,6 +1508,25 @@ impl AppState {
     }
 }
 
+/// Dedupe + normalize a loaded recent-channels list; ensure `#general` exists.
+fn normalize_recent_channels(raw: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ch in raw {
+        let n = AppState::normalize_channel(&ch);
+        if n.is_empty() || !(n.starts_with('#') || n.starts_with('&')) {
+            continue;
+        }
+        if out.iter().any(|c| c.eq_ignore_ascii_case(&n)) {
+            continue;
+        }
+        out.push(n);
+    }
+    if out.is_empty() {
+        out.push("#general".into());
+    }
+    out
+}
+
 /// Compact a DID for display: `did:plc:k2n3e2vsihf3farequ44t5j7` → `plc:k2n3…t5j7`.
 fn shorten_did(s: &str) -> String {
     if !freeq_sdk::address::is_did(s) {
@@ -1353,6 +1557,37 @@ fn shorten_did(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_emoji_strips_variation_selectors() {
+        assert_eq!(display_emoji("❤️"), "❤");
+        assert_eq!(display_emoji("👍"), "👍");
+        assert_eq!(display_emoji("☺\u{FE0F}"), "☺");
+        assert_eq!(display_emoji(DEFAULT_REACT_EMOJI), "❤");
+        // Quick set stays freeq-android's six (no dance/music).
+        assert_eq!(QUICK_REACT_EMOJIS.len(), 6);
+        assert_eq!(QUICK_REACT_EMOJIS[1], "❤️");
+    }
+
+    #[test]
+    fn emoji_picker_search_matches_name_and_shortcode() {
+        let rocket = emojis::get("🚀").expect("rocket");
+        assert!(emoji_matches_search(rocket, "rocket"));
+        assert!(emoji_matches_search(rocket, "ROCKET"));
+        assert!(emoji_matches_search(rocket, "🚀"));
+        assert!(!emoji_matches_search(rocket, "banana"));
+
+        // Smileys group is non-empty; red heart is available for reactions.
+        assert!(EmojiPickerGroup::Smileys.emojis().count() > 50);
+        let heart = emojis::get(DEFAULT_REACT_EMOJI).expect("default heart in unicode set");
+        assert!(
+            heart.as_str().contains('\u{2764}'),
+            "heart glyph present: {:?}",
+            heart.as_str()
+        );
+        assert!(emoji_matches_search(heart, "heart"));
+        assert!(emoji_matches_search(heart, "red"));
+    }
 
     #[test]
     fn parse_reactions_tag_canonical() {

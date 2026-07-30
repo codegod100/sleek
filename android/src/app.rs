@@ -360,6 +360,14 @@ impl SleekApp {
                 // Seed status buffer
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(format!("Registered as {nick}")));
+                // Show remembered rooms in the chat list while auto-join is in
+                // flight (net layer JOINs them on Registered).
+                for ch in self.state.auto_join_channels() {
+                    let buf = self.state.ensure_buffer(&ch);
+                    if !buf.is_joined() {
+                        buf.join_pending = true;
+                    }
+                }
                 // freeq-android: pull DM conversation list so existing threads
                 // appear before anyone messages again.
                 self.net.send(NetCmd::HistoryTargets { limit: 50 });
@@ -405,6 +413,11 @@ impl SleekApp {
                     }
                     buf.members.push(nick);
                 }
+                // Client-side room memory: remember successful own joins so
+                // reconnect re-joins without depending on server state.
+                if own {
+                    self.state.remember_channel(&channel);
+                }
                 // freeq-android: CHATHISTORY LATEST on own join when empty.
                 if need_history {
                     self.net.send(NetCmd::HistoryLatest {
@@ -421,6 +434,7 @@ impl SleekApp {
                 if nick.eq_ignore_ascii_case(&self.state.nick) {
                     self.state.channels.remove(&channel);
                     self.state.channel_order.retain(|n| n != &channel);
+                    self.state.forget_channel(&channel);
                     if self.state.active_channel.as_deref() == Some(channel.as_str()) {
                         self.state.close_chat();
                     }
@@ -621,6 +635,9 @@ impl SleekApp {
                 }
                 if nick.eq_ignore_ascii_case(&self.state.nick) {
                     self.state.show_toast(format!("Kicked from {channel}"));
+                    self.state.channels.remove(&channel);
+                    self.state.channel_order.retain(|n| n != &channel);
+                    self.state.forget_channel(&channel);
                     if self.state.active_channel.as_deref() == Some(channel.as_str()) {
                         self.state.close_chat();
                     }
@@ -1045,10 +1062,9 @@ impl SleekApp {
         self.state.use_websocket = self.state.form_websocket;
         self.state.status_line = "Connecting…".into();
 
-        // Match freeq-android: default lobby is #general (public). Do not force
-        // #freeq — it can be policy-gated and guests then land on a join-denied
-        // error screen for a channel they never chose.
-        let auto_join = vec!["#general".into()];
+        // Client-side room memory (prefs) — freeq does not reliably restore
+        // channel membership across reconnects. Default lobby is #general.
+        let auto_join = self.state.auto_join_channels();
 
         self.net.send(NetCmd::Connect {
             nick,
@@ -1451,14 +1467,13 @@ impl eframe::App for SleekApp {
                 )
                 .show_separator_line(false)
                 .show(ctx, |ui| {
-                    // Cap width on wide desktop so tiles don't stretch endlessly.
-                    let max_w = if phone {
-                        ui.available_width()
-                    } else {
-                        ui.available_width().min(480.0)
-                    };
+                    // Cap width on ultrawide desktop so a single tile doesn't become a
+                    // billboard; keep enough room for long channel titles + video.
+                    // Height stays content-sized (TopBottomPanel sizes to children).
+                    let avail = ui.available_width();
+                    let max_w = if phone { avail } else { avail.min(720.0) };
                     ui.set_max_width(max_w);
-                    ui.set_min_width(max_w.min(ui.available_width()));
+                    ui.set_min_width(max_w.min(avail));
                     if let Some(act) = ui::active_call_panel(ui, &th, &mut self.state) {
                         match act {
                             ChatAction::AvLeave => self.do_av_leave(),
@@ -1607,6 +1622,7 @@ impl eframe::App for SleekApp {
                         }
                         self.state.channels.remove(&channel);
                         self.state.channel_order.retain(|n| n != &channel);
+                        self.state.forget_channel(&channel);
                         self.state.close_chat();
                     }
                     ChatAction::OpenDm(nick) => {

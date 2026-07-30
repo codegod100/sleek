@@ -1,7 +1,7 @@
 //! Chat detail — messages + compose (freeq-android ChatDetailScreen inspired).
 
 use eframe::egui::{self, Align, Align2, CursorIcon, Layout, RichText, Sense, ScrollArea, Vec2};
-use vidya::{button, dim_label, primary_button, title_2, Theme};
+use vidya::{button, dim_label, primary_button, Theme};
 
 use crate::clipboard;
 use crate::state::AppState;
@@ -77,7 +77,9 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
         state.display_name_for(channel)
     };
 
-    // Header
+    // Header — allocate right-side actions first so long channel names
+    // (e.g. stream.place:…) truncate with an ellipsis instead of clipping
+    // under Leave/Users or past the panel edge.
     ui.horizontal(|ui| {
         if button(ui, th, "←").clicked() {
             if show_members {
@@ -87,44 +89,6 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
             }
         }
         ui.add_space(sp.sm);
-        ui.vertical(|ui| {
-            if show_members {
-                title_2(ui, th, "Users");
-                dim_label(ui, th, &format!("{member_count} in {channel}"));
-            } else {
-                title_2(ui, th, &header_title);
-                if is_channel {
-                    let sub = if let Some(err) = join_error.as_ref() {
-                        // Short header status; full reason is in the body empty-state.
-                        if err.to_ascii_lowercase().contains("authentication")
-                            || err.to_ascii_lowercase().contains("sign in")
-                        {
-                            if is_guest {
-                                "Guests not allowed".to_string()
-                            } else {
-                                "Join denied".to_string()
-                            }
-                        } else {
-                            "Can't join".to_string()
-                        }
-                    } else if join_pending {
-                        "Joining…".to_string()
-                    } else if topic.is_empty() {
-                        format!("{member_count} members")
-                    } else {
-                        let t = if topic.chars().count() > 42 {
-                            format!("{}…", topic.chars().take(42).collect::<String>())
-                        } else {
-                            topic.clone()
-                        };
-                        t
-                    };
-                    dim_label(ui, th, &sub);
-                } else {
-                    dim_label(ui, th, "Direct message");
-                }
-            }
-        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if is_channel && !show_members {
                 let leave_label = if join_error.is_some() {
@@ -147,6 +111,80 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     }
                 }
             }
+            let title_w = ui.available_width().max(40.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(title_w, ui.available_height().max(th.type_scale.title_2 * 2.2)),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_max_width(title_w);
+                    if show_members {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Users")
+                                    .size(th.type_scale.title_2)
+                                    .strong()
+                                    .color(p.text),
+                            )
+                            .truncate(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{member_count} in {channel}"))
+                                    .size(th.type_scale.caption)
+                                    .color(p.text_secondary),
+                            )
+                            .truncate(),
+                        );
+                    } else {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&header_title)
+                                    .size(th.type_scale.title_2)
+                                    .strong()
+                                    .color(p.text),
+                            )
+                            .truncate(),
+                        );
+                        if is_channel {
+                            let sub = if let Some(err) = join_error.as_ref() {
+                                // Short header status; full reason is in the body empty-state.
+                                if err.to_ascii_lowercase().contains("authentication")
+                                    || err.to_ascii_lowercase().contains("sign in")
+                                {
+                                    if is_guest {
+                                        "Guests not allowed".to_string()
+                                    } else {
+                                        "Join denied".to_string()
+                                    }
+                                } else {
+                                    "Can't join".to_string()
+                                }
+                            } else if join_pending {
+                                "Joining…".to_string()
+                            } else if topic.is_empty() {
+                                format!("{member_count} members")
+                            } else {
+                                let t = if topic.chars().count() > 42 {
+                                    format!("{}…", topic.chars().take(42).collect::<String>())
+                                } else {
+                                    topic.clone()
+                                };
+                                t
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(sub)
+                                        .size(th.type_scale.caption)
+                                        .color(p.text_secondary),
+                                )
+                                .truncate(),
+                            );
+                        } else {
+                            dim_label(ui, th, "Direct message");
+                        }
+                    }
+                },
+            );
         });
     });
     ui.add_space(sp.sm);
@@ -410,10 +448,12 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         &own_nick,
                         &mut state.media,
                         picker_open,
+                        &mut state.react_picker_search,
+                        &mut state.react_picker_group,
                     ) {
                         MessageBubbleAction::None => {}
                         MessageBubbleAction::ToggleReaction { msgid, emoji } => {
-                            state.react_picker_msg = None;
+                            state.close_react_picker();
                             action = ChatAction::React {
                                 target: channel.to_string(),
                                 msgid,
@@ -421,10 +461,10 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                             };
                         }
                         MessageBubbleAction::OpenReactPicker { msgid } => {
-                            state.react_picker_msg = Some(msgid);
+                            state.open_react_picker(msgid);
                         }
                         MessageBubbleAction::CloseReactPicker => {
-                            state.react_picker_msg = None;
+                            state.close_react_picker();
                         }
                     }
                     ui.add_space(sp.sm);
@@ -807,66 +847,104 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
         .as_ref()
         .map(|c| c.participants.max(1))
         .unwrap_or(1);
-    let title = channel_call
+    let call_title = channel_call
         .as_ref()
         .and_then(|c| c.title.as_ref())
         .map(|t| t.as_str())
-        .unwrap_or("Voice & video");
+        .filter(|t| !t.is_empty());
+    // Prefer a real call title; otherwise the channel (often long for stream.place).
+    let headline = call_title.unwrap_or(lc.channel.as_str());
     let on_call_channel = matches!(
         &state.route,
         crate::state::Route::Chat(ch) if ch.eq_ignore_ascii_case(&lc.channel)
     );
 
+    // One status line: count + media. Avoids "1 in call" next to a long title
+    // (overlap) and a second "In call" row under it (redundant).
+    let status_line = match &lc.media {
+        crate::av::MediaStatus::Live => format!("{n} in call"),
+        crate::av::MediaStatus::Idle => format!("{n} in call"),
+        crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
+        crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
+        crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+    };
+
     let frame = egui::Frame::new()
         .fill(p.accent.gamma_multiply(0.14))
         .stroke(egui::Stroke::new(1.0_f32, p.accent.gamma_multiply(0.45)))
+        .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8));
 
     frame.show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("📞 {title}"))
-                    .size(th.type_scale.body)
-                    .color(p.text)
-                    .strong(),
-            );
-            ui.add_space(sp.sm);
-            dim_label(ui, th, &lc.channel);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                dim_label(ui, th, &format!("{n} in call"));
-            });
-        });
-        ui.add_space(sp.xs);
-        dim_label(ui, th, &lc.media.label());
+        // Full panel width — long stream.place names stack (title → status)
+        // instead of fighting for horizontal space with the count.
+        let panel_w = ui.available_width();
+        ui.set_width(panel_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+
+        let title_h = th.type_scale.body * 1.35;
+        ui.allocate_ui_with_layout(
+            Vec2::new(panel_w, title_h),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(panel_w);
+                ui.set_max_width(panel_w);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("📞 {headline}"))
+                            .size(th.type_scale.body)
+                            .color(p.text)
+                            .strong(),
+                    )
+                    .truncate()
+                    .sense(Sense::hover()),
+                )
+                .on_hover_text(format!("{headline}\n{}", lc.channel));
+            },
+        );
+
+        ui.add(
+            egui::Label::new(
+                RichText::new(&status_line)
+                    .size(th.type_scale.caption)
+                    .color(p.text_secondary),
+            )
+            .truncate(),
+        );
 
         if matches!(lc.media, crate::av::MediaStatus::Live) {
             paint_av_video_tiles(ui, th, state);
         }
 
-        ui.add_space(sp.sm);
-        ui.horizontal(|ui| {
-            let mute_label = if lc.muted { "Unmute" } else { "Mute" };
-            if button(ui, th, mute_label).clicked() {
+        ui.add_space(sp.xs);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = sp.sm;
+            if av_icon_toggle(ui, th, "🎤", lc.muted, if lc.muted { "Unmute" } else { "Mute" })
+                .clicked()
+            {
                 action = Some(ChatAction::AvToggleMute);
             }
-            ui.add_space(sp.sm);
             if lc.has_camera {
-                let cam_label = if lc.camera {
-                    "Camera off"
-                } else {
-                    "Camera on"
-                };
-                if button(ui, th, cam_label).clicked() {
+                if av_icon_toggle(
+                    ui,
+                    th,
+                    "📷",
+                    !lc.camera,
+                    if lc.camera {
+                        "Turn camera off"
+                    } else {
+                        "Turn camera on"
+                    },
+                )
+                .clicked()
+                {
                     action = Some(ChatAction::AvToggleCamera);
                 }
-                ui.add_space(sp.sm);
             }
-            if button(ui, th, "Leave call").clicked() {
+            if button(ui, th, "Leave").clicked() {
                 action = Some(ChatAction::AvLeave);
             }
             if !on_call_channel {
-                ui.add_space(sp.sm);
                 if button(ui, th, "Open chat").clicked() {
                     action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
                 }
@@ -877,7 +955,63 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
     action
 }
 
-/// Pre-call mic/camera toggles (labels match in-call controls).
+/// Square mic/camera toggle: icon only, diagonal slash when off/muted.
+fn av_icon_toggle(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    icon: &str,
+    slashed: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let size = sp.control_height;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+
+    let fill = if slashed {
+        p.button_bg
+    } else {
+        p.accent.gamma_multiply(0.22)
+    };
+    let border = if slashed {
+        p.border_soft
+    } else {
+        p.accent.gamma_multiply(0.55)
+    };
+
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        sp.radius_md,
+        fill,
+        egui::Stroke::new(1.0_f32, border),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional((th.type_scale.body * 1.15).max(16.0)),
+        p.button_fg,
+    );
+    if slashed {
+        let pad = size * 0.22;
+        painter.line_segment(
+            [
+                rect.left_top() + Vec2::new(pad, pad),
+                rect.right_bottom() - Vec2::new(pad, pad),
+            ],
+            egui::Stroke::new(2.0_f32, p.destructive),
+        );
+    }
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// Pre-call mic/camera toggles (icons match in-call controls).
 fn av_media_prefs_row(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -886,27 +1020,33 @@ fn av_media_prefs_row(
 ) {
     let sp = &th.spacing;
     ui.horizontal(|ui| {
-        let mute_label = if *pref_muted { "Unmute" } else { "Mute" };
-        if button(ui, th, mute_label).clicked() {
+        if av_icon_toggle(
+            ui,
+            th,
+            "🎤",
+            *pref_muted,
+            if *pref_muted { "Unmute" } else { "Mute" },
+        )
+        .clicked()
+        {
             *pref_muted = !*pref_muted;
         }
         ui.add_space(sp.sm);
-        let cam_label = if *pref_camera {
-            "Camera off"
-        } else {
-            "Camera on"
-        };
-        if button(ui, th, cam_label).clicked() {
+        if av_icon_toggle(
+            ui,
+            th,
+            "📷",
+            !*pref_camera,
+            if *pref_camera {
+                "Turn camera off"
+            } else {
+                "Turn camera on"
+            },
+        )
+        .clicked()
+        {
             *pref_camera = !*pref_camera;
         }
-        ui.add_space(sp.sm);
-        let hint = match (*pref_muted, *pref_camera) {
-            (false, true) => "Mic + camera ready",
-            (true, true) => "Join muted · camera on",
-            (false, false) => "Mic on · camera off",
-            (true, false) => "Join muted · camera off",
-        };
-        dim_label(ui, th, hint);
     });
 }
 
@@ -956,15 +1096,32 @@ fn av_call_banner(
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8));
 
     frame.show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("📞 {title} · {n} in call"))
-                    .size(th.type_scale.body)
-                    .color(p.text)
-                    .strong(),
-            );
-        });
+        // Stack title + count (same pattern as active_call_panel) so long
+        // stream.place names don't paint over "N in call".
+        let panel_w = ui.available_width();
+        ui.set_width(panel_w);
+        ui.spacing_mut().item_spacing.y = 2.0;
+
+        let title_h = th.type_scale.body * 1.35;
+        ui.allocate_ui_with_layout(
+            Vec2::new(panel_w, title_h),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(panel_w);
+                ui.set_max_width(panel_w);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("📞 {title}"))
+                            .size(th.type_scale.body)
+                            .color(p.text)
+                            .strong(),
+                    )
+                    .truncate(),
+                );
+            },
+        );
+        dim_label(ui, th, &format!("{n} in call"));
+
         ui.add_space(sp.sm);
         ui.horizontal(|ui| {
             if primary_button(ui, th, "Join call").clicked() {
@@ -1046,8 +1203,8 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     if let Some(focus_nick) = focused.as_ref() {
         // Enlarged primary + filmstrip of the rest.
         let avail = ui.available_width();
-        let primary_w = avail.min(560.0);
-        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 360.0);
+        let primary_w = avail;
+        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 420.0);
         let thumb_w = ((avail - sp.sm) / 4.0).clamp(72.0, 140.0);
         let thumb_h = thumb_w * 9.0 / 16.0;
 
@@ -1096,14 +1253,18 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             });
         }
     } else {
-        // Equal grid.
+        // Equal grid — use full panel width so a single stream isn't a tiny 280px tile
+        // with a huge empty gutter (looked like the AV section was truncated).
         let avail = ui.available_width();
-        let tile_w = if tiles.len() == 1 {
-            avail.min(280.0)
+        let n = tiles.len().max(1);
+        let tile_w = if n == 1 {
+            avail
+        } else if n == 2 {
+            ((avail - sp.sm) / 2.0).max(120.0)
         } else {
-            ((avail - sp.sm) / 2.0).clamp(100.0, 200.0)
+            ((avail - sp.sm) / 2.0).clamp(100.0, 280.0)
         };
-        let tile_h = tile_w * 9.0 / 16.0;
+        let tile_h = (tile_w * 9.0 / 16.0).clamp(90.0, 420.0);
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
@@ -1186,11 +1347,40 @@ fn paint_av_video_tile(
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
+        // Nick chip — truncate long nicks so they stay inside the tile.
+        let nick_font = egui::FontId::proportional(th.type_scale.caption);
+        let max_nick_w = (rect.width() - 12.0).max(24.0);
+        let galley = ui.fonts(|f| {
+            f.layout_no_wrap(label.to_string(), nick_font.clone(), p.text)
+        });
+        let nick_text = if galley.size().x > max_nick_w {
+            // Binary-search a prefix that fits with an ellipsis.
+            let chars: Vec<char> = label.chars().collect();
+            let mut lo = 0usize;
+            let mut hi = chars.len();
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2;
+                let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+                let g = ui.fonts(|f| f.layout_no_wrap(candidate, nick_font.clone(), p.text));
+                if g.size().x <= max_nick_w {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            if lo == 0 {
+                "…".to_string()
+            } else {
+                chars[..lo].iter().collect::<String>() + "…"
+            }
+        } else {
+            label.to_string()
+        };
         ui.painter().text(
             rect.left_bottom() + Vec2::new(6.0, -4.0),
             Align2::LEFT_BOTTOM,
-            label,
-            egui::FontId::proportional(th.type_scale.caption),
+            nick_text,
+            nick_font,
             p.text,
         );
         resp
