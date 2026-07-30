@@ -157,18 +157,38 @@ async fn run_media(
     let audio_backend = AudioBackend::default();
     audio_backend.set_aec_enabled(false);
 
-    let mic = audio_backend
-        .default_input()
-        .await
-        .context("open default microphone")?;
-    let muteable = MuteableSource {
-        inner: Box::new(mic),
-        muted: muted.clone(),
+    // Mic is best-effort (same as iroh-live publish example). Codespace/VNC and
+    // headless hosts often have no capture device — join should still work as
+    // listen-only / video-only. Camera already follows this pattern below.
+    let has_mic = match audio_backend.default_input().await {
+        Ok(mic) => {
+            let muteable = MuteableSource {
+                inner: Box::new(mic),
+                muted: muted.clone(),
+            };
+            match broadcast
+                .audio()
+                .set(muteable, AudioCodec::Opus, [AudioPreset::Hq])
+            {
+                Ok(()) => {
+                    log::info!("av-media: microphone open, publishing Opus");
+                    true
+                }
+                Err(e) => {
+                    log::warn!("av-media: set mic audio source failed (listen-only): {e}");
+                    // Force mute so UI reflects no outbound audio.
+                    muted.store(true, Ordering::Relaxed);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("av-media: no microphone ({e}); listen-only / no outbound audio");
+            muted.store(true, Ordering::Relaxed);
+            false
+        }
     };
-    broadcast
-        .audio()
-        .set(muteable, AudioCodec::Opus, [AudioPreset::Hq])
-        .context("set mic audio source")?;
+    let _ = has_mic;
 
     // Camera: desktop only (V4L2 / platform capture). Android NativeActivity
     // has no CameraX bridge yet — audio-only publish; remote video still works.
