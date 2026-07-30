@@ -68,6 +68,8 @@
           libxcursor
           libxi
           libxrandr
+          # Software GL for Codespaces desktop-lite / headless X11 (llvmpipe)
+          mesa
         ];
 
       # Layout expected by android/Cargo.toml path deps:

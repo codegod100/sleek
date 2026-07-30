@@ -6,17 +6,37 @@
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": false,
       "upgradePackages": false
+    },
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "password": "vscode",
+      "webPort": "6080",
+      "vncPort": "5901"
     }
   },
-  "forwardPorts": [],
+  "forwardPorts": [6080, 5901],
+  "portsAttributes": {
+    "6080": {
+      "label": "noVNC desktop",
+      "onAutoForward": "notify"
+    },
+    "5901": {
+      "label": "VNC",
+      "onAutoForward": "silent"
+    }
+  },
+  "runArgs": ["--shm-size=1g"],
   "postCreateCommand": "bash scripts/codespace-bootstrap.sh",
   "postStartCommand": "bash scripts/codespace-bootstrap.sh --quiet",
   "containerEnv": {
+    "DISPLAY": ":1",
+    "LIBGL_ALWAYS_SOFTWARE": "1",
     "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
     "CACHIX_CACHE": "codegod100"
   },
   "remoteEnv": {
     "SLEEK_CODESPACE": "1",
+    "DISPLAY": ":1",
+    "LIBGL_ALWAYS_SOFTWARE": "1",
     "NIX_CONFIG": "experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true",
     "CACHIX_CACHE": "codegod100"
   },
@@ -34,8 +54,8 @@
     }
   },
   "hostRequirements": {
-    "cpus": 2,
-    "memory": "4gb",
+    "cpus": 4,
+    "memory": "8gb",
     "storage": "32gb"
   }
 }

@@ -17,11 +17,24 @@ bootstrap:
     bash scripts/codespace-bootstrap.sh
 
 # Desktop window (egui needs SLEEK_LD_LIBRARY_PATH from nix develop — not ambient)
+# On Codespaces, desktop-lite exposes Fluxbox + noVNC on :1 (port 6080).
 host *args:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -n "${SLEEK_LD_LIBRARY_PATH:-}" ]]; then
       export LD_LIBRARY_PATH="${SLEEK_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    # Codespace / desktop-lite: GUI opens on the VNC X display.
+    if [[ -n "${SLEEK_CODESPACE:-}" ]]; then
+      export DISPLAY="${DISPLAY:-:1}"
+      # No GPU in Codespaces — force llvmpipe via mesa from the flake libs.
+      export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+    elif [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+      if [[ -S /tmp/.X11-unix/X1 ]]; then
+        export DISPLAY=:1
+      elif [[ -S /tmp/.X11-unix/X0 ]]; then
+        export DISPLAY=:0
+      fi
     fi
     cargo run --manifest-path host/Cargo.toml {{args}}
 

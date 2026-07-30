@@ -91,12 +91,37 @@ mount often fails Codespace create and drops you into Alpine recovery), with
 
 | Piece | Role |
 |-------|------|
-| `.devcontainer/devcontainer.json` | Ubuntu base + `NIX_CONFIG` + postCreate bootstrap |
+| `.devcontainer/devcontainer.json` | Ubuntu base + desktop-lite (VNC) + `NIX_CONFIG` + postCreate bootstrap |
 | `scripts/ensure-nix-flakes.sh` | writes user/system `nix.conf` + `NIX_CONFIG` so flakes stay on |
 | `.envrc` | direnv `use flake` |
 | `scripts/enter` | manual / scripted re-exec into `nix develop` |
 | `scripts/codespace-env.sh` | sourced from `~/.bashrc` on interactive login |
 | `scripts/codespace-bootstrap.sh` | installs nix (Determinate), flakes config, direnv, bashrc hook, warms flake |
+
+### Desktop GUI over VNC (noVNC)
+
+The devcontainer includes **[desktop-lite](https://github.com/devcontainers/features/tree/main/src/desktop-lite)**
+(Fluxbox + TigerVNC + noVNC) so the egui host can run in the browser.
+
+| Port | Use |
+|------|-----|
+| **6080** | noVNC web client (open from the Ports panel → Globe) |
+| **5901** | Raw VNC (optional local viewer) |
+
+1. Create / open a Codespace on this repo (rebuild if the container predates desktop-lite).
+2. Wait for bootstrap (`nix develop` warms; first boot can take several minutes).
+3. In the **Ports** view, open **6080** (label: *noVNC desktop*).
+4. Click **Connect**, password: **`vscode`**.
+5. In the Codespace terminal:
+
+```bash
+just host          # DISPLAY=:1 + software GL on Codespaces
+# or:
+nix run
+```
+
+The window appears on the Fluxbox desktop inside noVNC. Right-click the
+desktop for the Fluxbox menu.
 
 Bare commands work after bootstrap:
 
