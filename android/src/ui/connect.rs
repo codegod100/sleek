@@ -64,7 +64,7 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 dim_label(
                     ui,
                     th,
-                    "Browser opens to approve — or paste a freeq://auth link below.",
+                    "Browser opens to approve (Chromium on VNC — Alt+Tab if covered). Or paste a freeq://auth link below.",
                 );
 
                 // Advanced: callback paste + session restore, only when needed.

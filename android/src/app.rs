@@ -81,8 +81,9 @@ pub fn run_desktop() -> eframe::Result {
                 .with_inner_size(size)
                 .with_position(egui::pos2(0.0, 0.0));
         }
+        // Maximized (not fullscreen/always-on-top) so OAuth Chromium can
+        // appear above Sleek on desktop-lite / Fluxbox VNC.
         viewport = viewport
-            .with_fullscreen(true)
             .with_maximized(true)
             .with_min_inner_size([320.0, 400.0]);
     } else {
@@ -164,8 +165,29 @@ impl SleekApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
         }
+        // Avoid borderless fullscreen + always-on-top: it buries the OAuth
+        // browser under Sleek with no taskbar way to switch on Fluxbox.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::Normal,
+        ));
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+    }
+
+    /// Drop always-on-top / fullscreen so the OAuth browser is reachable in VNC.
+    fn yield_to_oauth_browser(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::Normal,
+        ));
+        // Slightly shrink so Fluxbox can stack Chromium on top visibly.
+        if let Some(size) = detect_screen_size() {
+            let w = (size.x * 0.55).max(400.0);
+            let h = (size.y * 0.85).max(400.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
+        }
     }
 
     fn theme(&self) -> Theme {
@@ -1158,7 +1180,7 @@ impl SleekApp {
         });
     }
 
-    fn do_bluesky_login(&mut self) {
+    fn do_bluesky_login(&mut self, ctx: &egui::Context) {
         let handle = self
             .state
             .form_handle
@@ -1172,7 +1194,10 @@ impl SleekApp {
         self.state.error = None;
         self.state.awaiting_oauth = true;
         self.state.connection = ConnectionState::Connecting;
-        self.state.status_line = "Waiting for browser sign-in…".into();
+        self.state.status_line =
+            "Browser opened for sign-in — look for the Chromium window (Alt+Tab if covered).".into();
+        // Fullscreen Sleek sits above everything on Fluxbox/VNC; yield first.
+        self.yield_to_oauth_browser(ctx);
         self.net.send(NetCmd::BlueskyLogin {
             handle,
             auth_broker: self.state.auth_broker.clone(),
@@ -1831,7 +1856,7 @@ impl eframe::App for SleekApp {
                         match ui::connect_screen(ui, &th, &mut self.state) {
                             ConnectAction::None => {}
                             ConnectAction::ConnectGuest => self.do_connect(),
-                            ConnectAction::BlueskyLogin => self.do_bluesky_login(),
+                            ConnectAction::BlueskyLogin => self.do_bluesky_login(ctx),
                             ConnectAction::ApplyCallback => self.do_apply_callback(),
                             ConnectAction::ReconnectSession => self.do_reconnect_session(),
                             ConnectAction::ClearAccount => {
