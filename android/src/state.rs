@@ -99,6 +99,8 @@ pub struct ChatMessage {
     pub embed: Option<Embed>,
     /// OG metadata when already known (IRCv3 link-preview tags).
     pub link_meta: Option<LinkMeta>,
+    /// Emoji → nicks who reacted (live TAGMSG + CHATHISTORY `+freeq.at/reactions`).
+    pub reactions: HashMap<String, HashSet<String>>,
 }
 
 impl ChatMessage {
@@ -116,7 +118,15 @@ impl ChatMessage {
             is_signed: false,
             embed: None,
             link_meta: None,
+            reactions: HashMap::new(),
         }
+    }
+
+    /// True when `nick` has already reacted with this emoji.
+    pub fn has_reaction_from(&self, emoji: &str, nick: &str) -> bool {
+        self.reactions
+            .get(emoji)
+            .is_some_and(|nicks| nicks.iter().any(|n| n.eq_ignore_ascii_case(nick)))
     }
 
     /// Resolve embed: prefer fields set at receive, else scan body text.
@@ -331,7 +341,77 @@ impl Buffer {
     pub fn mark_read(&mut self) {
         self.unread = 0;
     }
+
+    fn find_message_mut(&mut self, msg_id: &str) -> Option<&mut ChatMessage> {
+        if msg_id.is_empty() {
+            return None;
+        }
+        self.messages.iter_mut().find(|m| m.id == msg_id)
+    }
+
+    /// Idempotent add of `from`'s reaction. Empty emoji is ignored.
+    pub fn add_reaction(&mut self, msg_id: &str, emoji: &str, from: &str) {
+        let emoji = emoji.trim();
+        if emoji.is_empty() || from.is_empty() {
+            return;
+        }
+        let Some(msg) = self.find_message_mut(msg_id) else {
+            return;
+        };
+        let nicks = msg.reactions.entry(emoji.to_string()).or_default();
+        if !nicks.iter().any(|n| n.eq_ignore_ascii_case(from)) {
+            nicks.insert(from.to_string());
+        }
+    }
+
+    /// Remove `from`'s reaction; drop the emoji entry when empty.
+    pub fn remove_reaction(&mut self, msg_id: &str, emoji: &str, from: &str) {
+        let emoji = emoji.trim();
+        if emoji.is_empty() || from.is_empty() {
+            return;
+        }
+        let Some(msg) = self.find_message_mut(msg_id) else {
+            return;
+        };
+        let Some(nicks) = msg.reactions.get_mut(emoji) else {
+            return;
+        };
+        nicks.retain(|n| !n.eq_ignore_ascii_case(from));
+        if nicks.is_empty() {
+            msg.reactions.remove(emoji);
+        }
+    }
 }
+
+/// Parse server's `+freeq.at/reactions` value (`emoji1:nick1,nick2;emoji2:nick3`).
+/// Malformed segments are skipped.
+pub fn parse_reactions_tag(raw: &str) -> HashMap<String, HashSet<String>> {
+    let mut out = HashMap::new();
+    for seg in raw.split(';') {
+        let Some((emoji, nicks)) = seg.split_once(':') else {
+            continue;
+        };
+        let emoji = emoji.trim();
+        if emoji.is_empty() {
+            continue;
+        }
+        let set: HashSet<String> = nicks
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !set.is_empty() {
+            out.insert(emoji.to_string(), set);
+        }
+    }
+    out
+}
+
+/// Quick-react set (mirrors freeq-android MessageList).
+pub const QUICK_REACT_EMOJIS: &[&str] = &[
+    "👍", "❤️", "😂", "😮", "😢", "👎", "🕺", "💃", "🎶", "🎷",
+];
 
 /// Popular channels shown on Discover (mirrors freeq-android).
 pub const POPULAR_CHANNELS: &[(&str, &str)] = &[
@@ -632,6 +712,9 @@ pub struct AppState {
     pub focus_compose: bool,
     /// In-flight OS image file dialog (attach button). Polled each frame.
     pub file_pick_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::PickImageResult>>,
+    /// When `file_pick_rx` was set — used to unlock the compose bar if the OS
+    /// dialog dies without a result (e.g. Android cancel with no activity result).
+    pub file_pick_started: Option<Instant>,
     /// Remote image + Open Graph link-preview cache for chat embeds.
     pub media: MediaCache,
     pub search: String,
@@ -639,6 +722,8 @@ pub struct AppState {
     pub discover_input: String,
     /// Channel member list open (chat detail only).
     pub show_members: bool,
+    /// Message id whose quick-react picker is open (active chat only).
+    pub react_picker_msg: Option<String>,
 
     /// Connect form fields (editable while disconnected).
     pub connect_mode: ConnectMode,
@@ -653,11 +738,21 @@ pub struct AppState {
 
     /// Our active AV call (at most one at a time).
     pub local_call: Option<LocalCall>,
+    /// Preferred mic mute for the next call (and mirrored while in-call).
+    /// Toggleable before start/join so you can join muted. Persisted in prefs.json.
+    pub av_pref_muted: bool,
+    /// Preferred camera publish for the next call (desktop MoQ).
+    /// Toggleable before start/join; applied when hardware is available.
+    /// Persisted in prefs.json (survives logout).
+    pub av_pref_camera: bool,
     /// Shared latest video frames from the MoQ media plane (desktop).
     pub av_video: Option<VideoFrameStore>,
     /// GPU textures for call video tiles (`nick` → texture), refreshed each paint.
     /// Wrapped so `AppState: Debug` does not require `TextureHandle: Debug`.
     pub av_video_textures: AvVideoTextures,
+    /// Focused/enlarged video tile nick (`"__local__"` for self). `None` = equal grid.
+    /// Click a tile to focus; click the focused tile again to restore the grid.
+    pub av_focused_video: Option<String>,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -690,6 +785,7 @@ impl AppState {
         let nick = default_nick();
         let server = default_server();
         let use_ws = cfg!(target_os = "android");
+        let prefs = crate::auth::SavedPrefs::load();
         let mut state = Self {
             connection: ConnectionState::Disconnected,
             nick: nick.clone(),
@@ -717,11 +813,13 @@ impl AppState {
             compose_uploading: false,
             focus_compose: false,
             file_pick_rx: None,
+            file_pick_started: None,
             media: MediaCache::default(),
             search: String::new(),
             join_input: String::new(),
             discover_input: String::new(),
             show_members: false,
+            react_picker_msg: None,
             connect_mode: ConnectMode::Bluesky,
             form_handle: String::new(),
             form_callback: String::new(),
@@ -731,8 +829,11 @@ impl AppState {
             form_websocket: use_ws,
             auto_guest_connect: false,
             local_call: None,
+            av_pref_muted: prefs.av_pref_muted,
+            av_pref_camera: prefs.av_pref_camera,
             av_video: None,
             av_video_textures: AvVideoTextures::default(),
+            av_focused_video: None,
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -807,6 +908,13 @@ impl AppState {
             return;
         }
         self.file_pick_rx = Some(crate::clipboard::start_pick_image_file());
+        self.file_pick_started = Some(Instant::now());
+    }
+
+    /// Clear in-flight pick state (success, cancel, error, or safety timeout).
+    fn clear_file_pick(&mut self) {
+        self.file_pick_rx = None;
+        self.file_pick_started = None;
     }
 
     /// Apply a finished OS file-dialog result. Call once per frame from the app loop.
@@ -820,23 +928,38 @@ impl AppState {
             Ok(Ok(Some(img))) => {
                 self.compose_image = Some(img);
                 self.focus_compose = true;
-                self.file_pick_rx = None;
+                self.clear_file_pick();
                 false
             }
             Ok(Ok(None)) => {
-                // User cancelled.
-                self.file_pick_rx = None;
+                // User cancelled / dismissed without picking.
+                self.clear_file_pick();
                 false
             }
             Ok(Err(e)) => {
                 self.show_toast(e);
-                self.file_pick_rx = None;
+                self.clear_file_pick();
                 false
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Safety net slightly past the Android scavenger deadline so a
+                // dead dialog cannot leave attach permanently disabled. Normal
+                // cancel returns in milliseconds via Ok(None).
+                const PICK_UI_TIMEOUT: Duration = Duration::from_secs(185);
+                if self
+                    .file_pick_started
+                    .is_some_and(|t| t.elapsed() > PICK_UI_TIMEOUT)
+                {
+                    self.clear_file_pick();
+                    self.show_toast("Image picker closed".to_string());
+                    false
+                } else {
+                    true
+                }
+            }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.show_toast("File picker exited unexpectedly".to_string());
-                self.file_pick_rx = None;
+                self.clear_file_pick();
                 false
             }
         }
@@ -860,6 +983,17 @@ impl AppState {
             return false;
         }
         true
+    }
+
+    /// Persist mic/camera join prefs to disk (independent of session logout).
+    pub fn persist_av_prefs(&self) {
+        let prefs = crate::auth::SavedPrefs {
+            av_pref_muted: self.av_pref_muted,
+            av_pref_camera: self.av_pref_camera,
+        };
+        if let Err(e) = prefs.save() {
+            log::warn!("failed to save av prefs: {e}");
+        }
     }
 
     pub fn persist_session(&self) {
@@ -1096,6 +1230,7 @@ impl AppState {
         self.active_channel = Some(key.clone());
         self.route = Route::Chat(key.clone());
         self.show_members = false;
+        self.react_picker_msg = None;
         if let Some(buf) = self.channels.get_mut(&key) {
             buf.mark_read();
         }
@@ -1106,6 +1241,7 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
+        self.react_picker_msg = None;
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
@@ -1143,13 +1279,20 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
+        self.react_picker_msg = None;
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
         self.local_call = None;
+        self.clear_av_media();
+        self.status_line = "Disconnected".into();
+    }
+
+    /// Drop MoQ video store, textures, and focus (call ended or media stopped).
+    pub fn clear_av_media(&mut self) {
         self.av_video = None;
         self.av_video_textures.clear();
-        self.status_line = "Disconnected".into();
+        self.av_focused_video = None;
     }
 
     /// Full sign-out: disconnect buffers + wipe cached account / guest so the
@@ -1204,5 +1347,80 @@ fn shorten_did(s: &str) -> String {
             .rev()
             .collect();
         format!("{method}:{head}…{tail}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_reactions_tag_canonical() {
+        let m = parse_reactions_tag("👍:alice,bob;❤️:carol");
+        assert_eq!(m.len(), 2);
+        assert!(m["👍"].contains("alice"));
+        assert!(m["👍"].contains("bob"));
+        assert_eq!(m["❤️"], HashSet::from(["carol".into()]));
+    }
+
+    #[test]
+    fn parse_reactions_tag_skips_junk() {
+        let m = parse_reactions_tag("notacolon;:no_emoji;👍:;👎:dave");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["👎"], HashSet::from(["dave".into()]));
+    }
+
+    #[test]
+    fn add_reaction_idempotent_and_case_insensitive() {
+        let mut buf = Buffer::new("#t");
+        buf.append(ChatMessage {
+            id: "m1".into(),
+            from: "alice".into(),
+            text: "hi".into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: Local::now(),
+            reply_to: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+        buf.add_reaction("m1", "👍", "Bob");
+        buf.add_reaction("m1", "👍", "bob"); // same nick
+        buf.add_reaction("m1", "", "carol"); // empty emoji ignored
+        let msg = buf.messages.iter().find(|m| m.id == "m1").unwrap();
+        assert_eq!(msg.reactions["👍"].len(), 1);
+        assert!(msg.has_reaction_from("👍", "BOB"));
+    }
+
+    #[test]
+    fn remove_reaction_drops_empty_emoji() {
+        let mut buf = Buffer::new("#t");
+        buf.append(ChatMessage {
+            id: "m1".into(),
+            from: "alice".into(),
+            text: "hi".into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: Local::now(),
+            reply_to: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+        buf.add_reaction("m1", "🎉", "me");
+        buf.add_reaction("m1", "🎉", "other");
+        buf.remove_reaction("m1", "🎉", "me");
+        let msg = buf.messages.iter().find(|m| m.id == "m1").unwrap();
+        assert_eq!(msg.reactions["🎉"], HashSet::from(["other".into()]));
+        buf.remove_reaction("m1", "🎉", "other");
+        let msg = buf.messages.iter().find(|m| m.id == "m1").unwrap();
+        assert!(!msg.reactions.contains_key("🎉"));
     }
 }

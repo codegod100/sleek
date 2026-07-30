@@ -132,7 +132,8 @@ pub enum MediaStatus {
     Live,
     /// Connect failed; call signaling may still be active.
     Failed(String),
-    /// Native MoQ not available — use browser fallback.
+    /// Legacy: native MoQ was unavailable (pre-Android media plane).
+    /// Kept for status matching; no longer emitted by the dial path.
     BrowserOnly,
 }
 
@@ -145,6 +146,37 @@ impl MediaStatus {
             Self::Failed(e) => format!("Media: {e}"),
             Self::BrowserOnly => "Open in browser for media".into(),
         }
+    }
+}
+
+/// Parse the winning session id from a start-collision reason string.
+///
+/// freeq formats these as:
+/// `Channel #test already has an active session: 01KYRJEW9XCSYB2T10HM9RE1VN`
+/// Prefer `+freeq.at/av-id` when present; this is a belt-and-suspenders fallback.
+pub fn session_id_from_collision_reason(reason: &str) -> Option<String> {
+    const MARKER: &str = "already has an active session:";
+    let idx = reason.to_ascii_lowercase().find(MARKER)?;
+    // Use original slice with same index (marker is ASCII).
+    let rest = reason.get(idx + MARKER.len()..)?.trim();
+    let id = rest.split_whitespace().next()?.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Parse the channel name from a start-collision reason (`Channel #foo already…`).
+pub fn channel_from_collision_reason(reason: &str) -> Option<String> {
+    let rest = reason
+        .strip_prefix("Channel ")
+        .or_else(|| reason.strip_prefix("channel "))?;
+    let ch = rest.split_whitespace().next()?.trim();
+    if ch.starts_with('#') || ch.starts_with('&') {
+        Some(ch.to_string())
+    } else {
+        None
     }
 }
 
@@ -248,6 +280,39 @@ pub fn sfu_moq_url(server: &str, jwt: Option<&str>) -> Result<url::Url, String> 
     Ok(u)
 }
 
+/// Whether we should dial the MoQ SFU now.
+///
+/// Production freeq SFUs require `?jwt=…`. Dialing without a token opens a
+/// connection that the SFU immediately closes — moq-lite then floods
+/// `transport error err=connection closed` once per live stream. Local/dev
+/// SFUs (localhost / 127.*) are allowed without a JWT.
+pub fn can_dial_sfu(server: &str, jwt: Option<&str>) -> bool {
+    if jwt.map(|t| !t.is_empty()).unwrap_or(false) {
+        return true;
+    }
+    let trimmed = server.trim();
+    let host = if let Ok(u) = url::Url::parse(trimmed) {
+        u.host_str().unwrap_or("").to_string()
+    } else if trimmed.starts_with("ws://")
+        || trimmed.starts_with("wss://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        // Malformed absolute URL — treat as remote (need JWT).
+        String::new()
+    } else {
+        trimmed
+            .split('/')
+            .next()
+            .unwrap_or(trimmed)
+            .split(':')
+            .next()
+            .unwrap_or(trimmed)
+            .to_string()
+    };
+    host.eq_ignore_ascii_case("localhost") || host.starts_with("127.")
+}
+
 /// MoQ broadcast path: `{session}/{nick}~{instance}`.
 pub fn broadcast_path(session_id: &str, nick: &str, instance: &str) -> String {
     if instance.is_empty() {
@@ -281,4 +346,56 @@ pub fn should_tap(path: &str, session_id: &str, our_broadcast: &str, my_nick: &s
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        can_dial_sfu, channel_from_collision_reason, session_id_from_collision_reason,
+    };
+
+    #[test]
+    fn collision_reason_parses_session_and_channel() {
+        let reason = "Channel #test already has an active session: 01KYRJEW9XCSYB2T10HM9RE1VN";
+        assert_eq!(
+            session_id_from_collision_reason(reason).as_deref(),
+            Some("01KYRJEW9XCSYB2T10HM9RE1VN")
+        );
+        assert_eq!(
+            channel_from_collision_reason(reason).as_deref(),
+            Some("#test")
+        );
+    }
+
+    #[test]
+    fn collision_reason_unknown_shape() {
+        assert!(session_id_from_collision_reason("nope").is_none());
+        assert!(channel_from_collision_reason("busy").is_none());
+    }
+
+    #[test]
+    fn can_dial_sfu_remote_without_jwt_refused() {
+        assert!(!can_dial_sfu("wss://chat.example.com", None));
+        assert!(!can_dial_sfu("wss://chat.example.com", Some("")));
+        assert!(!can_dial_sfu("https://freeq.example/irc", None));
+        assert!(!can_dial_sfu("chat.example.com:8443", None));
+    }
+
+    #[test]
+    fn can_dial_sfu_localhost_without_jwt_allowed() {
+        assert!(can_dial_sfu("ws://localhost:4443", None));
+        assert!(can_dial_sfu("http://localhost/av", None));
+        assert!(can_dial_sfu("localhost", None));
+        assert!(can_dial_sfu("ws://127.0.0.1:4443", None));
+        assert!(can_dial_sfu("http://127.0.0.1", None));
+        assert!(can_dial_sfu("127.0.0.1:8080", None));
+    }
+
+    #[test]
+    fn can_dial_sfu_with_jwt_always_allowed() {
+        assert!(can_dial_sfu("wss://chat.example.com", Some("eyJhbGciOiJIUzI1NiJ9.e30.x")));
+        assert!(can_dial_sfu("https://remote.example", Some("tok")));
+        assert!(can_dial_sfu("ws://localhost:4443", Some("tok")));
+        assert!(can_dial_sfu("127.0.0.1", Some("tok")));
+    }
 }

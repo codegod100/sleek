@@ -13,7 +13,6 @@ use tokio::sync::mpsc;
 use crate::auth::{self, AuthTokens};
 use crate::state::{prefer_websocket, websocket_url_for};
 
-#[cfg(not(target_os = "android"))]
 use crate::av_media::{AvMediaConfig, AvMediaSession};
 
 /// Commands from the UI into the network thread.
@@ -86,6 +85,10 @@ pub enum NetCmd {
         session_id: String,
         nick: String,
         instance: String,
+        /// Initial mic mute from pre-call prefs.
+        muted: bool,
+        /// Initial camera publish from pre-call prefs.
+        camera: bool,
     },
     /// Tear down MoQ media (leave call / disconnect).
     AvMediaStop,
@@ -93,6 +96,18 @@ pub enum NetCmd {
     AvMute { muted: bool },
     /// Enable / disable camera publish (media plane only; desktop).
     AvCamera { enabled: bool },
+    /// TAGMSG `+react` + `+reply` — add a reaction on a message.
+    React {
+        target: String,
+        emoji: String,
+        msgid: String,
+    },
+    /// TAGMSG `+freeq.at/unreact` + `+reply` — remove our reaction.
+    Unreact {
+        target: String,
+        emoji: String,
+        msgid: String,
+    },
     Quit,
 }
 
@@ -286,49 +301,30 @@ async fn network_loop(
     }
 }
 
-/// MoQ media session owned by the net thread (desktop only).
+/// MoQ media session owned by the net thread (desktop + Android).
 #[derive(Default)]
 struct NetMedia {
-    #[cfg(not(target_os = "android"))]
     session: Option<AvMediaSession>,
-    #[cfg(not(target_os = "android"))]
     muted: Arc<AtomicBool>,
 }
 
 impl NetMedia {
     fn stop(&mut self) {
-        #[cfg(not(target_os = "android"))]
-        {
-            if let Some(mut s) = self.session.take() {
-                s.stop();
-            }
+        if let Some(mut s) = self.session.take() {
+            s.stop();
         }
     }
 
     fn set_muted(&mut self, muted: bool) {
-        #[cfg(not(target_os = "android"))]
-        {
-            if let Some(s) = self.session.as_ref() {
-                s.set_muted(muted);
-            }
-            self.muted = Arc::new(AtomicBool::new(muted));
+        if let Some(s) = self.session.as_ref() {
+            s.set_muted(muted);
         }
-        #[cfg(target_os = "android")]
-        {
-            let _ = muted;
-        }
+        self.muted = Arc::new(AtomicBool::new(muted));
     }
 
     fn set_camera(&mut self, enabled: bool) {
-        #[cfg(not(target_os = "android"))]
-        {
-            if let Some(s) = self.session.as_ref() {
-                s.set_camera_enabled(enabled);
-            }
-        }
-        #[cfg(target_os = "android")]
-        {
-            let _ = enabled;
+        if let Some(s) = self.session.as_ref() {
+            s.set_camera_enabled(enabled);
         }
     }
 }
@@ -353,6 +349,9 @@ async fn apply_cmd(
                 &auth_broker,
                 &bsky_handle,
                 Duration::from_secs(5 * 60),
+                |msg| {
+                    let _ = event_tx.send(NetEvent::Status(msg));
+                },
             )
             .await
             {
@@ -425,6 +424,35 @@ async fn apply_cmd(
             if let Some(h) = handle {
                 if let Err(e) = h.privmsg(&target, &text).await {
                     let _ = event_tx.send(NetEvent::Failed(format!("Send failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
+        NetCmd::React {
+            target,
+            emoji,
+            msgid,
+        } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.react(&target, &emoji, &msgid).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("React failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
+        NetCmd::Unreact {
+            target,
+            emoji,
+            msgid,
+        } => {
+            if let Some(h) = handle {
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("+freeq.at/unreact".to_string(), emoji);
+                tags.insert("+reply".to_string(), msgid);
+                if let Err(e) = h.send_tagmsg(&target, tags).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Unreact failed: {e}")));
                 }
             } else {
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
@@ -513,12 +541,14 @@ async fn apply_cmd(
             tokio::spawn(async move {
                 match freeq_sdk::media::fetch_link_preview(&url).await {
                     Ok(preview) => {
+                        // freeq-sdk flake pin may omit `site_name` on LinkPreview;
+                        // host label is optional UI chrome only.
                         let _ = tx.send(NetEvent::LinkPreviewFetched {
                             url,
                             title: preview.title,
                             description: preview.description,
                             thumb_url: preview.thumb_url,
-                            site_name: preview.site_name,
+                            site_name: None,
                         });
                     }
                     Err(e) => {
@@ -593,65 +623,56 @@ async fn apply_cmd(
             session_id,
             nick,
             instance,
+            muted,
+            camera,
         } => {
             media.stop();
-            #[cfg(not(target_os = "android"))]
-            {
-                let url: url::Url = match sfu_url.parse() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let _ = event_tx.send(NetEvent::AvMediaStatus {
-                            status: crate::av::MediaStatus::Failed(format!("bad SFU URL: {e}")),
-                            video: None,
-                            has_camera: false,
-                        });
-                        return;
-                    }
-                };
-                let _ = event_tx.send(NetEvent::AvMediaStatus {
-                    status: crate::av::MediaStatus::Connecting,
-                    video: None,
-                    has_camera: false,
-                });
-                let tx = event_tx.clone();
-                let session = AvMediaSession::start(
-                    AvMediaConfig {
-                        sfu_url: url,
-                        session_id,
-                        nick,
-                        instance,
-                    },
-                    move |update| {
-                        use crate::av_media::AvMediaUpdate;
-                        let (status, video, has_camera) = match update {
-                            AvMediaUpdate::Live { video, has_camera } => {
-                                (crate::av::MediaStatus::Live, Some(video), has_camera)
-                            }
-                            AvMediaUpdate::Ended => {
-                                (crate::av::MediaStatus::Idle, None, false)
-                            }
-                            AvMediaUpdate::Failed(e) => {
-                                (crate::av::MediaStatus::Failed(e), None, false)
-                            }
-                        };
-                        let _ = tx.send(NetEvent::AvMediaStatus {
-                            status,
-                            video,
-                            has_camera,
-                        });
-                    },
-                );
-                media.session = Some(session);
-            }
-            #[cfg(target_os = "android")]
-            {
-                let _ = (sfu_url, session_id, nick, instance);
-                let _ = event_tx.send(NetEvent::AvMediaStatus {
-                    status: crate::av::MediaStatus::BrowserOnly,
-                    video: None,
-                    has_camera: false,
-                });
-            }
+            let url: url::Url = match sfu_url.parse() {
+                Ok(u) => u,
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::AvMediaStatus {
+                        status: crate::av::MediaStatus::Failed(format!("bad SFU URL: {e}")),
+                        video: None,
+                        has_camera: false,
+                    });
+                    return;
+                }
+            };
+            let _ = event_tx.send(NetEvent::AvMediaStatus {
+                status: crate::av::MediaStatus::Connecting,
+                video: None,
+                has_camera: false,
+            });
+            media.muted = Arc::new(AtomicBool::new(muted));
+            let tx = event_tx.clone();
+            let session = AvMediaSession::start(
+                AvMediaConfig {
+                    sfu_url: url,
+                    session_id,
+                    nick,
+                    instance,
+                    muted,
+                    camera_enabled: camera,
+                },
+                move |update| {
+                    use crate::av_media::AvMediaUpdate;
+                    let (status, video, has_camera) = match update {
+                        AvMediaUpdate::Live { video, has_camera } => {
+                            (crate::av::MediaStatus::Live, Some(video), has_camera)
+                        }
+                        AvMediaUpdate::Ended => (crate::av::MediaStatus::Idle, None, false),
+                        AvMediaUpdate::Failed(e) => {
+                            (crate::av::MediaStatus::Failed(e), None, false)
+                        }
+                    };
+                    let _ = tx.send(NetEvent::AvMediaStatus {
+                        status,
+                        video,
+                        has_camera,
+                    });
+                },
+            );
+            media.session = Some(session);
         }
         NetCmd::AvMediaStop => {
             media.stop();

@@ -6305,6 +6305,7 @@ dependencies = [
  "image",
  "libc",
  "n0-future",
+ "ndk",
  "openh264",
  "pic-scale",
  "rubato 1.0.1",

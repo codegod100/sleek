@@ -10,8 +10,8 @@ use crate::clipboard;
 use crate::net::{NetBridge, NetCmd, NetEvent};
 use crate::preview;
 use crate::state::{
-    api_base_for_server, AppState, CachedPixels, ChatMessage, ConnectionState, LinkMeta, MediaFetch,
-    Route, Tab,
+    api_base_for_server, parse_reactions_tag, AppState, CachedPixels, ChatMessage, ConnectionState,
+    LinkMeta, MediaFetch, Route, Tab,
 };
 use crate::ui::{
     self, ChatAction, ChatsAction, ConnectAction, DiscoverAction, SettingsAction,
@@ -21,9 +21,13 @@ use crate::ui::{
 pub fn run_desktop() -> eframe::Result {
     #[cfg(not(target_os = "android"))]
     {
-        // Default info; clipboard miss noise stays at debug (vendored egui-winit).
-        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .try_init();
+        // Default: app at info; moq_lite at error (see `default_log_filter`).
+        // Clipboard miss noise stays at debug (vendored egui-winit).
+        // RUST_LOG overrides the whole default when set.
+        let _ = env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or(crate::default_log_filter()),
+        )
+        .try_init();
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -147,8 +151,7 @@ impl SleekApp {
                         lc.awaiting_start || lc.instance.is_empty() || lc.session_id.is_empty()
                     }) {
                         self.state.local_call = None;
-                        self.state.av_video = None;
-                        self.state.av_video_textures.clear();
+                        self.state.clear_av_media();
                     }
                 }
                 self.state.error = Some(s.clone());
@@ -232,8 +235,8 @@ impl SleekApp {
                         session_id: sid.clone(),
                         instance: instance.clone(),
                         token: None,
-                        muted: false,
-                        camera: false,
+                        muted: self.state.av_pref_muted,
+                        camera: self.state.av_pref_camera,
                         has_camera: false,
                         media: MediaStatus::Idle,
                         awaiting_start: started,
@@ -243,9 +246,22 @@ impl SleekApp {
                     self.state.show_toast("Starting call…");
                 } else {
                     self.state.show_toast("Joining call…");
-                    // Join already has a session id — dial SFU (token may arrive next).
+                    // Join has a session id; dial only if we already hold a JWT
+                    // (or local SFU). Otherwise wait for `+freeq.at/av-token` —
+                    // dialing without jwt against freeq's SFU gets the
+                    // connection closed immediately and moq-lite spams WARNs.
                     if !sid.is_empty() {
-                        self.try_start_av_media(&channel, &sid, &instance, None);
+                        let tok = self
+                            .state
+                            .local_call
+                            .as_ref()
+                            .and_then(|lc| lc.token.clone());
+                        self.try_start_av_media(
+                            &channel,
+                            &sid,
+                            &instance,
+                            tok.as_deref(),
+                        );
                     }
                 }
             }
@@ -258,15 +274,15 @@ impl SleekApp {
                     lc.media = status.clone();
                     if matches!(status, MediaStatus::Live) {
                         lc.has_camera = has_camera;
-                        // Camera starts enabled when hardware opened.
-                        lc.camera = has_camera;
+                        // Keep pre-call / in-call camera intent; force off if no hardware.
+                        lc.camera = has_camera && lc.camera;
                     }
                     if matches!(
                         status,
                         MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
                     ) {
+                        // Media plane down — hide camera control; keep mute/camera prefs.
                         lc.has_camera = false;
-                        lc.camera = false;
                     }
                 }
                 if let Some(store) = video {
@@ -276,8 +292,7 @@ impl SleekApp {
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
                 ) {
-                    self.state.av_video = None;
-                    self.state.av_video_textures.clear();
+                    self.state.clear_av_media();
                 }
                 match &status {
                     MediaStatus::Live => {
@@ -470,7 +485,8 @@ impl SleekApp {
                         title: lp.title,
                         description: lp.description,
                         thumb_url: lp.thumb_url,
-                        site_name: lp.site_name,
+                        // Prefer IRCv3 tag when present; freeq-sdk pin may lack site_name.
+                        site_name: tags.get("link-site").cloned(),
                     });
                 // Prefetch embeds as soon as the message arrives (history + live).
                 match &embed {
@@ -487,19 +503,30 @@ impl SleekApp {
                     None => {}
                 }
 
+                let reactions = tags
+                    .get("+freeq.at/reactions")
+                    .map(|raw| parse_reactions_tag(raw))
+                    .unwrap_or_default();
+                // Server may mark history/live edits via draft/edit or freeq edit tags.
+                let is_edited = tags.contains_key("+draft/edit")
+                    || tags.contains_key("draft/edit")
+                    || tags.contains_key("+freeq.at/edited")
+                    || tags.get("edited").is_some_and(|v| !v.is_empty());
+
                 let msg = ChatMessage {
                     id: msgid,
                     from: from.clone(),
                     text: body,
                     is_system: false,
                     is_action,
-                    is_edited: false,
+                    is_edited,
                     is_deleted: false,
                     timestamp,
                     reply_to,
                     is_signed,
                     embed,
                     link_meta,
+                    reactions,
                 };
 
                 let viewing = self
@@ -645,6 +672,7 @@ impl SleekApp {
                 } else {
                     self.state.dm_buffer_key(&target)
                 };
+                self.handle_reaction_tags(&key, &from, &tags);
                 self.handle_av_tags(&key, &tags);
             }
             // batches, history, etc. — not yet rendered
@@ -687,12 +715,68 @@ impl SleekApp {
                 .get("+freeq.at/av-reason")
                 .cloned()
                 .unwrap_or_else(|| code.clone());
-            self.state.show_toast(format!("Call error: {reason}"));
-            if let Some(lc) = &self.state.local_call {
-                if lc.awaiting_start || lc.session_id.is_empty() {
+            let err_sid = tags
+                .get("+freeq.at/av-id")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| av::session_id_from_collision_reason(&reason));
+
+            // start-collision: our av-start lost the race (or we started while a
+            // session was already live). freeq names the winning session in
+            // +freeq.at/av-id — converge by joining it instead of toasting an
+            // error and leaving the user stuck. Matches freeq-app client.ts.
+            //
+            // Note: this TAGMSG is directed at our nick, so `channel` here is a
+            // DM buffer key, not the call channel. Prefer local_call.channel.
+            if code == "start-collision" {
+                let join_channel = self
+                    .state
+                    .local_call
+                    .as_ref()
+                    .filter(|lc| lc.awaiting_start || lc.session_id.is_empty())
+                    .map(|lc| lc.channel.clone())
+                    .or_else(|| av::channel_from_collision_reason(&reason));
+                if let (Some(sid), Some(ch)) = (err_sid.as_ref(), join_channel) {
+                    // Seed channel roster so the banner shows "Join" if join fails later.
+                    let buf = self.state.ensure_buffer(&ch);
+                    let needs_seed = buf
+                        .call
+                        .as_ref()
+                        .map(|c| c.session_id != *sid)
+                        .unwrap_or(true);
+                    if needs_seed {
+                        buf.call = Some(av::ChannelCall {
+                            session_id: sid.clone(),
+                            participants: 1,
+                            ..Default::default()
+                        });
+                    }
+                    // Drop optimistic start claim so do_av_join can re-claim the slot.
                     self.state.local_call = None;
-                    self.state.av_video = None;
-                    self.state.av_video_textures.clear();
+                    self.state.clear_av_media();
+                    self.state.show_toast("Call already open — joining…");
+                    self.do_av_join(ch, sid.clone());
+                    return;
+                }
+            }
+
+            self.state.show_toast(format!("Call error: {reason}"));
+            // Tear down optimistic local call on join-failed / failed start.
+            // For join-failed, only if av-id matches our session (or is empty).
+            if let Some(lc) = &self.state.local_call {
+                let about_us = match code.as_str() {
+                    "join-failed" => {
+                        let ours = lc.session_id.as_str();
+                        err_sid
+                            .as_deref()
+                            .map(|s| s.is_empty() || ours.is_empty() || s == ours)
+                            .unwrap_or(true)
+                    }
+                    _ => lc.awaiting_start || lc.session_id.is_empty(),
+                };
+                if about_us {
+                    self.state.local_call = None;
+                    self.state.clear_av_media();
                 }
             }
             return;
@@ -740,14 +824,18 @@ impl SleekApp {
                 {
                     self.net.send(NetCmd::AvMediaStop);
                     self.state.local_call = None;
-                    self.state.av_video = None;
-                    self.state.av_video_textures.clear();
+                    self.state.clear_av_media();
                 }
             }
         }
     }
 
-    /// Dial MoQ media (desktop) or mark browser-only (Android).
+    /// Dial MoQ media (desktop + Android). Android is audio-only publish for now
+    /// (no CameraX bridge under cargo-apk NativeActivity).
+    ///
+    /// Skips dial when the SFU needs a JWT we do not have yet, and skips
+    /// re-dial while already Connecting/Live for the same session + token
+    /// (avoids stop/reconnect churn that floods moq-lite connection-closed WARNs).
     fn try_start_av_media(
         &mut self,
         _channel: &str,
@@ -757,6 +845,30 @@ impl SleekApp {
     ) {
         if session_id.is_empty() {
             return;
+        }
+        if !av::can_dial_sfu(&self.state.server, token) {
+            log::info!(
+                "av-media: waiting for SFU JWT before dial (session {session_id})"
+            );
+            return;
+        }
+        // Android 6+: RECORD_AUDIO is runtime. Prompt before opening the mic;
+        // dial still proceeds so a later retry (after grant) can succeed.
+        #[cfg(target_os = "android")]
+        {
+            let _ = crate::android_media::ensure_record_audio_permission();
+        }
+        // Dedup: same session + same token while already up / in flight.
+        if let Some(lc) = self.state.local_call.as_ref() {
+            let same_session = lc.session_id == session_id;
+            let same_token = lc.token.as_deref() == token;
+            if same_session
+                && same_token
+                && matches!(lc.media, MediaStatus::Live | MediaStatus::Connecting)
+            {
+                log::debug!("av-media: already {:?}, skip re-dial", lc.media);
+                return;
+            }
         }
         let sfu = match av::sfu_moq_url(&self.state.server, token) {
             Ok(u) => u.to_string(),
@@ -768,14 +880,34 @@ impl SleekApp {
                 return;
             }
         };
+        let muted = self
+            .state
+            .local_call
+            .as_ref()
+            .map(|lc| lc.muted)
+            .unwrap_or(self.state.av_pref_muted);
+        let camera = self
+            .state
+            .local_call
+            .as_ref()
+            .map(|lc| lc.camera)
+            .unwrap_or(self.state.av_pref_camera);
         if let Some(lc) = self.state.local_call.as_mut() {
             lc.media = MediaStatus::Connecting;
+            // Keep token in sync so the next try_start can dedup.
+            if let Some(t) = token {
+                if lc.token.as_deref() != Some(t) {
+                    lc.token = Some(t.to_string());
+                }
+            }
         }
         self.net.send(NetCmd::AvMediaConnect {
             sfu_url: sfu,
             session_id: session_id.to_string(),
             nick: self.state.nick.clone(),
             instance: instance.to_string(),
+            muted,
+            camera,
         });
     }
 
@@ -790,8 +922,8 @@ impl SleekApp {
             session_id: String::new(),
             instance: String::new(),
             token: None,
-            muted: false,
-            camera: false,
+            muted: self.state.av_pref_muted,
+            camera: self.state.av_pref_camera,
             has_camera: false,
             media: MediaStatus::Idle,
             awaiting_start: true,
@@ -809,8 +941,8 @@ impl SleekApp {
             session_id: session_id.clone(),
             instance: String::new(),
             token: None,
-            muted: false,
-            camera: false,
+            muted: self.state.av_pref_muted,
+            camera: self.state.av_pref_camera,
             has_camera: false,
             media: MediaStatus::Idle,
             awaiting_start: false,
@@ -825,8 +957,15 @@ impl SleekApp {
         let Some(lc) = self.state.local_call.take() else {
             return;
         };
-        self.state.av_video = None;
-        self.state.av_video_textures.clear();
+        // Remember last in-call choices for the next start/join (and next launch).
+        self.state.av_pref_muted = lc.muted;
+        // Only sync camera pref when hardware was present (otherwise Live
+        // forced `camera = false` and would wipe a deliberate "camera on").
+        if lc.has_camera {
+            self.state.av_pref_camera = lc.camera;
+        }
+        self.state.persist_av_prefs();
+        self.state.clear_av_media();
         self.net.send(NetCmd::AvLeave {
             channel: lc.channel,
             session_id: lc.session_id,
@@ -836,24 +975,34 @@ impl SleekApp {
     }
 
     fn do_av_toggle_mute(&mut self) {
-        let Some(lc) = self.state.local_call.as_mut() else {
-            return;
+        let muted = {
+            let Some(lc) = self.state.local_call.as_mut() else {
+                return;
+            };
+            lc.muted = !lc.muted;
+            lc.muted
         };
-        lc.muted = !lc.muted;
-        self.net.send(NetCmd::AvMute { muted: lc.muted });
+        self.state.av_pref_muted = muted;
+        self.state.persist_av_prefs();
+        self.net.send(NetCmd::AvMute { muted });
     }
 
     fn do_av_toggle_camera(&mut self) {
-        let Some(lc) = self.state.local_call.as_mut() else {
-            return;
+        let camera = {
+            let Some(lc) = self.state.local_call.as_mut() else {
+                return;
+            };
+            if !lc.has_camera {
+                self.state.show_toast("No camera available");
+                return;
+            }
+            lc.camera = !lc.camera;
+            lc.camera
         };
-        if !lc.has_camera {
-            self.state.show_toast("No camera available");
-            return;
-        }
-        lc.camera = !lc.camera;
+        self.state.av_pref_camera = camera;
+        self.state.persist_av_prefs();
         self.net.send(NetCmd::AvCamera {
-            enabled: lc.camera,
+            enabled: camera,
         });
     }
 
@@ -1106,9 +1255,93 @@ impl SleekApp {
             is_signed: false,
             embed,
             link_meta: None,
+            reactions: Default::default(),
         };
         let buf = self.state.ensure_buffer(&buffer_key);
         buf.append(msg);
+    }
+
+    /// Apply live reaction TAGMSG (`+react` / `+freeq.at/unreact` + `+reply`).
+    fn handle_reaction_tags(
+        &mut self,
+        buffer: &str,
+        from: &str,
+        tags: &std::collections::HashMap<String, String>,
+    ) {
+        let reply = tags
+            .get("+reply")
+            .or_else(|| tags.get("reply"))
+            .or_else(|| tags.get("+draft/reply"))
+            .or_else(|| tags.get("draft/reply"))
+            .cloned();
+        let Some(msg_id) = reply.filter(|id| !id.is_empty()) else {
+            return;
+        };
+
+        if let Some(emoji) = tags
+            .get("+freeq.at/unreact")
+            .or_else(|| tags.get("freeq.at/unreact"))
+            .filter(|e| !e.trim().is_empty())
+            .cloned()
+        {
+            if let Some(buf) = self.state.channels.get_mut(buffer) {
+                buf.remove_reaction(&msg_id, &emoji, from);
+            }
+            return;
+        }
+
+        if let Some(emoji) = tags
+            .get("+react")
+            .or_else(|| tags.get("react"))
+            .or_else(|| tags.get("+draft/react"))
+            .or_else(|| tags.get("draft/react"))
+            .filter(|e| !e.trim().is_empty())
+            .cloned()
+        {
+            if let Some(buf) = self.state.channels.get_mut(buffer) {
+                buf.add_reaction(&msg_id, &emoji, from);
+            }
+        }
+    }
+
+    /// Toggle our reaction on a message (optimistic + wire).
+    fn do_toggle_react(&mut self, target: String, msgid: String, emoji: String) {
+        if msgid.is_empty() || emoji.trim().is_empty() {
+            return;
+        }
+        if msgid.starts_with("local-") {
+            self.state
+                .show_toast("Wait for the message to send before reacting");
+            return;
+        }
+        let nick = self.state.nick.clone();
+        let buffer_key = self.state.dm_buffer_key(&target);
+        let already = self
+            .state
+            .channels
+            .get(&buffer_key)
+            .and_then(|b| b.messages.iter().find(|m| m.id == msgid))
+            .is_some_and(|m| m.has_reaction_from(&emoji, &nick));
+
+        if already {
+            if let Some(buf) = self.state.channels.get_mut(&buffer_key) {
+                buf.remove_reaction(&msgid, &emoji, &nick);
+            }
+            self.net.send(NetCmd::Unreact {
+                target,
+                emoji,
+                msgid,
+            });
+        } else {
+            if let Some(buf) = self.state.channels.get_mut(&buffer_key) {
+                buf.add_reaction(&msgid, &emoji, &nick);
+            }
+            self.net.send(NetCmd::React {
+                target,
+                emoji,
+                msgid,
+            });
+        }
     }
 }
 
@@ -1353,6 +1586,13 @@ impl eframe::App for SleekApp {
                     }
                     ChatAction::Send { target, text } => {
                         self.do_send(target, text);
+                    }
+                    ChatAction::React {
+                        target,
+                        msgid,
+                        emoji,
+                    } => {
+                        self.do_toggle_react(target, msgid, emoji);
                     }
                     ChatAction::Part(channel) => {
                         // Only PART the server if we actually joined; denied

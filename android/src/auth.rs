@@ -42,6 +42,59 @@ fn default_true() -> bool {
     true
 }
 
+/// Disk-persisted app preferences (independent of auth session).
+///
+/// Survives logout / guest clear so mic/camera intent stays across launches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPrefs {
+    /// Join / start next call with mic muted.
+    #[serde(default)]
+    pub av_pref_muted: bool,
+    /// Publish camera when hardware is available (desktop MoQ).
+    #[serde(default = "default_true")]
+    pub av_pref_camera: bool,
+}
+
+impl Default for SavedPrefs {
+    fn default() -> Self {
+        Self {
+            av_pref_muted: false,
+            av_pref_camera: true,
+        }
+    }
+}
+
+impl SavedPrefs {
+    pub fn path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("sleek")
+            .join("prefs.json")
+    }
+
+    pub fn load() -> Self {
+        load_prefs(&Self::path()).unwrap_or_default()
+    }
+
+    pub fn save(&self) -> Result<()> {
+        save_prefs(&Self::path(), self)
+    }
+}
+
+fn load_prefs(path: &Path) -> Option<SavedPrefs> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_prefs(path: &Path, prefs: &SavedPrefs) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string_pretty(prefs)?;
+    std::fs::write(path, data)?;
+    Ok(())
+}
+
 /// Disk-persisted session (no single-use web-token).
 ///
 /// Two shapes:
@@ -319,14 +372,30 @@ h1{color:#8b7cf6;font-size:1.25rem} p{color:#a0a0b8;line-height:1.5}
 })();
 </script></body></html>"#;
 
+/// Open `url` in the platform browser.
+fn open_system_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android_media::open_url(url).map_err(|e| anyhow::anyhow!(e))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        open::that(url).context("open browser")
+    }
+}
+
 /// Run a one-shot loopback OAuth capture server and open the broker login URL.
 ///
 /// Blocks until tokens arrive or `timeout` elapses. Intended to run on the
 /// network tokio runtime (or a blocking thread).
+///
+/// `on_status` is invoked for progress notes (e.g. browser open failure with the
+/// URL so the UI is not stuck on a silent "Opening browser…").
 pub async fn bluesky_login_loopback(
     auth_broker: &str,
     handle: &str,
     timeout: Duration,
+    mut on_status: impl FnMut(String),
 ) -> Result<AuthTokens> {
     let listener = TcpListener::bind("127.0.0.1:0").context("bind loopback")?;
     listener
@@ -336,16 +405,30 @@ pub async fn bluesky_login_loopback(
     let return_to = format!("http://127.0.0.1:{port}");
     let url = login_url(auth_broker, handle, Some(&return_to));
 
-    // Open the system browser (no-op failure is non-fatal — user can paste).
-    if let Err(e) = open::that(&url) {
-        log::warn!("failed to open browser: {e}; url={url}");
+    // Open the system browser (failure is non-fatal — loopback still waits;
+    // user can open the URL manually or paste a freeq://auth link).
+    // Desktop: `open` crate. Android: JNI ACTION_VIEW — `open` has no Android
+    // backend and used to leave the UI stuck on "Opening browser…".
+    log::info!("bluesky login url: {url}");
+    match open_system_browser(&url) {
+        Ok(()) => on_status("Browser opened — complete sign-in, then return here".into()),
+        Err(e) => {
+            log::warn!("failed to open browser: {e}; url={url}");
+            on_status(format!(
+                "Could not open browser automatically ({e}). Open this URL, then return:\n{url}"
+            ));
+        }
     }
 
     let deadline = Instant::now() + timeout;
+    let timeout_url = url.clone();
     let listener = tokio::task::spawn_blocking(move || -> Result<AuthTokens> {
         loop {
             if Instant::now() > deadline {
-                bail!("Sign-in timed out — try again or paste the freeq://auth link");
+                bail!(
+                    "Sign-in timed out — open this URL if the browser did not appear, \
+                     or paste a freeq://auth link:\n{timeout_url}"
+                );
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -437,5 +520,19 @@ mod tests {
         let u2 = login_url(DEFAULT_AUTH_BROKER, "foo", Some("http://127.0.0.1:9"));
         assert!(u2.contains("return_to="));
         assert!(!u2.contains("mobile=1"));
+    }
+
+    #[test]
+    fn prefs_defaults_and_roundtrip() {
+        let d = SavedPrefs::default();
+        assert!(!d.av_pref_muted);
+        assert!(d.av_pref_camera);
+        // Missing camera field should default to true (join with camera ready).
+        let partial: SavedPrefs = serde_json::from_str(r#"{"av_pref_muted":true}"#).unwrap();
+        assert!(partial.av_pref_muted);
+        assert!(partial.av_pref_camera);
+        let empty: SavedPrefs = serde_json::from_str("{}").unwrap();
+        assert!(!empty.av_pref_muted);
+        assert!(empty.av_pref_camera);
     }
 }

@@ -64,6 +64,21 @@ eframe = { version = "0.31", default-features = false, features = [
     "glow",
 ] }
 
+# freeq AV MoQ media plane (mic + remote A/V; desktop also local camera).
+# Same revs as freeq-av / freeq-av-client. Shared by desktop + Android so
+# mobile no longer stubs BrowserOnly — cpal aaudio handles mic/speaker.
+iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = [
+    "opus",
+    "h264",
+] }
+moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = [
+    "noq",
+    "websocket",
+    "aws-lc-rs",
+] }
+moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main" }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.31", default-features = false, features = [
     "default_fonts",
@@ -83,19 +98,12 @@ rfd = { version = "0.15", default-features = false, features = [
     "xdg-portal",
     "tokio",
 ] }
-# freeq AV MoQ media plane (mic + camera + remote A/V). Same revs as freeq-av / freeq-av-client.
+# Local camera publish uses V4L2 / platform capture (not available under cargo-apk).
 iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = [
     "opus",
     "h264",
     "capture-camera",
 ] }
-moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = [
-    "noq",
-    "websocket",
-    "aws-lc-rs",
-] }
-moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main" }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = [
@@ -107,6 +115,13 @@ android_logger = "0.14"
 winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
 # Same major as android-activity — runtime permission prompts for image attach.
 jni = "0.22"
+# rusty-codecs format.rs references `ndk` under cfg(android) — enable the
+# iroh-live `android` feature so `dep:ndk` is linked (MediaCodec optional path).
+iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = [
+    "opus",
+    "h264",
+    "android",
+] }
 
 [package.metadata.android]
 package = "uk.nandi.sleek"
@@ -130,7 +145,7 @@ name = "android.permission.READ_MEDIA_IMAGES"
 name = "android.permission.READ_EXTERNAL_STORAGE"
 max_sdk_version = 32
 
-# Voice calls (native MoQ later; browser fallback today).
+# Voice calls — native MoQ over cpal aaudio (mic + speaker).
 [[package.metadata.android.uses_permission]]
 name = "android.permission.RECORD_AUDIO"
 

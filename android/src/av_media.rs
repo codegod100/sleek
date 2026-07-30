@@ -1,10 +1,12 @@
-//! Native MoQ media plane for freeq AV calls (desktop).
+//! Native MoQ media plane for freeq AV calls.
 //!
-//! Publishes mic Opus + optional camera H.264 to the SFU and plays remote
-//! audio/video via `iroh-live` + `moq-native` — same stack as freeq-av /
-//! freeq-sdk-ffi.
+//! Publishes mic Opus (+ optional camera H.264 on desktop) to the SFU and
+//! plays remote audio/video via `iroh-live` + `moq-native` — same stack as
+//! freeq-av / freeq-sdk-ffi.
 //!
-//! Android builds omit this module; they use signaling + browser fallback.
+//! Android: mic/speaker via cpal aaudio; local camera publish is not wired
+//! yet (needs CameraX / MediaCodec JNI, not cargo-apk NativeActivity). Remote
+//! H.264 still decodes in-software when peers publish video.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,16 +14,22 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use iroh_live::media::{
     audio_backend::AudioBackend,
-    capture::{CameraCapturer, CameraConfig, CameraSelector},
-    codec::{AudioCodec, VideoCodec},
-    format::{AudioPreset, VideoPreset},
+    codec::AudioCodec,
+    format::AudioPreset,
     publish::LocalBroadcast,
     subscribe::RemoteBroadcast,
-    traits::VideoSource,
 };
 use tokio::sync::oneshot;
 
 use crate::av::{broadcast_path, path_nick, should_tap, VideoFrameStore};
+
+#[cfg(not(target_os = "android"))]
+use iroh_live::media::{
+    capture::{CameraCapturer, CameraConfig, CameraSelector},
+    codec::VideoCodec,
+    format::VideoPreset,
+    traits::VideoSource,
+};
 
 #[derive(Clone)]
 pub struct AvMediaConfig {
@@ -29,6 +37,10 @@ pub struct AvMediaConfig {
     pub session_id: String,
     pub nick: String,
     pub instance: String,
+    /// Initial mic mute (pre-call preference).
+    pub muted: bool,
+    /// Initial camera publish when hardware is available.
+    pub camera_enabled: bool,
 }
 
 /// Status updates from the media task.
@@ -60,9 +72,9 @@ impl AvMediaSession {
     where
         F: Fn(AvMediaUpdate) + Send + Sync + 'static,
     {
-        let muted = Arc::new(AtomicBool::new(false));
-        // Camera on by default when hardware is available (set after open).
-        let camera_enabled = Arc::new(AtomicBool::new(true));
+        let muted = Arc::new(AtomicBool::new(config.muted));
+        // Respect pre-call camera pref; has_camera is reported after open.
+        let camera_enabled = Arc::new(AtomicBool::new(config.camera_enabled));
         let video = VideoFrameStore::new();
         let (stop_tx, stop_rx) = oneshot::channel();
         let muted_task = muted.clone();
@@ -99,10 +111,6 @@ impl AvMediaSession {
 
     pub fn set_camera_enabled(&self, enabled: bool) {
         self.camera_enabled.store(enabled, Ordering::Relaxed);
-        if !enabled {
-            // Drop local preview tile while camera is off.
-            self.video.remove("__local__");
-        }
     }
 
     pub fn stop(&mut self) {
@@ -110,6 +118,8 @@ impl AvMediaSession {
             let _ = tx.send(());
         }
         if let Some(task) = self.task.take() {
+            // Soft stop first (oneshot); abort if the task is stuck.
+            // and moq_lite logs a WARN per stream.
             task.abort();
         }
         self.video.clear();
@@ -160,36 +170,45 @@ async fn run_media(
         .set(muteable, AudioCodec::Opus, [AudioPreset::Hq])
         .context("set mic audio source")?;
 
-    // Camera: advertise H.264 in the catalog up front (web moq-watch samples
-    // the catalog at subscribe time). Gate frames when the user toggles off.
-    // Prefer 360p to keep software openh264 real-time on modest CPUs.
-    let mut has_camera = false;
-    match open_camera() {
-        Ok(cam) => {
-            let gated = GatedCameraSource {
-                inner: cam,
-                enabled: camera_enabled.clone(),
-                preview: video_store.clone(),
-            };
-            match broadcast
-                .video()
-                .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
-            {
-                Ok(()) => {
-                    has_camera = true;
-                    log::info!("av-media: camera open, publishing H.264 360p");
-                }
-                Err(e) => {
-                    log::warn!("av-media: video set_source failed (audio-only): {e}");
-                    camera_enabled.store(false, Ordering::Relaxed);
+    // Camera: desktop only (V4L2 / platform capture). Android NativeActivity
+    // has no CameraX bridge yet — audio-only publish; remote video still works.
+    #[cfg(not(target_os = "android"))]
+    let has_camera = {
+        match open_camera() {
+            Ok(cam) => {
+                let gated = GatedCameraSource {
+                    inner: cam,
+                    enabled: camera_enabled.clone(),
+                    preview: video_store.clone(),
+                };
+                match broadcast
+                    .video()
+                    .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
+                {
+                    Ok(()) => {
+                        log::info!("av-media: camera open, publishing H.264 360p");
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("av-media: video set_source failed (audio-only): {e}");
+                        camera_enabled.store(false, Ordering::Relaxed);
+                        false
+                    }
                 }
             }
+            Err(e) => {
+                log::warn!("av-media: no camera ({e}); audio-only");
+                camera_enabled.store(false, Ordering::Relaxed);
+                false
+            }
         }
-        Err(e) => {
-            log::warn!("av-media: no camera ({e}); audio-only");
-            camera_enabled.store(false, Ordering::Relaxed);
-        }
-    }
+    };
+    #[cfg(target_os = "android")]
+    let has_camera = {
+        camera_enabled.store(false, Ordering::Relaxed);
+        log::info!("av-media: Android — audio-only publish (no local camera yet)");
+        false
+    };
 
     let origin = moq_lite::Origin::produce();
     origin.publish_broadcast(&our_broadcast, broadcast.consume());
@@ -246,15 +265,25 @@ async fn run_media(
     tokio::select! {
         res = session_handle.closed() => {
             if let Err(e) = res {
-                log::warn!("av-media: session closed: {e}");
+                // "connection closed" is expected on leave / peer hangup / SFU
+                // idle timeout — one line is enough; moq_lite may still WARN
+                // per stream internally.
+                log::info!("av-media: session closed: {e}");
+            } else {
+                log::info!("av-media: session closed cleanly");
             }
         }
         _ = &mut stop => {
             log::info!("av-media: stop requested");
         }
     }
+    // Drop session first so the transport shuts down, then cancel subscribers.
+    drop(session_handle);
     sub_task.abort();
     video_store.clear();
+    // Brief yield so abort of child tasks and QUIC close settle without
+    // racing a hard parent abort (Drop) on the next AvMediaConnect.
+    tokio::task::yield_now().await;
     Ok(())
 }
 
@@ -308,16 +337,14 @@ async fn tap_remote(
                             let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
                             store.set(nick.clone(), w, h, bytes);
                         }
-                        store.remove(&nick);
                         log::info!("av-media: video track ended for {path}");
                     }
                     Err(e) => {
-                        store.remove(&nick);
-                        log::debug!("av-media: video_ready {path}: {e}");
+                        log::debug!("av-media: video wait {path}: {e}");
+                        // Catalog may not advertise video yet; retry briefly.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }
-                // Avoid a hot loop if the track dies immediately.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         })
     };
@@ -330,6 +357,7 @@ async fn tap_remote(
     video_store.remove(&nick);
 }
 
+#[cfg(not(target_os = "android"))]
 fn open_camera() -> Result<CameraCapturer> {
     let config = CameraConfig {
         selector: CameraSelector::TargetResolution(640, 360),
@@ -342,12 +370,14 @@ fn open_camera() -> Result<CameraCapturer> {
 /// Wraps camera capture: when disabled, drain frames but publish none so the
 /// H.264 track stays in the catalog (peers who already subscribed keep the
 /// video rendition for when the camera comes back).
+#[cfg(not(target_os = "android"))]
 struct GatedCameraSource {
     inner: CameraCapturer,
     enabled: Arc<AtomicBool>,
     preview: VideoFrameStore,
 }
 
+#[cfg(not(target_os = "android"))]
 impl VideoSource for GatedCameraSource {
     fn name(&self) -> &str {
         self.inner.name()

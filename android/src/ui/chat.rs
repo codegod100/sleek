@@ -5,7 +5,7 @@ use vidya::{button, dim_label, primary_button, title_2, Theme};
 
 use crate::clipboard;
 use crate::state::AppState;
-use crate::ui::widgets::{avatar_circle, empty_state, message_bubble};
+use crate::ui::widgets::{avatar_circle, empty_state, message_bubble, MessageBubbleAction};
 
 pub enum ChatAction {
     None,
@@ -26,6 +26,12 @@ pub enum ChatAction {
     AvToggleCamera,
     /// Jump to the channel that holds our active call.
     OpenCallChannel(String),
+    /// Toggle our reaction on a message (`+react` / `+freeq.at/unreact`).
+    React {
+        target: String,
+        msgid: String,
+        emoji: String,
+    },
 }
 
 pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel: &str) -> ChatAction {
@@ -59,10 +65,6 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
             ),
         }
     };
-    let local_in_call = state
-        .local_call
-        .as_ref()
-        .is_some_and(|lc| lc.channel.eq_ignore_ascii_case(channel));
     members.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
     let own_nick = state.nick.clone();
     let is_guest = state.did.is_none();
@@ -154,20 +156,25 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // ── AV call banner (start / join only; active call chrome is global) ─
     // The MoQ section for an open call lives in the app-level top panel so it
     // stays visible on every route — only idle/join controls stay here.
-    if is_channel && joined && !local_in_call {
-        let elsewhere = state
-            .local_call
-            .as_ref()
-            .filter(|lc| !lc.channel.eq_ignore_ascii_case(channel))
-            .cloned();
+    // Mic/camera prefs live on the banner so they can be set before joining.
+    // When already in a call (this channel or another), skip entirely: the
+    // global panel has mute/camera/leave/open — a second "In call on …" strip
+    // was redundant.
+    if is_channel && joined && state.local_call.is_none() {
+        let prev_muted = state.av_pref_muted;
+        let prev_camera = state.av_pref_camera;
         if let Some(act) = av_call_banner(
             ui,
             th,
             channel,
             channel_call.as_ref(),
-            elsewhere.as_ref(),
+            &mut state.av_pref_muted,
+            &mut state.av_pref_camera,
         ) {
             action = act;
+        }
+        if state.av_pref_muted != prev_muted || state.av_pref_camera != prev_camera {
+            state.persist_av_prefs();
         }
         ui.add_space(sp.sm);
     }
@@ -320,10 +327,11 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2)),
         )
         .show_inside(ui, |ui| {
-            ui.set_min_width(body_w);
-            ui.set_max_width(body_w);
-            let inner_w = ui.available_width();
-            ui.set_width(inner_w);
+            // Use the frame's *inner* width only. Forcing `body_w` (outer strip
+            // before margins) overflows the clip rect and chops the Send button.
+            let inner_w = ui.available_width().max(1.0);
+            ui.set_min_width(inner_w);
+            ui.set_max_width(inner_w);
 
             if has_image {
                 if let Some(send) = compose_image_composer(ui, th, state) {
@@ -333,86 +341,38 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     };
                 }
             } else {
-                // One control-height row: attach | field | Send, cross-aligned center.
-                ui.horizontal(|ui| {
-                    ui.set_width(inner_w);
-                    let control_h = th.spacing.control_height;
-                    let attach_w = 40.0_f32;
-                    let send_w = 72.0_f32;
-                    let field_w =
-                        (ui.available_width() - attach_w - send_w - sp.sm * 2.0).max(48.0);
-
-                    let attach = ui
-                        .add_sized(
-                            Vec2::new(attach_w, control_h),
-                            egui::Button::new(
-                                RichText::new("🖼")
-                                    .size(th.type_scale.body)
-                                    .color(p.button_fg),
-                            )
-                            .fill(p.button_bg)
-                            .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
-                            .corner_radius(sp.radius_md),
-                        )
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(if pick_busy {
-                            "Opening file picker…"
-                        } else if cfg!(target_os = "android") {
-                            "Attach image"
-                        } else {
-                            "Attach image (or paste with Ctrl+V)"
-                        });
-                    if attach.clicked() && !pick_busy {
-                        state.start_file_pick();
-                    }
-
-                    ui.add_space(sp.sm);
-                    // Fixed single-line height; Shift+Enter inserts a newline, bare Enter sends.
-                    // Center text vertically so the hint matches attach/Send baselines
-                    // (multiline defaults to TOP; button labels are centered).
-                    let te = egui::TextEdit::multiline(&mut state.compose)
-                        .margin(th.text_edit_margin())
-                        .desired_width(field_w)
-                        .desired_rows(1)
-                        .min_size(Vec2::new(field_w, control_h))
-                        .vertical_align(Align::Center)
-                        .hint_text("Message…")
-                        .return_key(egui::KeyboardShortcut::new(
-                            egui::Modifiers::SHIFT,
-                            egui::Key::Enter,
-                        ));
-                    let resp = ui.add_sized(Vec2::new(field_w, control_h), te);
-                    if state.focus_compose {
-                        resp.request_focus();
-                        state.focus_compose = false;
-                    }
-                    let enter = resp.has_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-
-                    ui.add_space(sp.sm);
-                    let send_clicked = ui
-                        .add_sized(
-                            Vec2::new(send_w, control_h),
-                            egui::Button::new(
-                                RichText::new("Send")
-                                    .size(th.type_scale.body)
-                                    .color(p.accent_fg),
-                            )
-                            .fill(p.accent)
-                            .stroke(egui::Stroke::NONE)
-                            .corner_radius(sp.radius_md)
-                            .min_size(Vec2::new(send_w, control_h)),
-                        )
-                        .clicked()
-                        && can_send;
-
-                    if (send_clicked || enter) && can_send {
-                        action = ChatAction::Send {
-                            target: channel.to_string(),
-                            text: state.compose.trim().to_string(),
-                        };
-                    }
-                });
+                let attach_tip = if pick_busy {
+                    "Opening file picker…"
+                } else if cfg!(target_os = "android") {
+                    "Attach image"
+                } else {
+                    "Attach image (or paste with Ctrl+V)"
+                };
+                let (resp, attach_clicked, send_clicked) = compose_input_row(
+                    ui,
+                    th,
+                    &mut state.compose,
+                    "Message…",
+                    "Send",
+                    72.0,
+                    attach_tip,
+                    true,
+                );
+                if attach_clicked && !pick_busy {
+                    state.start_file_pick();
+                }
+                if state.focus_compose {
+                    resp.request_focus();
+                    state.focus_compose = false;
+                }
+                let enter = resp.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                if (send_clicked || enter) && can_send {
+                    action = ChatAction::Send {
+                        target: channel.to_string(),
+                        text: state.compose.trim().to_string(),
+                    };
+                }
             }
         });
 
@@ -439,7 +399,34 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 });
             } else {
                 for msg in &messages {
-                    message_bubble(ui, th, msg, &own_nick, &mut state.media);
+                    let picker_open = state
+                        .react_picker_msg
+                        .as_ref()
+                        .is_some_and(|id| id == &msg.id);
+                    match message_bubble(
+                        ui,
+                        th,
+                        msg,
+                        &own_nick,
+                        &mut state.media,
+                        picker_open,
+                    ) {
+                        MessageBubbleAction::None => {}
+                        MessageBubbleAction::ToggleReaction { msgid, emoji } => {
+                            state.react_picker_msg = None;
+                            action = ChatAction::React {
+                                target: channel.to_string(),
+                                msgid,
+                                emoji,
+                            };
+                        }
+                        MessageBubbleAction::OpenReactPicker { msgid } => {
+                            state.react_picker_msg = Some(msgid);
+                        }
+                        MessageBubbleAction::CloseReactPicker => {
+                            state.react_picker_msg = None;
+                        }
+                    }
                     ui.add_space(sp.sm);
                 }
             }
@@ -615,81 +602,36 @@ fn compose_image_composer(
     ui.add_space(sp.sm);
 
     // Same row shape as the no-image compose bar: attach | caption | Submit.
-    ui.horizontal(|ui| {
-        ui.set_width(bar_w);
-        let control_h = th.spacing.control_height;
-        let attach_w = 40.0_f32;
-        let send_w = 80.0_f32;
-        let field_w = (ui.available_width() - attach_w - send_w - sp.sm * 2.0).max(48.0);
-
-        let attach = ui
-            .add_sized(
-                Vec2::new(attach_w, control_h),
-                egui::Button::new(
-                    RichText::new("🖼")
-                        .size(th.type_scale.body)
-                        .color(p.button_fg),
-                )
-                .fill(p.button_bg)
-                .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
-                .corner_radius(sp.radius_md),
-            )
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(if pick_busy {
-                "Opening file picker…"
-            } else if cfg!(target_os = "android") {
-                "Replace image"
-            } else {
-                "Replace image (or paste with Ctrl+V)"
-            });
-        if attach.clicked() && !uploading && !pick_busy {
-            state.start_file_pick();
-        }
-
-        ui.add_space(sp.sm);
-
-        // Single-line height matching attach/Submit; center text with the buttons.
-        let te = egui::TextEdit::multiline(&mut state.compose)
-            .margin(th.text_edit_margin())
-            .desired_width(field_w)
-            .desired_rows(1)
-            .min_size(Vec2::new(field_w, control_h))
-            .vertical_align(Align::Center)
-            .hint_text("Caption (optional)…")
-            .interactive(!uploading)
-            .return_key(egui::KeyboardShortcut::new(
-                egui::Modifiers::SHIFT,
-                egui::Key::Enter,
-            ));
-        let resp = ui.add_sized(Vec2::new(field_w, control_h), te);
-        if state.focus_compose && !uploading {
-            resp.request_focus();
-            state.focus_compose = false;
-        }
-        let enter = resp.has_focus()
-            && !uploading
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-
-        ui.add_space(sp.sm);
-        let send_clicked = ui
-            .add_sized(
-                Vec2::new(send_w, control_h),
-                egui::Button::new(
-                    RichText::new("Submit")
-                        .size(th.type_scale.body)
-                        .color(p.accent_fg),
-                )
-                .fill(p.accent)
-                .stroke(egui::Stroke::NONE)
-                .corner_radius(sp.radius_md)
-                .min_size(Vec2::new(send_w, control_h)),
-            )
-            .clicked()
-            && can_send;
-        if (send_clicked || enter) && can_send {
-            submit = true;
-        }
-    });
+    let attach_tip = if pick_busy {
+        "Opening file picker…"
+    } else if cfg!(target_os = "android") {
+        "Replace image"
+    } else {
+        "Replace image (or paste with Ctrl+V)"
+    };
+    let (resp, attach_clicked, send_clicked) = compose_input_row(
+        ui,
+        th,
+        &mut state.compose,
+        "Caption (optional)…",
+        "Submit",
+        80.0,
+        attach_tip,
+        !uploading,
+    );
+    if attach_clicked && !uploading && !pick_busy {
+        state.start_file_pick();
+    }
+    if state.focus_compose && !uploading {
+        resp.request_focus();
+        state.focus_compose = false;
+    }
+    let enter = resp.has_focus()
+        && !uploading
+        && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+    if (send_clicked || enter) && can_send {
+        submit = true;
+    }
 
     if clear {
         state.compose_image = None;
@@ -700,6 +642,108 @@ fn compose_image_composer(
     } else {
         None
     }
+}
+
+/// Fixed-height compose row: attach | field | action, vertically centered.
+///
+/// Returns `(text_response, attach_clicked, action_clicked)`.
+///
+/// Layout notes:
+/// - Width is the *current* available width (already inside frame margins).
+/// - Theme `item_spacing` is zeroed so gaps are only the explicit `sp.sm`
+///   (otherwise spacing stacks and clips the action button on the right).
+/// - All three controls share `control_height` so baselines match.
+fn compose_input_row(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    text: &mut String,
+    hint: &str,
+    action_label: &str,
+    action_w: f32,
+    attach_tooltip: &str,
+    field_interactive: bool,
+) -> (egui::Response, bool, bool) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let control_h = sp.control_height;
+    let gap = sp.sm;
+    // Square attach control matching the row height.
+    let attach_w = control_h;
+    let row_w = ui.available_width().max(1.0);
+    let field_w = (row_w - attach_w - action_w - gap * 2.0).max(48.0);
+
+    let mut attach_clicked = false;
+    let mut action_clicked = false;
+    let mut text_resp = None;
+
+    ui.allocate_ui_with_layout(
+        Vec2::new(row_w, control_h),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_width(row_w);
+            ui.set_height(control_h);
+            // Explicit gaps only — theme item_spacing would double-count.
+            ui.spacing_mut().item_spacing.x = 0.0;
+
+            let attach = ui
+                .add_sized(
+                    Vec2::new(attach_w, control_h),
+                    egui::Button::new(
+                        RichText::new("🖼")
+                            .size(th.type_scale.body)
+                            .color(p.button_fg),
+                    )
+                    .fill(p.button_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
+                    .corner_radius(sp.radius_md),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text(attach_tooltip);
+            attach_clicked = attach.clicked();
+
+            ui.add_space(gap);
+
+            // Fixed single-line height; Shift+Enter inserts a newline, bare Enter sends.
+            // Center text so the hint matches attach/action baselines
+            // (multiline defaults to TOP; button labels are centered).
+            let te = egui::TextEdit::multiline(text)
+                .margin(th.text_edit_margin())
+                .desired_width(field_w)
+                .desired_rows(1)
+                .min_size(Vec2::new(field_w, control_h))
+                .vertical_align(Align::Center)
+                .hint_text(hint)
+                .interactive(field_interactive)
+                .return_key(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                ));
+            text_resp = Some(ui.add_sized(Vec2::new(field_w, control_h), te));
+
+            ui.add_space(gap);
+
+            action_clicked = ui
+                .add_sized(
+                    Vec2::new(action_w, control_h),
+                    egui::Button::new(
+                        RichText::new(action_label)
+                            .size(th.type_scale.body)
+                            .color(p.accent_fg),
+                    )
+                    .fill(p.accent)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(sp.radius_md)
+                    .min_size(Vec2::new(action_w, control_h)),
+                )
+                .clicked();
+        },
+    );
+
+    (
+        text_resp.expect("compose row always allocates the text field"),
+        attach_clicked,
+        action_clicked,
+    )
 }
 
 /// If the user pastes (Ctrl/Cmd+V) and the clipboard holds an image, attach it
@@ -833,43 +877,53 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
     action
 }
 
-/// Per-channel call strip when we are *not* the local participant of that call:
-/// start (idle), join (session present), or point at our single active call elsewhere.
+/// Pre-call mic/camera toggles (labels match in-call controls).
+fn av_media_prefs_row(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    pref_muted: &mut bool,
+    pref_camera: &mut bool,
+) {
+    let sp = &th.spacing;
+    ui.horizontal(|ui| {
+        let mute_label = if *pref_muted { "Unmute" } else { "Mute" };
+        if button(ui, th, mute_label).clicked() {
+            *pref_muted = !*pref_muted;
+        }
+        ui.add_space(sp.sm);
+        let cam_label = if *pref_camera {
+            "Camera off"
+        } else {
+            "Camera on"
+        };
+        if button(ui, th, cam_label).clicked() {
+            *pref_camera = !*pref_camera;
+        }
+        ui.add_space(sp.sm);
+        let hint = match (*pref_muted, *pref_camera) {
+            (false, true) => "Mic + camera ready",
+            (true, true) => "Join muted · camera on",
+            (false, false) => "Mic on · camera off",
+            (true, false) => "Join muted · camera off",
+        };
+        dim_label(ui, th, hint);
+    });
+}
+
+/// Per-channel call strip when we are not in any local call:
+/// start (idle) or join (session present on this channel).
+/// Active-call chrome is global (`active_call_panel`); do not duplicate it here.
 fn av_call_banner(
     ui: &mut egui::Ui,
     th: &Theme,
     channel: &str,
     channel_call: Option<&crate::av::ChannelCall>,
-    elsewhere: Option<&crate::av::LocalCall>,
+    pref_muted: &mut bool,
+    pref_camera: &mut bool,
 ) -> Option<ChatAction> {
     let sp = &th.spacing;
     let p = &th.palette;
     let mut action = None;
-
-    // Already in the one allowed call (on another channel) — no second start/join.
-    if let Some(lc) = elsewhere {
-        let frame = egui::Frame::new()
-            .fill(p.accent.gamma_multiply(0.10))
-            .stroke(egui::Stroke::new(1.0_f32, p.accent.gamma_multiply(0.35)))
-            .corner_radius(sp.radius_md)
-            .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8));
-        frame.show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                dim_label(ui, th, &format!("In call on {}", lc.channel));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if button(ui, th, "Leave").clicked() {
-                        action = Some(ChatAction::AvLeave);
-                    }
-                    ui.add_space(sp.sm);
-                    if button(ui, th, "Open").clicked() {
-                        action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
-                    }
-                });
-            });
-        });
-        return action;
-    }
 
     // Idle: offer start. One call at a time is enforced when starting.
     if channel_call.is_none() {
@@ -879,6 +933,8 @@ fn av_call_banner(
             }
             dim_label(ui, th, "Voice & video over MoQ");
         });
+        ui.add_space(sp.xs);
+        av_media_prefs_row(ui, th, pref_muted, pref_camera);
         return action;
     }
 
@@ -918,12 +974,15 @@ fn av_call_banner(
                 });
             }
         });
+        ui.add_space(sp.xs);
+        av_media_prefs_row(ui, th, pref_muted, pref_camera);
     });
 
     action
 }
 
 /// Paint remote (+ local preview) video tiles from the MoQ frame store.
+/// Click a tile to enlarge/focus it; click the focused tile again to restore the grid.
 fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     let Some(store) = state.av_video.clone() else {
         return;
@@ -942,77 +1001,199 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     });
 
     let sp = &th.spacing;
-    let p = &th.palette;
     ui.add_space(sp.sm);
-
-    let avail = ui.available_width();
-    let tile_w = if frames.len() == 1 {
-        avail.min(280.0)
-    } else {
-        ((avail - sp.sm) / 2.0).clamp(100.0, 200.0)
-    };
-    let tile_h = tile_w * 9.0 / 16.0;
 
     let live: std::collections::HashSet<String> = frames.iter().map(|(n, _)| n.clone()).collect();
     state.av_video_textures.retain(|k, _| live.contains(k));
+    // Drop focus if that participant left / stopped publishing.
+    if state
+        .av_focused_video
+        .as_ref()
+        .is_some_and(|n| !live.contains(n))
+    {
+        state.av_focused_video = None;
+    }
 
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
-        for (nick, frame) in frames {
-            let label = if nick == "__local__" {
-                "You".to_string()
-            } else {
-                nick.clone()
-            };
-            let tex_id = {
-                let color = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    frame.rgba.as_ref(),
+    // Upload / refresh GPU textures first so paint helpers only need ids + dims.
+    let mut tiles: Vec<(String, egui::TextureId, u32, u32)> = Vec::with_capacity(frames.len());
+    for (nick, frame) in &frames {
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [frame.width as usize, frame.height as usize],
+            frame.rgba.as_ref(),
+        );
+        let tex_id = match state.av_video_textures.entry(nick.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().set(color, egui::TextureOptions::LINEAR);
+                e.get().id()
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let tex = ui.ctx().load_texture(
+                    format!("av_video_{nick}"),
+                    color,
+                    egui::TextureOptions::LINEAR,
                 );
-                match state.av_video_textures.entry(nick.clone()) {
-                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                        e.get_mut().set(color, egui::TextureOptions::LINEAR);
-                        e.get().id()
-                    }
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        let tex = ui.ctx().load_texture(
-                            format!("av_video_{nick}"),
-                            color,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        let id = tex.id();
-                        e.insert(tex);
-                        id
+                let id = tex.id();
+                e.insert(tex);
+                id
+            }
+        };
+        tiles.push((nick.clone(), tex_id, frame.width, frame.height));
+    }
+
+    let focused = state.av_focused_video.clone();
+    let mut clicked: Option<String> = None;
+
+    if let Some(focus_nick) = focused.as_ref() {
+        // Enlarged primary + filmstrip of the rest.
+        let avail = ui.available_width();
+        let primary_w = avail.min(560.0);
+        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 360.0);
+        let thumb_w = ((avail - sp.sm) / 4.0).clamp(72.0, 140.0);
+        let thumb_h = thumb_w * 9.0 / 16.0;
+
+        if let Some((nick, tex_id, w, h)) = tiles.iter().find(|(n, _, _, _)| n == focus_nick) {
+            if paint_av_video_tile(
+                ui,
+                th,
+                nick,
+                *tex_id,
+                *w,
+                *h,
+                Vec2::new(primary_w, primary_h),
+                true,
+            )
+            .clicked()
+            {
+                clicked = Some(nick.clone());
+            }
+        }
+
+        let others: Vec<_> = tiles
+            .iter()
+            .filter(|(n, _, _, _)| n != focus_nick)
+            .cloned()
+            .collect();
+        if !others.is_empty() {
+            ui.add_space(sp.xs);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
+                for (nick, tex_id, w, h) in others {
+                    if paint_av_video_tile(
+                        ui,
+                        th,
+                        &nick,
+                        tex_id,
+                        w,
+                        h,
+                        Vec2::new(thumb_w, thumb_h),
+                        false,
+                    )
+                    .clicked()
+                    {
+                        clicked = Some(nick);
                     }
                 }
-            };
-
-            ui.vertical(|ui| {
-                let size = Vec2::new(tile_w, tile_h);
-                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-                let aspect = frame.width as f32 / frame.height.max(1) as f32;
-                let fit = if aspect > size.x / size.y {
-                    Vec2::new(size.x, size.x / aspect)
-                } else {
-                    Vec2::new(size.y * aspect, size.y)
-                };
-                let img_rect = egui::Rect::from_center_size(rect.center(), fit);
-                ui.painter()
-                    .rect_filled(rect, sp.radius_sm, p.card_bg);
-                ui.painter().image(
-                    tex_id,
-                    img_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                ui.painter().text(
-                    rect.left_bottom() + Vec2::new(6.0, -4.0),
-                    Align2::LEFT_BOTTOM,
-                    &label,
-                    egui::FontId::proportional(th.type_scale.caption),
-                    p.text,
-                );
             });
         }
-    });
+    } else {
+        // Equal grid.
+        let avail = ui.available_width();
+        let tile_w = if tiles.len() == 1 {
+            avail.min(280.0)
+        } else {
+            ((avail - sp.sm) / 2.0).clamp(100.0, 200.0)
+        };
+        let tile_h = tile_w * 9.0 / 16.0;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
+            for (nick, tex_id, w, h) in &tiles {
+                if paint_av_video_tile(
+                    ui,
+                    th,
+                    nick,
+                    *tex_id,
+                    *w,
+                    *h,
+                    Vec2::new(tile_w, tile_h),
+                    false,
+                )
+                .clicked()
+                {
+                    clicked = Some(nick.clone());
+                }
+            }
+        });
+    }
+
+    if let Some(nick) = clicked {
+        // Toggle: click focused tile to restore grid; otherwise switch focus.
+        if state.av_focused_video.as_deref() == Some(nick.as_str()) {
+            state.av_focused_video = None;
+        } else {
+            state.av_focused_video = Some(nick);
+        }
+    }
+}
+
+/// One clickable video tile. Returns the interaction response (for click handling).
+fn paint_av_video_tile(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    nick: &str,
+    tex_id: egui::TextureId,
+    frame_w: u32,
+    frame_h: u32,
+    size: Vec2,
+    focused: bool,
+) -> egui::Response {
+    let sp = &th.spacing;
+    let p = &th.palette;
+    let label = if nick == "__local__" {
+        "You"
+    } else {
+        nick
+    };
+
+    ui.vertical(|ui| {
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+        if resp.hovered() || focused {
+            // Subtle ring when hovered or currently focused.
+            let stroke_c = if focused {
+                p.accent
+            } else {
+                p.accent.gamma_multiply(0.55)
+            };
+            ui.painter().rect_stroke(
+                rect,
+                sp.radius_sm,
+                egui::Stroke::new(if focused { 2.0_f32 } else { 1.5_f32 }, stroke_c),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let aspect = frame_w as f32 / frame_h.max(1) as f32;
+        let fit = if aspect > size.x / size.y {
+            Vec2::new(size.x, size.x / aspect)
+        } else {
+            Vec2::new(size.y * aspect, size.y)
+        };
+        let img_rect = egui::Rect::from_center_size(rect.center(), fit);
+        ui.painter().rect_filled(rect, sp.radius_sm, p.card_bg);
+        ui.painter().image(
+            tex_id,
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + Vec2::new(6.0, -4.0),
+            Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::proportional(th.type_scale.caption),
+            p.text,
+        );
+        resp
+    })
+    .inner
 }

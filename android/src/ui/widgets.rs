@@ -1,12 +1,25 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{self, Align, Color32, CursorIcon, Layout, RichText, Sense, Stroke, Vec2};
-use vidya::{body, dim_label, title_2, Theme};
+use vidya::{dim_label, title_2, Theme};
 
 use crate::preview::{self, Embed};
 use crate::state::{
-    Buffer, ChatMessage, ImageState, LinkMeta, LinkState, MediaCache,
+    Buffer, ChatMessage, ImageState, LinkMeta, LinkState, MediaCache, QUICK_REACT_EMOJIS,
 };
+
+/// Interaction from a chat message bubble.
+#[derive(Debug, Clone, Default)]
+pub enum MessageBubbleAction {
+    #[default]
+    None,
+    /// Toggle (add/remove) our reaction on this message.
+    ToggleReaction { msgid: String, emoji: String },
+    /// Open the quick-react strip for this message.
+    OpenReactPicker { msgid: String },
+    /// Dismiss the quick-react strip.
+    CloseReactPicker,
+}
 
 /// Card frame filling parent width.
 pub fn card(ui: &mut egui::Ui, th: &Theme, add: impl FnOnce(&mut egui::Ui)) {
@@ -172,22 +185,24 @@ pub fn message_bubble(
     msg: &ChatMessage,
     own_nick: &str,
     media: &mut MediaCache,
-) {
+    react_picker_open: bool,
+) -> MessageBubbleAction {
     let p = &th.palette;
     let sp = &th.spacing;
     let is_own = !msg.is_system && msg.from.eq_ignore_ascii_case(own_nick);
+    let mut action = MessageBubbleAction::None;
 
     if msg.is_system {
         ui.horizontal(|ui| {
             ui.add_space(sp.sm);
             dim_label(ui, th, &format!("· {}", msg.text));
         });
-        return;
+        return action;
     }
 
     if msg.is_deleted {
         dim_label(ui, th, "Message deleted");
-        return;
+        return action;
     }
 
     let body_text = if msg.is_action {
@@ -203,8 +218,12 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
+    let can_react =
+        !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
 
-    egui::Frame::new()
+    // Body frame only — reaction chips live *below* so bubble gestures can't
+    // steal their clicks (later full-rect interacts would otherwise win).
+    let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(Stroke::new(1.0_f32, p.border_soft))
         .corner_radius(sp.radius_md)
@@ -228,6 +247,38 @@ pub fn message_bubble(
                     );
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if can_react {
+                        let react_btn = ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("☺")
+                                        .size(th.type_scale.caption)
+                                        .color(if react_picker_open {
+                                            p.accent
+                                        } else {
+                                            p.text_secondary
+                                        }),
+                                )
+                                .frame(false)
+                                .min_size(Vec2::new(22.0, 18.0)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(if react_picker_open {
+                                "Hide reactions"
+                            } else {
+                                "Add reaction"
+                            });
+                        if react_btn.clicked() {
+                            action = if react_picker_open {
+                                MessageBubbleAction::CloseReactPicker
+                            } else {
+                                MessageBubbleAction::OpenReactPicker {
+                                    msgid: msg.id.clone(),
+                                }
+                            };
+                        }
+                        ui.add_space(sp.xs);
+                    }
                     let mut meta = msg.time_label();
                     if msg.is_edited {
                         meta = format!("edited · {meta}");
@@ -239,7 +290,42 @@ pub fn message_bubble(
                 });
             });
             ui.add_space(sp.xs);
-            body(ui, th, &body_text);
+            // Sense on the body only — double-click ❤️, right-click / long-press picker
+            // (freeq-android parity). Keeps chips / embeds / ☺ free of click steal.
+            let body_resp = ui.add(
+                egui::Label::new(
+                    RichText::new(&body_text)
+                        .size(th.type_scale.body)
+                        .color(p.text),
+                )
+                .wrap()
+                .sense(if can_react {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                }),
+            );
+            if can_react {
+                let body_resp = body_resp.on_hover_text(
+                    "Double-click ❤️ · right-click / long-press to react",
+                );
+                if matches!(action, MessageBubbleAction::None) {
+                    if body_resp.double_clicked() {
+                        action = MessageBubbleAction::ToggleReaction {
+                            msgid: msg.id.clone(),
+                            emoji: "❤️".to_string(),
+                        };
+                    } else if body_resp.secondary_clicked() || body_resp.long_touched() {
+                        action = if react_picker_open {
+                            MessageBubbleAction::CloseReactPicker
+                        } else {
+                            MessageBubbleAction::OpenReactPicker {
+                                msgid: msg.id.clone(),
+                            }
+                        };
+                    }
+                }
+            }
 
             if let Some(embed) = embed {
                 ui.add_space(sp.sm);
@@ -249,11 +335,152 @@ pub fn message_bubble(
                     }
                     Embed::Link { url } => {
                         let seed = msg.link_meta.clone();
-                        og_link_preview(ui, th, media, &url, seed.as_ref());
+                        // Salt with message id so two bubbles with the same URL
+                        // never share an interact / hover widget id.
+                        og_link_preview(ui, th, media, &url, seed.as_ref(), &msg.id);
                     }
                 }
             }
         });
+    let _ = frame_resp;
+
+    // Reaction tallies (outside body hit-target).
+    if !msg.reactions.is_empty() {
+        ui.add_space(sp.xs);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let mut entries: Vec<_> = msg.reactions.iter().collect();
+            entries.sort_by(|(a, na), (b, nb)| nb.len().cmp(&na.len()).then_with(|| a.cmp(b)));
+            for (emoji, nicks) in entries {
+                let count = nicks.len();
+                let mine = nicks.iter().any(|n| n.eq_ignore_ascii_case(own_nick));
+                let fill = if mine {
+                    p.accent.gamma_multiply(0.35)
+                } else {
+                    p.headerbar_bg
+                };
+                let stroke = if mine {
+                    Stroke::new(1.0_f32, p.accent.gamma_multiply(0.7))
+                } else {
+                    Stroke::new(1.0_f32, p.border_soft)
+                };
+                let label = if count > 1 {
+                    format!("{emoji} {count}")
+                } else {
+                    emoji.clone()
+                };
+                let tip = {
+                    let mut names: Vec<_> = nicks.iter().cloned().collect();
+                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                    let shown: Vec<_> = names.into_iter().take(12).collect();
+                    let extra = count.saturating_sub(shown.len());
+                    let mut s = format!("reacted with {emoji}: {}", shown.join(", "));
+                    if extra > 0 {
+                        s.push_str(&format!(" +{extra} more"));
+                    }
+                    s
+                };
+                let chip = egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(label)
+                                .size(th.type_scale.caption)
+                                .color(p.text),
+                        );
+                    });
+                let resp = ui
+                    .interact(
+                        chip.response.rect,
+                        ui.id().with("react_chip").with(&msg.id).with(emoji.as_str()),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text(tip);
+                if can_react && resp.clicked() {
+                    action = MessageBubbleAction::ToggleReaction {
+                        msgid: msg.id.clone(),
+                        emoji: emoji.clone(),
+                    };
+                }
+            }
+            if can_react {
+                let add = egui::Frame::new()
+                    .fill(p.headerbar_bg)
+                    .stroke(Stroke::new(1.0_f32, p.border_soft))
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("+")
+                                .size(th.type_scale.caption)
+                                .color(p.text_secondary)
+                                .strong(),
+                        );
+                    });
+                let resp = ui
+                    .interact(
+                        add.response.rect,
+                        ui.id().with("react_add").with(&msg.id),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Add reaction");
+                if resp.clicked() {
+                    action = MessageBubbleAction::OpenReactPicker {
+                        msgid: msg.id.clone(),
+                    };
+                }
+            }
+        });
+    }
+
+    // Quick-react strip.
+    if react_picker_open && can_react {
+        ui.add_space(sp.xs);
+        egui::Frame::new()
+            .fill(p.headerbar_bg)
+            .stroke(Stroke::new(1.0_f32, p.border_soft))
+            .corner_radius(sp.radius_sm)
+            .inner_margin(egui::Margin::symmetric(6, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for emoji in QUICK_REACT_EMOJIS {
+                        let mine = msg.has_reaction_from(emoji, own_nick);
+                        let fill = if mine {
+                            p.accent.gamma_multiply(0.4)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let btn = ui
+                            .add(
+                                egui::Button::new(RichText::new(*emoji).size(th.type_scale.body))
+                                    .fill(fill)
+                                    .frame(true)
+                                    .min_size(Vec2::new(32.0, 28.0)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(if mine {
+                                format!("Remove {emoji}")
+                            } else {
+                                format!("React {emoji}")
+                            });
+                        if btn.clicked() {
+                            action = MessageBubbleAction::ToggleReaction {
+                                msgid: msg.id.clone(),
+                                emoji: (*emoji).to_string(),
+                            };
+                        }
+                    }
+                });
+            });
+    }
+
+    action
 }
 
 /// Max width for inline image / link cards inside a bubble.
@@ -324,6 +551,9 @@ fn og_link_preview(
     media: &mut MediaCache,
     url: &str,
     seeded: Option<&LinkMeta>,
+    // Unique per bubble (message id). Must not be URL alone — same link
+    // in two messages would collide on interact/hover state.
+    id_salt: &str,
 ) {
     let p = &th.palette;
     let sp = &th.spacing;
@@ -350,6 +580,8 @@ fn og_link_preview(
     let host = preview::display_host(url);
     let path = preview::display_path(url);
     let card_w = ui.available_width().min(300.0).max(120.0);
+    // Per-message id — not the URL (duplicate links must not share widget state).
+    let card_id = ui.id().with("og").with(id_salt);
 
     let frame_resp = egui::Frame::new()
         .fill(p.headerbar_bg)
@@ -473,11 +705,7 @@ fn og_link_preview(
             });
         });
 
-    let resp = ui.interact(
-        frame_resp.response.rect,
-        ui.id().with("og").with(url),
-        Sense::click(),
-    );
+    let resp = ui.interact(frame_resp.response.rect, card_id, Sense::click());
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
