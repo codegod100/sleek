@@ -391,8 +391,78 @@ fn open_system_browser(url: &str) -> Result<()> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        open::that(url).context("open browser")
+        open_desktop_browser(url)
     }
+}
+
+/// Desktop open: prefer `$BROWSER`, then Chromium (Codespace VNC), then `open`.
+///
+/// Codespace / desktop-lite has no default browser; Chromium from nix needs
+/// `--no-sandbox` because user namespaces are blocked.
+#[cfg(not(target_os = "android"))]
+fn open_desktop_browser(url: &str) -> Result<()> {
+    use std::process::Command;
+
+    // 1) Explicit BROWSER (scripts/vnc-browser.sh on Codespaces).
+    if let Ok(browser) = std::env::var("BROWSER") {
+        if !browser.is_empty() {
+            // Do not wait — browser stays open for OAuth.
+            match Command::new(&browser).arg(url).spawn() {
+                Ok(_) => return Ok(()),
+                Err(e) => log::warn!("BROWSER={browser} failed: {e}"),
+            }
+        }
+    }
+
+    // 2) Chromium / Chrome with container-friendly flags (VNC / Docker).
+    let chromes = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"];
+    for bin in chromes {
+        if which_bin(bin).is_some() {
+            let profile = std::env::var("SLEEK_BROWSER_PROFILE")
+                .unwrap_or_else(|_| "/tmp/sleek-chromium".into());
+            let _ = std::fs::create_dir_all(&profile);
+            match Command::new(bin)
+                .args([
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--new-window",
+                ])
+                .arg(format!("--user-data-dir={profile}"))
+                .arg(url)
+                .spawn()
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => log::debug!("spawn {bin}: {e}"),
+            }
+        }
+    }
+
+    // 3) Firefox (nix profile); sandbox often fails in Codespaces.
+    if which_bin("firefox").is_some() {
+        match Command::new("firefox")
+            .env("MOZ_DISABLE_CONTENT_SANDBOX", "1")
+            .env("MOZ_ENABLE_WAYLAND", "0")
+            .args(["--no-remote", "--new-window", url])
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => log::debug!("spawn firefox: {e}"),
+        }
+    }
+
+    // 4) Generic opener (xdg-open / open).
+    open::that(url).context("open browser")
+}
+
+#[cfg(not(target_os = "android"))]
+fn which_bin(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
+            let p = dir.join(name);
+            p.is_file().then_some(p)
+        })
+    })
 }
 
 /// Run a one-shot loopback OAuth capture server and open the broker login URL.

@@ -7,6 +7,18 @@
 #
 # Safe to source repeatedly: skips if already in the shell or if nix is missing.
 
+# VNC OAuth browser (safe for non-interactive too).
+_sleek_env_src_early="${BASH_SOURCE[0]:-}"
+if [[ -n "$_sleek_env_src_early" ]]; then
+  _sleek_root_early="$(cd "$(dirname "$_sleek_env_src_early")/.." && pwd 2>/dev/null || true)"
+  if [[ -n "${_sleek_root_early:-}" && -x "${_sleek_root_early}/scripts/vnc-browser.sh" ]]; then
+    export BROWSER="${BROWSER:-${_sleek_root_early}/scripts/vnc-browser.sh}"
+    export PATH="${HOME}/.nix-profile/bin:${PATH:-}"
+  fi
+  unset _sleek_root_early
+fi
+unset _sleek_env_src_early
+
 # Only for interactive shells (not scp/sftp/CI scripts).
 case $- in
   *i*) ;;

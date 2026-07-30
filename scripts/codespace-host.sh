@@ -126,6 +126,10 @@ run_host() {
   export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
   # just host uses this for Codespace display + software GL defaults
   export SLEEK_CODESPACE="${SLEEK_CODESPACE:-1}"
+  # Bluesky OAuth needs a real browser inside VNC (not host xdg-open).
+  if [[ -x "$ROOT/scripts/vnc-browser.sh" ]]; then
+    export BROWSER="${BROWSER:-$ROOT/scripts/vnc-browser.sh}"
+  fi
 
   if [[ -S /tmp/.X11-unix/X1 ]]; then
     export DISPLAY=:1

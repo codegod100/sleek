@@ -541,6 +541,42 @@ if command -v direnv >/dev/null 2>&1; then
   (cd "$ROOT" && direnv allow .) 2>/dev/null || true
 fi
 
+# ── VNC browser for OAuth (Bluesky) ──────────────────────────────────
+# desktop-lite has no browser; apt only ships chromium/firefox snaps (broken
+# here). Install Chromium via nix and point $BROWSER at our no-sandbox wrapper.
+ensure_vnc_browser() {
+  if [[ -z "${SLEEK_CODESPACE:-}${CODESPACE_NAME:-}" && ! -S /tmp/.X11-unix/X1 ]]; then
+    return 0
+  fi
+  local wrapper="$ROOT/scripts/vnc-browser.sh"
+  chmod +x "$wrapper" 2>/dev/null || true
+  export PATH="${HOME}/.nix-profile/bin:/nix/var/nix/profiles/default/bin:${PATH}"
+  if ! command -v chromium >/dev/null 2>&1; then
+    if command -v nix >/dev/null 2>&1 && nix_store_ok; then
+      log "installing chromium (nix profile) for VNC OAuth…"
+      # `nix profile add` is the current command; `install` still works as alias.
+      nix profile add nixpkgs#chromium 2>/dev/null \
+        || nix profile install nixpkgs#chromium 2>/dev/null \
+        || log "chromium install failed — run: nix profile add nixpkgs#chromium"
+    fi
+  fi
+  if [[ -x "$wrapper" ]]; then
+    # Persist for login shells (codespace-env also sets this).
+    local envline="export BROWSER=\"$wrapper\""
+    if ! grep -qF 'scripts/vnc-browser.sh' "$HOME/.bashrc" 2>/dev/null; then
+      {
+        echo ""
+        echo "# sleek VNC browser (OAuth)"
+        echo "$envline"
+        echo "export PATH=\"\${HOME}/.nix-profile/bin:\${PATH}\""
+      } >>"$HOME/.bashrc"
+      log "BROWSER → $wrapper"
+    fi
+    export BROWSER="$wrapper"
+  fi
+}
+ensure_vnc_browser
+
 # ── warm the flake ───────────────────────────────────────────────────
 if [[ "${SLEEK_SKIP_FLAKE_WARM:-}" != "1" ]]; then
   if nix_store_ok; then
