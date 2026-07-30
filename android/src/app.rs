@@ -120,6 +120,8 @@ struct SleekApp {
     mode: Mode,
     state: AppState,
     net: NetBridge,
+    /// Full window width (Codespace / SLEEK_FIT_VIEWPORT); skip 480px desktop column.
+    fill_viewport: bool,
     /// One-shot: force fullscreen / screen size on Codespace VNC (Fluxbox).
     fit_viewport_pending: bool,
 }
@@ -134,6 +136,7 @@ impl SleekApp {
             mode: Mode::Dark,
             state,
             net,
+            fill_viewport: fit_viewport,
             fit_viewport_pending: fit_viewport,
         };
         // freeq-android FreeqApp: auto-reconnect saved broker session on launch.
@@ -1497,6 +1500,8 @@ impl eframe::App for SleekApp {
         let sp = &th.spacing;
         let screen = ctx.screen_rect();
         let phone = screen.height() >= screen.width() || screen.width() < 640.0;
+        // Codespace/noVNC: use the full window, not a centered 480px phone column.
+        let fill = phone || self.fill_viewport;
 
         reserve_system_chrome(ctx, &th);
         // NativeActivity rarely resizes the GL surface for the soft keyboard
@@ -1550,8 +1555,9 @@ impl eframe::App for SleekApp {
                     // Cap width on ultrawide desktop so a single tile doesn't become a
                     // billboard; keep enough room for long channel titles + video.
                     // Height stays content-sized (TopBottomPanel sizes to children).
+                    // On Codespace fill-viewport, use the full width.
                     let avail = ui.available_width();
-                    let max_w = if phone { avail } else { avail.min(720.0) };
+                    let max_w = if fill { avail } else { avail.min(720.0) };
                     ui.set_max_width(max_w);
                     ui.set_min_width(max_w.min(avail));
                     if let Some(act) = ui::active_call_panel(ui, &th, &mut self.state) {
@@ -1654,7 +1660,7 @@ impl eframe::App for SleekApp {
         }
 
         // ── Main content ───────────────────────────────────────────
-        let page = if phone {
+        let page = if fill {
             egui::Frame::new()
                 .fill(p.window_bg)
                 .inner_margin(egui::Margin::symmetric(10_i8, sp.page as i8))
@@ -1663,7 +1669,8 @@ impl eframe::App for SleekApp {
         };
 
         egui::CentralPanel::default().frame(page).show(ctx, |ui| {
-            let col_w = if phone {
+            // Local desktop: narrow phone-like column. Codespace: full window.
+            let col_w = if fill {
                 ui.available_width()
             } else {
                 ui.available_width().min(480.0)
@@ -1834,7 +1841,7 @@ impl eframe::App for SleekApp {
                         }
                     }
 
-                    if phone {
+                    if fill {
                         ui.add_space(sp.xl + sp.lg);
                     }
                 });
