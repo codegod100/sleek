@@ -17,6 +17,47 @@ use crate::ui::{
     self, ChatAction, ChatsAction, ConnectAction, DiscoverAction, SettingsAction,
 };
 
+/// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
+/// X display so the app matches the browser viewport (not a 390×780 island).
+/// Override: `SLEEK_FIT_VIEWPORT=1` always fit; `=0` force phone size.
+/// Optional exact size: `SLEEK_VIEWPORT=1440x768`.
+fn fit_viewport_enabled() -> bool {
+    match std::env::var("SLEEK_FIT_VIEWPORT").as_deref() {
+        Ok("1") | Ok("true") | Ok("yes") => true,
+        Ok("0") | Ok("false") | Ok("no") => false,
+        _ => std::env::var_os("SLEEK_CODESPACE").is_some(),
+    }
+}
+
+/// Best-effort screen size in points (Codespace VNC / X11 when maximize is ignored).
+fn detect_screen_size() -> Option<egui::Vec2> {
+    if let Ok(s) = std::env::var("SLEEK_VIEWPORT") {
+        let mut parts = s.to_lowercase().split('x');
+        let w: f32 = parts.next()?.trim().parse().ok()?;
+        let h: f32 = parts.next()?.trim().parse().ok()?;
+        if w > 0.0 && h > 0.0 {
+            return Some(egui::vec2(w, h));
+        }
+    }
+    // desktop-lite / TigerVNC ships xdpyinfo; dimensions: 1440x768 pixels …
+    let out = std::process::Command::new("xdpyinfo").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("dimensions:") else {
+            continue;
+        };
+        let dim = rest.trim().split_whitespace().next()?;
+        let mut parts = dim.split('x');
+        let w: f32 = parts.next()?.parse().ok()?;
+        let h: f32 = parts.next()?.parse().ok()?;
+        if w > 0.0 && h > 0.0 {
+            return Some(egui::vec2(w, h));
+        }
+    }
+    None
+}
+
 /// Desktop / host entry.
 pub fn run_desktop() -> eframe::Result {
     #[cfg(not(target_os = "android"))]
@@ -29,25 +70,25 @@ pub fn run_desktop() -> eframe::Result {
         )
         .try_init();
     }
-    // Phone-shaped default for local desktop; on Codespaces / noVNC fill the
-    // X display so the app matches the browser viewport (not a 390×780 island).
-    // Override: SLEEK_FIT_VIEWPORT=1 always maximize; =0 force phone size.
-    let fit_viewport = match std::env::var("SLEEK_FIT_VIEWPORT").as_deref() {
-        Ok("1") | Ok("true") | Ok("yes") => true,
-        Ok("0") | Ok("false") | Ok("no") => false,
-        _ => std::env::var_os("SLEEK_CODESPACE").is_some(),
-    };
-    let viewport = if fit_viewport {
-        egui::ViewportBuilder::default()
-            .with_title("Sleek")
+    let fit_viewport = fit_viewport_enabled();
+    let mut viewport = egui::ViewportBuilder::default().with_title("Sleek");
+    if fit_viewport {
+        // Fluxbox on desktop-lite often ignores `maximized`; size to the X
+        // screen (or fullscreen) so noVNC shows a full-viewport app.
+        if let Some(size) = detect_screen_size() {
+            viewport = viewport
+                .with_inner_size(size)
+                .with_position(egui::pos2(0.0, 0.0));
+        }
+        viewport = viewport
+            .with_fullscreen(true)
             .with_maximized(true)
-            .with_min_inner_size([320.0, 400.0])
+            .with_min_inner_size([320.0, 400.0]);
     } else {
-        egui::ViewportBuilder::default()
-            .with_title("Sleek")
+        viewport = viewport
             .with_inner_size([390.0, 780.0])
-            .with_min_inner_size([320.0, 560.0])
-    };
+            .with_min_inner_size([320.0, 560.0]);
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -55,7 +96,7 @@ pub fn run_desktop() -> eframe::Result {
     eframe::run_native(
         "Sleek",
         options,
-        Box::new(|cc| Ok(Box::new(SleekApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(SleekApp::new(cc, fit_viewport)))),
     )
 }
 
@@ -70,7 +111,7 @@ pub fn run_android(android_app: winit::platform::android::activity::AndroidApp) 
     eframe::run_native(
         "Sleek",
         options,
-        Box::new(|cc| Ok(Box::new(SleekApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(SleekApp::new(cc, false)))),
     )
 }
 
@@ -78,10 +119,12 @@ struct SleekApp {
     mode: Mode,
     state: AppState,
     net: NetBridge,
+    /// One-shot: force fullscreen / screen size on Codespace VNC (Fluxbox).
+    fit_viewport_pending: bool,
 }
 
 impl SleekApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, fit_viewport: bool) -> Self {
         let theme = Theme::dark();
         apply(&cc.egui_ctx, &theme);
         let state = AppState::new();
@@ -90,6 +133,7 @@ impl SleekApp {
             mode: Mode::Dark,
             state,
             net,
+            fit_viewport_pending: fit_viewport,
         };
         // freeq-android FreeqApp: auto-reconnect saved broker session on launch.
         // Guest path: same idea — reconnect with the remembered nick.
@@ -100,6 +144,24 @@ impl SleekApp {
             app.do_connect();
         }
         app
+    }
+
+    fn apply_fit_viewport(&mut self, ctx: &egui::Context) {
+        if !self.fit_viewport_pending {
+            return;
+        }
+        self.fit_viewport_pending = false;
+        // Prefer live monitor size from winit; fall back to xdpyinfo / env.
+        let size = ctx
+            .input(|i| i.viewport().monitor_size)
+            .filter(|s| s.x > 0.0 && s.y > 0.0)
+            .or_else(detect_screen_size);
+        if let Some(size) = size {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
     }
 
     fn theme(&self) -> Theme {
@@ -1425,6 +1487,7 @@ fn reserve_ime_chrome(ctx: &egui::Context, th: &Theme) {
 
 impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_fit_viewport(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
 
