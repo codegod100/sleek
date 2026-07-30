@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use freeq_sdk::av::{AvAction, AvState};
@@ -31,6 +32,8 @@ pub struct LocalCall {
     pub camera: bool,
     /// True when the media plane opened a capture device (desktop).
     pub has_camera: bool,
+    /// True when a real mic is feeding outbound Opus. False = silence/listen-only.
+    pub has_mic: bool,
     pub media: MediaStatus,
     /// True after we sent av-start and are waiting for av-state=started.
     pub awaiting_start: bool,
@@ -119,6 +122,75 @@ impl VideoFrameStore {
 
     pub fn is_empty(&self) -> bool {
         self.frames.lock().map(|g| g.is_empty()).unwrap_or(true)
+    }
+}
+
+/// Live mic input level (0.0..=1.0) shared between the capture thread and UI.
+///
+/// Updated from PCM samples *before* mute silence is applied, so the meter
+/// still moves while muted (useful for checking that the mic works).
+#[derive(Clone, Default)]
+pub struct MicLevel {
+    /// Envelope 0.0..=1.0 stored as f32 bits.
+    bits: Arc<AtomicU32>,
+}
+
+impl fmt::Debug for MicLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MicLevel")
+            .field("level", &self.get())
+            .finish()
+    }
+}
+
+impl MicLevel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+    }
+
+    pub fn set(&self, level: f32) {
+        self.bits
+            .store(level.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn clear(&self) {
+        self.set(0.0);
+    }
+
+    /// Update from a PCM buffer: peak+RMS blend with soft attack / release.
+    pub fn observe(&self, samples: &[f32]) {
+        if samples.is_empty() {
+            // Slow release when the capture thread is idle.
+            let prev = self.get();
+            self.set(prev * 0.85);
+            return;
+        }
+        let mut sum_sq = 0.0f32;
+        let mut peak = 0.0f32;
+        for &s in samples {
+            let a = s.abs();
+            if a > peak {
+                peak = a;
+            }
+            sum_sq += s * s;
+        }
+        let rms = (sum_sq / samples.len() as f32).sqrt();
+        // Speech is well below full-scale; blend + expand quiet levels.
+        let combined = (0.65 * rms + 0.35 * peak).min(1.0);
+        let linear = combined.sqrt().clamp(0.0, 1.0);
+        let prev = self.get();
+        let next = if linear > prev {
+            // Fast attack so peaks register immediately.
+            prev + (linear - prev) * 0.55
+        } else {
+            // Slower release so the bar doesn't flicker.
+            prev * 0.88 + linear * 0.12
+        };
+        self.set(next);
     }
 }
 
@@ -237,7 +309,22 @@ pub fn av_state_message(st: &AvState) -> String {
 /// - `wss://irc.freeq.at/irc` → `https://irc.freeq.at/av/moq`
 ///
 /// When `jwt` is set, appends `?jwt=…` (required when the SFU enforces tokens).
+/// Prefer [`sfu_moq_dial_url`] when you also have a per-call instance id
+/// (`?inst=…`, freeq-app / freeq SFU media-revocation parity).
 pub fn sfu_moq_url(server: &str, jwt: Option<&str>) -> Result<url::Url, String> {
+    sfu_moq_dial_url(server, jwt, None)
+}
+
+/// SFU dial URL with optional JWT + per-call instance query params.
+///
+/// freeq-app dials `wss://host/av/moq?inst={instance}&jwt={token}` (inst always,
+/// jwt when minted). Matching that shape keeps native clients on the same
+/// media-admission path as the working web client.
+pub fn sfu_moq_dial_url(
+    server: &str,
+    jwt: Option<&str>,
+    instance: Option<&str>,
+) -> Result<url::Url, String> {
     let trimmed = server.trim();
     if trimmed.is_empty() {
         return Err("server is empty".into());
@@ -274,8 +361,16 @@ pub fn sfu_moq_url(server: &str, jwt: Option<&str>) -> Result<url::Url, String> 
     }
     u.set_path("/av/moq");
     u.set_query(None);
+    let mut pairs: Vec<String> = Vec::new();
+    if let Some(inst) = instance.filter(|i| !i.is_empty()) {
+        pairs.push(format!("inst={}", urlencoding::encode(inst)));
+    }
     if let Some(tok) = jwt.filter(|t| !t.is_empty()) {
-        u.set_query(Some(&format!("jwt={tok}")));
+        // JWTs are base64url; pass through (matches freeq-sdk-ffi / freeq-app).
+        pairs.push(format!("jwt={tok}"));
+    }
+    if !pairs.is_empty() {
+        u.set_query(Some(&pairs.join("&")));
     }
     Ok(u)
 }
@@ -322,9 +417,17 @@ pub fn broadcast_path(session_id: &str, nick: &str, instance: &str) -> String {
     }
 }
 
-/// Display nick from a broadcast path.
+/// Stable map key for a broadcast path: last segment (`nick` or `nick~instance`).
+///
+/// Prefer this over [`path_nick`] for frame stores so two devices with the same
+/// nick do not overwrite each other.
+pub fn path_key(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Display nick from a broadcast path (or a [`path_key`]).
 pub fn path_nick(path: &str) -> &str {
-    let last = path.rsplit('/').next().unwrap_or(path);
+    let last = path_key(path);
     last.split('~').next().unwrap_or(last)
 }
 
@@ -351,8 +454,56 @@ pub fn should_tap(path: &str, session_id: &str, our_broadcast: &str, my_nick: &s
 #[cfg(test)]
 mod tests {
     use super::{
-        can_dial_sfu, channel_from_collision_reason, session_id_from_collision_reason,
+        broadcast_path, can_dial_sfu, channel_from_collision_reason, path_key, path_nick,
+        session_id_from_collision_reason, sfu_moq_dial_url, sfu_moq_url,
     };
+
+    #[test]
+    fn path_key_keeps_instance_path_nick_strips() {
+        assert_eq!(
+            path_key("01SESSION/alice~phone"),
+            "alice~phone"
+        );
+        assert_eq!(path_nick("01SESSION/alice~phone"), "alice");
+        assert_eq!(path_key("01SESSION/bob"), "bob");
+        assert_eq!(path_nick("bob~desk"), "bob");
+    }
+
+    #[test]
+    fn broadcast_path_matches_freeq_mesh_shape() {
+        assert_eq!(
+            broadcast_path("01SESS", "desktop", "a1b2c3d4"),
+            "01SESS/desktop~a1b2c3d4"
+        );
+        assert_eq!(broadcast_path("01SESS", "guest", ""), "01SESS/guest");
+    }
+
+    #[test]
+    fn sfu_moq_url_uses_av_moq_path_and_jwt() {
+        let u = sfu_moq_url("irc.freeq.at:6697", Some("tok.jwt.value")).unwrap();
+        assert_eq!(u.scheme(), "https");
+        assert_eq!(u.host_str(), Some("irc.freeq.at"));
+        assert_eq!(u.path(), "/av/moq");
+        assert_eq!(u.query(), Some("jwt=tok.jwt.value"));
+
+        let bare = sfu_moq_url("wss://irc.freeq.at/irc", None).unwrap();
+        assert_eq!(bare.path(), "/av/moq");
+        assert!(bare.query().is_none());
+    }
+
+    #[test]
+    fn sfu_moq_dial_url_includes_inst_and_jwt_like_freeq_app() {
+        let u = sfu_moq_dial_url(
+            "https://irc.freeq.at",
+            Some("eyJhbGciOiJIUzI1NiJ9.e30.x"),
+            Some("deadbeef"),
+        )
+        .unwrap();
+        assert_eq!(u.path(), "/av/moq");
+        let q = u.query().unwrap_or("");
+        assert!(q.contains("inst=deadbeef"), "query={q}");
+        assert!(q.contains("jwt=eyJhbGciOiJIUzI1NiJ9.e30.x"), "query={q}");
+    }
 
     #[test]
     fn collision_reason_parses_session_and_channel() {

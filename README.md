@@ -119,11 +119,16 @@ https://<codespace>-6080.app.github.dev/vnc.html?resize=scale&autoconnect=true&p
 Or Settings (gear) → Scaling mode → **Local scaling**. Override size with
 `SLEEK_VIEWPORT=1280x720` when starting the host.
 
-**Bluesky login:** the VNC desktop has no system browser by default. Bootstrap
-installs Chromium via nix and sets `BROWSER` to `scripts/vnc-browser.sh`
-(`--no-sandbox` for Codespaces). Sign-in opens Chromium inside noVNC and
-completes OAuth against loopback `127.0.0.1`. If the browser does not open,
-paste a `freeq://auth?…` link from another device into the connect form.
+**Bluesky login (desktop / VNC):** the VNC desktop has no system browser by
+default. Bootstrap installs Chromium via nix and sets `BROWSER` to
+`scripts/vnc-browser.sh` (`--no-sandbox` for Codespaces). Sign-in opens
+Chromium inside noVNC and completes OAuth against loopback `127.0.0.1`. If the
+browser does not open, paste a `freeq://auth?…` link into the connect form.
+
+**Bluesky login (Android APK):** the broker is opened with `mobile=1` so the
+callback is `freeq://auth?…`. The APK registers a `VIEW` intent-filter on
+scheme `freeq` (`SleekActivity`, `singleTask`) and resumes the app with tokens
+— no manual window switch or paste.
 
 1. Create / open a Codespace on this repo (rebuild if the container predates desktop-lite).
 2. Wait for bootstrap (`nix develop` warms; first boot can take several minutes).

@@ -61,6 +61,13 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 });
 
                 ui.add_space(sp.sm);
+                #[cfg(target_os = "android")]
+                dim_label(
+                    ui,
+                    th,
+                    "Browser opens to approve. When done, freeq:// returns you here automatically. Paste a freeq://auth link below only if needed.",
+                );
+                #[cfg(not(target_os = "android"))]
                 dim_label(
                     ui,
                     th,

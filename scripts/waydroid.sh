@@ -6,7 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/android"
 PKG="uk.nandi.sleek"
-ACTIVITY="$PKG/android.app.NativeActivity"
+# SleekActivity subclasses NativeActivity (classes.dex injected post cargo-apk).
+ACTIVITY="$PKG/uk.nandi.sleek.SleekActivity"
 
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/.local/share/android-ndk-r29}"
 export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
@@ -84,6 +85,8 @@ build_apk() {
     echo "APK not found under $APP/target" >&2
     exit 1
   }
+  # Inject uk.nandi.sleek.SleekActivity as classes.dex (freeq:// OAuth handler).
+  bash "$APP/scripts/inject-activity-dex.sh" "$apk" "$APP/src/assets/sleek_activity.dex"
   echo "$apk"
 }
 

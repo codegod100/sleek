@@ -8,7 +8,7 @@
 //! yet (needs CameraX / MediaCodec JNI, not cargo-apk NativeActivity). Remote
 //! H.264 still decodes in-software when peers publish video.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -19,17 +19,284 @@ use iroh_live::media::{
     publish::LocalBroadcast,
     subscribe::RemoteBroadcast,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::av::{broadcast_path, path_nick, should_tap, VideoFrameStore};
+use crate::av::{broadcast_path, path_key, should_tap, MicLevel, VideoFrameStore};
 
 #[cfg(not(target_os = "android"))]
 use iroh_live::media::{
+    audio_backend::{AudioBackendOpts, DeviceId},
     capture::{CameraCapturer, CameraConfig, CameraSelector},
     codec::VideoCodec,
     format::VideoPreset,
     traits::VideoSource,
 };
+
+// ── Device enumeration (desktop) ───────────────────────────────────────────
+
+/// One selectable capture/playback device for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaDevice {
+    /// Stable-ish key stored in prefs (`CameraInfo.id` or audio device name).
+    pub id: String,
+    /// Human label for combo boxes.
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Heuristic: virtual / loopback cameras (prefer real USB cams when falling back).
+fn is_virtual_camera(name: &str, id: &str) -> bool {
+    let s = format!("{name} {id}").to_ascii_lowercase();
+    s.contains("virtual")
+        || s.contains("obs")
+        || s.contains("loopback")
+        || s.contains("dummy")
+        || s.contains("v4l2loopback")
+}
+
+/// List cameras (desktop). Empty on Android / when capture is unavailable.
+/// Hardware cameras first; virtual (OBS/loopback) last. Labels include device id.
+pub fn list_cameras() -> Vec<MediaDevice> {
+    #[cfg(not(target_os = "android"))]
+    {
+        match CameraCapturer::list() {
+            Ok(mut cams) => {
+                cams.sort_by(|a, b| {
+                    let av = is_virtual_camera(&a.name, &a.id);
+                    let bv = is_virtual_camera(&b.name, &b.id);
+                    av.cmp(&bv)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+                cams.into_iter()
+                    .map(|c| {
+                        let label = if c.id.is_empty() || c.id == c.name {
+                            c.name.clone()
+                        } else {
+                            format!("{} · {}", c.name, c.id)
+                        };
+                        MediaDevice {
+                            id: c.id,
+                            name: label,
+                            is_default: false,
+                        }
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                log::debug!("av-media: list cameras: {e}");
+                Vec::new()
+            }
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        Vec::new()
+    }
+}
+
+/// ALSA plugin / exclusive-card names that fight PipeWire (dmix slave busy, or
+/// exclusive `hw`/`sysdefault:CARD=` while WirePlumber already owns the card).
+/// Prefer the native PipeWire host (or ALSA `pipewire` PCM) instead.
+fn is_alsa_virtual_pcm(name: &str) -> bool {
+    let n = name.trim();
+    // Bare plugins.
+    if matches!(
+        n,
+        "sysdefault"
+            | "default"
+            | "dmix"
+            | "dsnoop"
+            | "hw"
+            | "plughw"
+            | "null"
+            | "pulse"
+            | "jack"
+            | "upmix"
+            | "vdownmix"
+            | "surround21"
+            | "surround40"
+            | "surround41"
+            | "surround50"
+            | "surround51"
+            | "surround71"
+            // ALSA→PipeWire bridge name; use system default / native PW host.
+            | "pipewire"
+    ) {
+        return true;
+    }
+    // Card-qualified exclusive ALSA paths (e.g. sysdefault:CARD=C960 for EMEET).
+    // Opening these bypasses PipeWire and fails when PW/OBS already hold the card.
+    n.starts_with("sysdefault:")
+        || n.starts_with("default:")
+        || n.starts_with("dmix:")
+        || n.starts_with("dsnoop:")
+        || n.starts_with("front:")
+        || n.starts_with("rear:")
+        || n.starts_with("center_lfe:")
+        || n.starts_with("side:")
+        || n.starts_with("hw:")
+        || n.starts_with("plughw:")
+        || n.starts_with("surround")
+        || n.starts_with("iec958:")
+        || n.starts_with("hdmi:")
+}
+
+/// Drop persisted mic/speaker ids that are known-broken or redundant under
+/// PipeWire so the UI shows "System default" (OS default source/sink — same as
+/// the browser: currently the EMEET SmartCam mic when that is the default).
+pub fn sanitize_audio_device_pref(id: Option<String>) -> Option<String> {
+    id.filter(|s| !s.is_empty()).and_then(|s| {
+        if is_alsa_virtual_pcm(&s) {
+            None
+        } else {
+            Some(s)
+        }
+    })
+}
+
+/// Prefer the native PipeWire host when available (lists real sources like
+/// "EMEET SmartCam C960 Mono" the same way Chromium does).
+#[cfg(not(target_os = "android"))]
+fn preferred_audio_host() -> Option<String> {
+    let hosts = AudioBackend::available_hosts();
+    if hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case("pipewire"))
+    {
+        Some("PipeWire".into())
+    } else {
+        None
+    }
+}
+
+/// Sort for UI: system default first, then remaining real devices.
+#[cfg(not(target_os = "android"))]
+fn rank_audio_device(name: &str, is_default: bool) -> (u8, String) {
+    let n = name.to_ascii_lowercase();
+    let rank = if is_default {
+        0
+    } else if is_alsa_virtual_pcm(name) {
+        9
+    } else {
+        5
+    };
+    (rank, n)
+}
+
+/// Names that are cpal PipeWire placeholders, stream monitors, or sinks
+/// mis-listed as capture (Duplex sinks show up as inputs).
+fn is_junk_capture_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    if n.is_empty() || n == "unknown" {
+        return true;
+    }
+    matches!(
+        n.as_str(),
+        "default_input"
+            | "default_output"
+            | "default_sink"
+            | "sink_default"
+            | "input_default"
+            | "output_default"
+    ) || n.starts_with("alsa_output.")
+        || n.contains("monitor of")
+}
+
+#[cfg(not(target_os = "android"))]
+fn map_audio_devices(
+    raw: impl IntoIterator<Item = iroh_live::media::audio_backend::AudioDevice>,
+    inputs: bool,
+) -> Vec<MediaDevice> {
+    let mut devices: Vec<MediaDevice> = raw
+        .into_iter()
+        .filter(|d| !is_alsa_virtual_pcm(&d.name))
+        .filter(|d| !is_junk_capture_name(&d.name))
+        // Prefer unique names (cpal PW can list the same nick twice).
+        .map(|d| MediaDevice {
+            id: d.name.clone(),
+            name: if d.is_default {
+                format!("{} (system default)", d.name)
+            } else {
+                d.name
+            },
+            is_default: d.is_default,
+        })
+        .collect();
+    // Dedupe by id, keep first (defaults sorted later).
+    let mut seen = std::collections::HashSet::new();
+    devices.retain(|d| seen.insert(d.id.clone()));
+    devices.sort_by(|a, b| {
+        rank_audio_device(&a.id, a.is_default).cmp(&rank_audio_device(&b.id, b.is_default))
+    });
+    let _ = inputs;
+    devices
+}
+
+/// List microphones.
+pub fn list_microphones() -> Vec<MediaDevice> {
+    #[cfg(not(target_os = "android"))]
+    {
+        map_audio_devices(AudioBackend::list_inputs(), true)
+    }
+    #[cfg(target_os = "android")]
+    {
+        Vec::new()
+    }
+}
+
+/// List speakers / output devices.
+pub fn list_speakers() -> Vec<MediaDevice> {
+    #[cfg(not(target_os = "android"))]
+    {
+        map_audio_devices(AudioBackend::list_outputs(), false)
+    }
+    #[cfg(target_os = "android")]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn resolve_audio_device_id(name: Option<&str>, inputs: bool) -> Option<DeviceId> {
+    let name = name.filter(|s| !s.is_empty())?;
+    // ALSA virtual / exclusive PCMs (incl. bare "pipewire") → system default so
+    // moq-media uses the native PipeWire host default (same as the browser).
+    if is_alsa_virtual_pcm(name) {
+        log::info!(
+            "av-media: preferred audio {name:?} is an ALSA bridge/virtual PCM; \
+             using system default (PipeWire when available)"
+        );
+        return None;
+    }
+    let list = if inputs {
+        AudioBackend::list_inputs()
+    } else {
+        AudioBackend::list_outputs()
+    };
+    // Exact name first (avoid "default" substring matches), then case-insensitive
+    // contains so "EMEET" matches "EMEET SmartCam C960 Mono". Skip junk/sinks.
+    let name_l = name.to_ascii_lowercase();
+    let usable: Vec<_> = list
+        .into_iter()
+        .filter(|d| !is_alsa_virtual_pcm(&d.name) && !is_junk_capture_name(&d.name))
+        .collect();
+    usable
+        .iter()
+        .find(|d| d.name == name)
+        .or_else(|| {
+            usable
+                .iter()
+                .find(|d| d.name.to_ascii_lowercase() == name_l)
+        })
+        .or_else(|| {
+            usable
+                .iter()
+                .find(|d| d.name.to_ascii_lowercase().contains(&name_l))
+        })
+        .map(|d| d.id.clone())
+}
+
+// ── Config / session ───────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct AvMediaConfig {
@@ -41,6 +308,25 @@ pub struct AvMediaConfig {
     pub muted: bool,
     /// Initial camera publish when hardware is available.
     pub camera_enabled: bool,
+    /// Preferred camera id (`CameraInfo.id` / name). `None` = first available.
+    pub camera_id: Option<String>,
+    /// Preferred mic name. `None` = system default.
+    pub mic_id: Option<String>,
+    /// Preferred speaker name. `None` = system default.
+    pub speaker_id: Option<String>,
+}
+
+/// Runtime controls from the UI thread (device switches, mute, camera).
+#[derive(Debug, Clone)]
+pub enum MediaControl {
+    SetMuted(bool),
+    SetCameraEnabled(bool),
+    /// Re-open camera by id (`None` = default / first).
+    SetCameraDevice(Option<String>),
+    /// Switch mic by display name (`None` = system default).
+    SetMicDevice(Option<String>),
+    /// Switch speaker by display name (`None` = system default).
+    SetSpeakerDevice(Option<String>),
 }
 
 /// Status updates from the media task.
@@ -51,6 +337,11 @@ pub enum AvMediaUpdate {
     Live {
         video: VideoFrameStore,
         has_camera: bool,
+        /// Live mic level (0..=1) written by the capture path.
+        mic_level: MicLevel,
+        /// True when a real capture device is feeding the Opus track.
+        /// False = listen-only / silence publish (still advertises audio).
+        has_mic: bool,
     },
     /// Session ended cleanly (stop / transport closed).
     Ended,
@@ -61,10 +352,13 @@ pub enum AvMediaUpdate {
 /// Background handle: drop or send on `stop` to tear down the MoQ session.
 pub struct AvMediaSession {
     stop: Option<oneshot::Sender<()>>,
+    control: Option<mpsc::UnboundedSender<MediaControl>>,
     pub muted: Arc<AtomicBool>,
     pub camera_enabled: Arc<AtomicBool>,
     pub video: VideoFrameStore,
+    pub mic_level: MicLevel,
     task: Option<tokio::task::JoinHandle<()>>,
+    abort: Option<tokio::task::AbortHandle>,
 }
 
 impl AvMediaSession {
@@ -76,10 +370,13 @@ impl AvMediaSession {
         // Respect pre-call camera pref; has_camera is reported after open.
         let camera_enabled = Arc::new(AtomicBool::new(config.camera_enabled));
         let video = VideoFrameStore::new();
+        let mic_level = MicLevel::new();
         let (stop_tx, stop_rx) = oneshot::channel();
+        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
         let muted_task = muted.clone();
         let camera_task = camera_enabled.clone();
         let video_task = video.clone();
+        let mic_level_task = mic_level.clone();
         let on_status = Arc::new(on_status);
         let task = tokio::spawn(async move {
             match run_media(
@@ -87,7 +384,9 @@ impl AvMediaSession {
                 muted_task,
                 camera_task,
                 video_task,
+                mic_level_task,
                 stop_rx,
+                ctrl_rx,
                 on_status.clone(),
             )
             .await
@@ -96,33 +395,98 @@ impl AvMediaSession {
                 Err(e) => on_status(AvMediaUpdate::Failed(e.to_string())),
             }
         });
+        let abort = task.abort_handle();
         Self {
             stop: Some(stop_tx),
+            control: Some(ctrl_tx),
             muted,
             camera_enabled,
             video,
+            mic_level,
             task: Some(task),
+            abort: Some(abort),
         }
     }
 
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetMuted(muted));
+        }
     }
 
     pub fn set_camera_enabled(&self, enabled: bool) {
         self.camera_enabled.store(enabled, Ordering::Relaxed);
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetCameraEnabled(enabled));
+        }
     }
 
-    pub fn stop(&mut self) {
+    pub fn set_camera_device(&self, id: Option<String>) {
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetCameraDevice(id));
+        }
+    }
+
+    pub fn set_mic_device(&self, id: Option<String>) {
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetMicDevice(id));
+        }
+    }
+
+    pub fn set_speaker_device(&self, id: Option<String>) {
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetSpeakerDevice(id));
+        }
+    }
+
+    /// Request a clean stop (unpublish MoQ, drop audio devices). Prefer
+    /// [`Self::stop_and_wait`] from async code so the task can finish teardown.
+    pub fn request_stop(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
+        self.control.take();
+    }
+
+    /// Soft-stop then wait up to `timeout` for the media task to exit.
+    /// Hard-aborts only if the task is still stuck — immediate abort skips
+    /// MoQ unpublish and leaves **zombie broadcasts** on the SFU that peers
+    /// may subscribe to (they see you online but hear silence).
+    pub async fn stop_and_wait(&mut self, timeout: std::time::Duration) {
+        self.request_stop();
         if let Some(task) = self.task.take() {
-            // Soft stop first (oneshot); abort if the task is stuck.
-            // and moq_lite logs a WARN per stream.
+            match tokio::time::timeout(timeout, task).await {
+                Ok(Ok(())) => log::info!("av-media: session task exited cleanly"),
+                Ok(Err(e)) if e.is_cancelled() => {
+                    log::debug!("av-media: session task cancelled");
+                }
+                Ok(Err(e)) => log::warn!("av-media: session task join: {e}"),
+                Err(_) => {
+                    log::warn!(
+                        "av-media: session task still running after {timeout:?}; aborting \
+                         (may leave a brief SFU ghost)"
+                    );
+                    if let Some(a) = self.abort.take() {
+                        a.abort();
+                    }
+                }
+            }
+        }
+        self.abort.take();
+        self.video.clear();
+        self.mic_level.clear();
+    }
+
+    /// Sync stop for Drop / non-async callers. Soft-stop + abort (best-effort).
+    pub fn stop(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.take() {
             task.abort();
         }
+        self.abort.take();
         self.video.clear();
+        self.mic_level.clear();
     }
 }
 
@@ -137,7 +501,9 @@ async fn run_media(
     muted: Arc<AtomicBool>,
     camera_enabled: Arc<AtomicBool>,
     video_store: VideoFrameStore,
+    mic_level: MicLevel,
     mut stop: oneshot::Receiver<()>,
+    mut control: mpsc::UnboundedReceiver<MediaControl>,
     on_status: Arc<dyn Fn(AvMediaUpdate) + Send + Sync>,
 ) -> Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -154,17 +520,102 @@ async fn run_media(
     let client = client_config.init().context("moq client init")?;
 
     let broadcast = LocalBroadcast::new();
-    let audio_backend = AudioBackend::default();
-    audio_backend.set_aec_enabled(false);
 
-    // Mic is best-effort (same as iroh-live publish example). Codespace/VNC and
-    // headless hosts often have no capture device — join should still work as
-    // listen-only / video-only. Camera already follows this pattern below.
-    let has_mic = match audio_backend.default_input().await {
-        Ok(mic) => {
+    #[cfg(not(target_os = "android"))]
+    let audio_backend = {
+        let host = preferred_audio_host();
+        let input_device = resolve_audio_device_id(config.mic_id.as_deref(), true);
+        let output_device = resolve_audio_device_id(config.speaker_id.as_deref(), false);
+        // Log what the OS thinks is available (helps confirm EMEET vs built-in).
+        let inputs = list_microphones();
+        let outputs = list_speakers();
+        log::info!(
+            "av-media: audio host={host:?} mic_pref={:?} → pinned={} | \
+             speaker_pref={:?} → pinned={}",
+            config.mic_id,
+            input_device.is_some(),
+            config.speaker_id,
+            output_device.is_some()
+        );
+        if !inputs.is_empty() {
+            log::info!(
+                "av-media: microphones: {}",
+                inputs
+                    .iter()
+                    .map(|d| {
+                        if d.is_default {
+                            format!("*{}", d.id)
+                        } else {
+                            d.id.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !outputs.is_empty() {
+            log::info!(
+                "av-media: speakers: {}",
+                outputs
+                    .iter()
+                    .map(|d| {
+                        if d.is_default {
+                            format!("*{}", d.id)
+                        } else {
+                            d.id.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let ab = AudioBackend::new(AudioBackendOpts {
+            host,
+            input_device,
+            output_device,
+            ..Default::default()
+        });
+        ab.set_aec_enabled(false);
+        ab
+    };
+    #[cfg(target_os = "android")]
+    let audio_backend = {
+        let ab = AudioBackend::default();
+        ab.set_aec_enabled(false);
+        ab
+    };
+
+    // Always publish an Opus track so peers see audio in the catalog.
+    // Real mic when available; otherwise silence (listen-only). Prefer
+    // falling back to the system default when a preferred device fails —
+    // never leave the broadcast without audio (that looks like "not sending").
+    log::info!(
+        "av-media: outbound muted={} (peers hear silence while muted even if the meter moves)",
+        muted.load(Ordering::Relaxed)
+    );
+    let has_mic = match open_microphone(&audio_backend).await {
+        Ok(mut mic) => {
+            // Warm-up: wait until the capture ring actually has energy so we
+            // don't advertise "mic open" while still InputNotReady→silence.
+            let peak = warm_up_mic(&mut *mic, std::time::Duration::from_millis(800));
+            log::info!(
+                "av-media: mic warm-up peak={peak:.4} (0 = capture silent / not ready)"
+            );
+            if peak < 1e-5 {
+                log::warn!(
+                    "av-media: microphone opened but capture is silent so far — \
+                     check PipeWire default source (EMEET), mute, and that OBS isn't \
+                     exclusive; peers will hear silence until samples flow"
+                );
+            }
             let muteable = MuteableSource {
-                inner: Box::new(mic),
+                inner: mic,
                 muted: muted.clone(),
+                level: mic_level.clone(),
+                pulls: 0,
+                voiced: 0,
+                gain: 1.0,
+                smooth_peak: 0.0,
             };
             match broadcast
                 .audio()
@@ -175,38 +626,74 @@ async fn run_media(
                     true
                 }
                 Err(e) => {
-                    log::warn!("av-media: set mic audio source failed (listen-only): {e}");
-                    // Force mute so UI reflects no outbound audio.
+                    log::warn!("av-media: set mic audio source failed: {e}; publishing silence");
                     muted.store(true, Ordering::Relaxed);
+                    if let Err(e2) = broadcast.audio().set(
+                        MuteableSource::silence(muted.clone(), mic_level.clone()),
+                        AudioCodec::Opus,
+                        [AudioPreset::Hq],
+                    ) {
+                        log::error!("av-media: silence audio set also failed: {e2}");
+                    }
                     false
                 }
             }
         }
         Err(e) => {
-            log::warn!("av-media: no microphone ({e}); listen-only / no outbound audio");
+            log::warn!(
+                "av-media: no microphone ({e}); publishing silence (listen-only)"
+            );
             muted.store(true, Ordering::Relaxed);
+            if let Err(e2) = broadcast.audio().set(
+                MuteableSource::silence(muted.clone(), mic_level.clone()),
+                AudioCodec::Opus,
+                [AudioPreset::Hq],
+            ) {
+                log::error!("av-media: silence audio set failed: {e2}");
+            }
             false
         }
     };
-    let _ = has_mic;
+    if !has_mic {
+        log::info!("av-media: outbound audio is silence (listen-only / no capture)");
+    }
+
+    // Local-preview frame counter (diagnostics).
+    let local_frame_count = Arc::new(AtomicU64::new(0));
 
     // Camera: desktop only (V4L2 / platform capture). Android NativeActivity
     // has no CameraX bridge yet — audio-only publish; remote video still works.
+    log::info!(
+        "av-media: camera_enabled={} preferred_id={:?}",
+        camera_enabled.load(Ordering::Relaxed),
+        config.camera_id
+    );
     #[cfg(not(target_os = "android"))]
     let has_camera = {
-        match open_camera() {
-            Ok(cam) => {
+        match open_camera_with_fallback(config.camera_id.as_deref()) {
+            Ok((cam, opened_id)) => {
+                let cam_name = cam.name().to_string();
                 let gated = GatedCameraSource {
                     inner: cam,
                     enabled: camera_enabled.clone(),
                     preview: video_store.clone(),
+                    frame_count: local_frame_count.clone(),
                 };
                 match broadcast
                     .video()
                     .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
                 {
                     Ok(()) => {
-                        log::info!("av-media: camera open, publishing H.264 360p");
+                        // Re-assert publish intent after a successful open. A prior
+                        // failed dial may have stored false; join prefs say on.
+                        if config.camera_enabled {
+                            camera_enabled.store(true, Ordering::Relaxed);
+                        }
+                        log::info!(
+                            "av-media: camera open id={opened_id:?} name={cam_name}, \
+                             publishing H.264 360p (publish={})",
+                            camera_enabled.load(Ordering::Relaxed)
+                        );
                         true
                     }
                     Err(e) => {
@@ -230,6 +717,97 @@ async fn run_media(
         false
     };
 
+    // Hold a LocalBroadcast::preview() track so SharedVideoSource stays unparked
+    // even with no remote H.264 subscriber. GatedCameraSource also tees raw
+    // frames into `__local__` on the capture thread; we additionally pump the
+    // preview track into the store so self-view works even if the tee path
+    // misses (rgba convert panic, gated race, etc.).
+    #[cfg(not(target_os = "android"))]
+    let mut preview_keepalive = if has_camera {
+        let t = broadcast.preview();
+        if t.is_some() {
+            log::info!("av-media: local preview keepalive held (SharedVideoSource unparked)");
+        } else {
+            log::warn!("av-media: broadcast.preview() returned None after set_source");
+        }
+        t
+    } else {
+        None
+    };
+    #[cfg(target_os = "android")]
+    let mut preview_keepalive = None::<()>;
+    let _ = &mut preview_keepalive;
+
+    // Second preview handle → dedicated pump into VideoFrameStore.
+    #[cfg(not(target_os = "android"))]
+    let mut preview_pump: Option<std::thread::JoinHandle<()>> = if has_camera {
+        match broadcast.preview() {
+            Some(mut track) => {
+                let store = video_store.clone();
+                let enabled = camera_enabled.clone();
+                match std::thread::Builder::new()
+                    .name("local-preview-pump".into())
+                    .spawn(move || {
+                        let mut logged = false;
+                        loop {
+                            if !enabled.load(Ordering::Relaxed) {
+                                store.remove("__local__");
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                continue;
+                            }
+                            // Non-blocking: try_recv drains latest frame from the
+                            // SharedVideoSource watch fan-out.
+                            if let Some(frame) = track.try_recv() {
+                                let (w, h) = (frame.width(), frame.height());
+                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    let rgba = frame.rgba_image();
+                                    let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
+                                    (w, h, bytes)
+                                })) {
+                                    Ok((w, h, bytes)) => {
+                                        store.set("__local__", w, h, bytes);
+                                        if !logged {
+                                            logged = true;
+                                            log::info!(
+                                                "av-media: local preview pump first frame {w}x{h}"
+                                            );
+                                        }
+                                    }
+                                    Err(_) => {
+                                        log::warn!(
+                                            "av-media: local preview pump rgba_image panicked {w}x{h}"
+                                        );
+                                    }
+                                }
+                            } else if track.is_closed() {
+                                log::info!("av-media: local preview pump track closed");
+                                break;
+                            } else {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                        }
+                    }) {
+                    Ok(h) => {
+                        log::info!("av-media: local preview pump thread started");
+                        Some(h)
+                    }
+                    Err(e) => {
+                        log::warn!("av-media: local preview pump spawn failed: {e}");
+                        None
+                    }
+                }
+            }
+            None => {
+                log::warn!("av-media: second preview() for pump returned None");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(target_os = "android")]
+    let mut preview_pump = None::<std::thread::JoinHandle<()>>;
+
     let origin = moq_lite::Origin::produce();
     origin.publish_broadcast(&our_broadcast, broadcast.consume());
 
@@ -243,10 +821,14 @@ async fn run_media(
         .await
         .context("MoQ connect")?;
 
-    log::info!("av-media: MoQ connected, publishing {our_broadcast}");
+    log::info!(
+        "av-media: MoQ connected, publishing {our_broadcast} has_mic={has_mic} has_camera={has_camera}"
+    );
     on_status(AvMediaUpdate::Live {
         video: video_store.clone(),
         has_camera,
+        mic_level: mic_level.clone(),
+        has_mic,
     });
 
     let audio_for_playback = audio_backend.clone();
@@ -254,68 +836,223 @@ async fn run_media(
     let my_nick = config.nick.clone();
     let our_name = our_broadcast.clone();
     let store_for_subs = video_store.clone();
-    let sub_task = tokio::spawn(async move {
-        while let Some((path, announce)) = sub_consumer.announced().await {
-            match announce {
-                Some(broadcast_consumer) => {
-                    let path_str = path.to_string();
-                    if !should_tap(&path_str, &session_id, &our_name, &my_nick) {
-                        continue;
-                    }
-                    log::info!("av-media: + remote {path_str}");
-                    let ab = audio_for_playback.clone();
-                    let ps = path_str.clone();
-                    let store = store_for_subs.clone();
-                    let nick = path_nick(&path_str).to_string();
-                    tokio::spawn(async move {
-                        tap_remote(ps, nick, broadcast_consumer, ab, store).await;
-                    });
-                }
-                None => {
-                    let path_str = path.to_string();
-                    let nick = path_nick(&path_str).to_string();
-                    store_for_subs.remove(&nick);
-                    log::info!("av-media: - remote {path_str}");
-                }
-            }
-        }
-    });
+    // JoinSet so leave/stop aborts every remote tap (orphan spawns used to leak
+    // AudioBackend + PipeWire streams across calls).
+    let mut taps: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let mut tap_keys: std::collections::HashMap<String, tokio::task::AbortHandle> =
+        std::collections::HashMap::new();
 
+    // Keep broadcast + audio_backend alive for mid-call device switches.
     let _broadcast = broadcast;
-    tokio::select! {
-        res = session_handle.closed() => {
-            if let Err(e) = res {
-                // "connection closed" is expected on leave / peer hangup / SFU
-                // idle timeout — one line is enough; moq_lite may still WARN
-                // per stream internally.
-                log::info!("av-media: session closed: {e}");
-            } else {
-                log::info!("av-media: session closed cleanly");
+    let audio_backend_ctrl = audio_backend;
+
+    loop {
+        tokio::select! {
+            res = session_handle.closed() => {
+                if let Err(e) = res {
+                    log::info!("av-media: session closed: {e}");
+                } else {
+                    log::info!("av-media: session closed cleanly");
+                }
+                break;
             }
-        }
-        _ = &mut stop => {
-            log::info!("av-media: stop requested");
+            _ = &mut stop => {
+                log::info!("av-media: stop requested");
+                break;
+            }
+            announce = sub_consumer.announced() => {
+                let Some((path, announce)) = announce else {
+                    log::info!("av-media: announce stream ended");
+                    break;
+                };
+                match announce {
+                    Some(broadcast_consumer) => {
+                        let path_str = path.to_string();
+                        if !should_tap(&path_str, &session_id, &our_name, &my_nick) {
+                            continue;
+                        }
+                        // Replace any prior tap for this path.
+                        if let Some(h) = tap_keys.remove(&path_str) {
+                            h.abort();
+                        }
+                        log::info!("av-media: + remote {path_str}");
+                        let ab = audio_for_playback.clone();
+                        let ps = path_str.clone();
+                        let store = store_for_subs.clone();
+                        let key = path_key(&path_str).to_string();
+                        let handle = taps.spawn(async move {
+                            tap_remote(ps, key, broadcast_consumer, ab, store).await;
+                        });
+                        tap_keys.insert(path_str, handle);
+                    }
+                    None => {
+                        let path_str = path.to_string();
+                        let key = path_key(&path_str).to_string();
+                        store_for_subs.remove(&key);
+                        if let Some(h) = tap_keys.remove(&path_str) {
+                            h.abort();
+                        }
+                        log::info!("av-media: - remote {path_str}");
+                    }
+                }
+            }
+            // Reap finished taps so JoinSet doesn't grow forever.
+            Some(res) = taps.join_next() => {
+                if let Err(e) = res {
+                    if !e.is_cancelled() {
+                        log::debug!("av-media: tap task ended: {e}");
+                    }
+                }
+            }
+            msg = control.recv() => {
+                let Some(msg) = msg else { break };
+                match msg {
+                    MediaControl::SetMuted(m) => {
+                        muted.store(m, Ordering::Relaxed);
+                        log::info!("av-media: muted={m}");
+                    }
+                    MediaControl::SetCameraEnabled(en) => {
+                        camera_enabled.store(en, Ordering::Relaxed);
+                        if !en {
+                            video_store.remove("__local__");
+                        }
+                    }
+                    MediaControl::SetMicDevice(name) => {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            let id = resolve_audio_device_id(name.as_deref(), true);
+                            match audio_backend_ctrl.switch_input(id).await {
+                                Ok(()) => log::info!("av-media: mic switched to {name:?}"),
+                                Err(e) => log::warn!("av-media: switch mic failed: {e}"),
+                            }
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            let _ = name;
+                        }
+                    }
+                    MediaControl::SetSpeakerDevice(name) => {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            let id = resolve_audio_device_id(name.as_deref(), false);
+                            match audio_backend_ctrl.switch_output(id).await {
+                                Ok(()) => log::info!("av-media: speaker switched to {name:?}"),
+                                Err(e) => log::warn!("av-media: switch speaker failed: {e}"),
+                            }
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            let _ = name;
+                        }
+                    }
+                    MediaControl::SetCameraDevice(id) => {
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            // Drop old preview keepalive before replacing source.
+                            preview_keepalive = None;
+                            video_store.remove("__local__");
+                            local_frame_count.store(0, Ordering::Relaxed);
+                            match open_camera(id.as_deref()) {
+                                Ok(cam) => {
+                                    let gated = GatedCameraSource {
+                                        inner: cam,
+                                        enabled: camera_enabled.clone(),
+                                        preview: video_store.clone(),
+                                        frame_count: local_frame_count.clone(),
+                                    };
+                                    match _broadcast.video().set_source(
+                                        gated,
+                                        VideoCodec::H264,
+                                        [VideoPreset::P360],
+                                    ) {
+                                        Ok(()) => {
+                                            preview_keepalive = _broadcast.preview();
+                                            log::info!(
+                                                "av-media: camera device switched to {id:?}"
+                                            );
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera: true,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "av-media: set_source after camera switch: {e}"
+                                            );
+                                            camera_enabled.store(false, Ordering::Relaxed);
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera: false,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("av-media: open camera {id:?}: {e}");
+                                }
+                            }
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            let _ = id;
+                        }
+                    }
+                }
+            }
         }
     }
-    // Drop session first so the transport shuts down, then cancel subscribers.
+
     drop(session_handle);
-    sub_task.abort();
+    // Tear down every remote tap so AudioBackend / PW streams die with us.
+    for (_, h) in tap_keys.drain() {
+        h.abort();
+    }
+    taps.abort_all();
+    while taps.join_next().await.is_some() {}
+    // Drop preview tracks first so the pump thread sees is_closed and exits.
+    drop(preview_keepalive);
+    if let Some(h) = preview_pump.take() {
+        // Best-effort join; don't block teardown if the pump is wedged.
+        let _ = h.join();
+    }
+    drop(audio_backend_ctrl);
+    drop(audio_for_playback);
     video_store.clear();
-    // Brief yield so abort of child tasks and QUIC close settle without
-    // racing a hard parent abort (Drop) on the next AvMediaConnect.
-    tokio::task::yield_now().await;
+    mic_level.clear();
+    // Brief yield so aborted tasks drop cpal/PW resources before the next dial.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    log::info!("av-media: teardown complete for {our_broadcast}");
     Ok(())
 }
 
 /// Subscribe audio + video for one remote broadcast until it ends or is aborted.
+///
+/// `key` is the frame-store id (`nick` or `nick~instance` from [`path_key`]).
+///
+/// Audio and video are independent: a catalog race that delays the audio
+/// rendition must not tear down video (and vice versa). We wait with
+/// `audio_ready` / `video_ready` and retry so late-advertised tracks still play.
 async fn tap_remote(
     path: String,
-    nick: String,
+    key: String,
     broadcast_consumer: moq_lite::BroadcastConsumer,
     audio_backend: AudioBackend,
     video_store: VideoFrameStore,
 ) {
-    let remote = match RemoteBroadcast::new(&path, broadcast_consumer).await {
+    // Match freeq-sdk-ffi: tighter latency than the 150ms streaming default.
+    let policy = iroh_live::media::playout::PlaybackPolicy::default()
+        .with_max_latency(std::time::Duration::from_millis(60));
+    let remote = match RemoteBroadcast::with_playback_policy(
+        &path,
+        broadcast_consumer,
+        policy,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             log::warn!("av-media: catalog {path}: {e}");
@@ -323,28 +1060,51 @@ async fn tap_remote(
         }
     };
 
-    // Audio: keep track alive for playback (same as previous audio-only path).
-    let audio_task = {
+    let mut audio_task = {
         let remote = remote.clone();
         let ab = audio_backend;
         let ps = path.clone();
         tokio::spawn(async move {
-            match remote.audio(&ab).await {
-                Ok(track) => {
-                    log::info!("av-media: receiving audio from {ps}");
-                    let _track = track;
-                    std::future::pending::<()>().await;
+            let mut consecutive_errs = 0u32;
+            loop {
+                match remote.audio_ready(&ab).await {
+                    Ok(track) => {
+                        consecutive_errs = 0;
+                        log::info!("av-media: receiving audio from {ps}");
+                        // Hold the track until the decoder stops, then re-wait
+                        // in case the peer re-advertises audio (e.g. after mute
+                        // track flip — rare, but cheap to handle).
+                        track.stopped().await;
+                        log::info!("av-media: audio track ended for {ps}");
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        consecutive_errs = consecutive_errs.saturating_add(1);
+                        // Permanent peer/session death — don't spam every 500ms.
+                        if msg.contains("dropped")
+                            || msg.contains("closed")
+                            || msg.contains("transport error")
+                        {
+                            log::warn!("av-media: audio sub {ps}: {e} (giving up)");
+                            break;
+                        }
+                        if consecutive_errs <= 3 || consecutive_errs % 10 == 0 {
+                            log::warn!(
+                                "av-media: audio sub {ps}: {e} (retry {consecutive_errs})"
+                            );
+                        }
+                        let backoff_ms = (500u64 * u64::from(consecutive_errs.min(8))).min(4_000);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
                 }
-                Err(e) => log::warn!("av-media: audio sub {ps}: {e}"),
             }
         })
     };
 
-    // Video: pump latest frames into the shared store (loops on camera toggle).
-    let video_task = {
+    let mut video_task = {
         let remote = remote.clone();
         let store = video_store.clone();
-        let nick = nick.clone();
+        let key = key.clone();
         let path = path.clone();
         tokio::spawn(async move {
             loop {
@@ -355,13 +1115,20 @@ async fn tap_remote(
                             let (w, h) = (frame.width(), frame.height());
                             let rgba = frame.rgba_image();
                             let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
-                            store.set(nick.clone(), w, h, bytes);
+                            store.set(key.clone(), w, h, bytes);
                         }
                         log::info!("av-media: video track ended for {path}");
                     }
                     Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("dropped")
+                            || msg.contains("closed")
+                            || msg.contains("transport error")
+                        {
+                            log::debug!("av-media: video wait {path}: {e} (giving up)");
+                            break;
+                        }
                         log::debug!("av-media: video wait {path}: {e}");
-                        // Catalog may not advertise video yet; retry briefly.
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }
@@ -369,32 +1136,279 @@ async fn tap_remote(
         })
     };
 
-    // Stay until either side finishes (or the parent aborts us).
+    // Keep both pipelines alive until the remote broadcast closes.
+    // Abort siblings — dropping JoinHandle alone detaches tasks and leaves
+    // audio_ready retry loops logging "dropped" forever after transport death.
     tokio::select! {
-        _ = audio_task => {}
-        _ = video_task => {}
+        err = remote.closed() => {
+            log::info!("av-media: remote closed {path}: {err}");
+            audio_task.abort();
+            video_task.abort();
+        }
+        _ = &mut audio_task => {
+            log::debug!("av-media: audio task exited for {path}");
+            video_task.abort();
+        }
+        _ = &mut video_task => {
+            log::debug!("av-media: video task exited for {path}");
+            audio_task.abort();
+        }
     }
-    video_store.remove(&nick);
+    video_store.remove(&key);
+}
+
+/// Open the default mic input, retrying after clearing preferred devices if
+/// the first open fails.
+///
+/// moq-media starts **output and input as a pair**. A bad speaker pref
+/// (`sysdefault` busy under PipeWire) fails the whole pair, so we must clear
+/// **output** as well as input before retrying.
+async fn open_microphone(
+    audio_backend: &AudioBackend,
+) -> Result<Box<dyn iroh_live::media::traits::AudioSource>> {
+    match audio_backend.default_input().await {
+        Ok(mic) => Ok(Box::new(mic)),
+        Err(first) => {
+            log::warn!(
+                "av-media: default_input failed ({first}); \
+                 retry after clearing preferred I/O devices"
+            );
+            #[cfg(not(target_os = "android"))]
+            {
+                // Output first: start_cpal_streams requires a working speaker.
+                if let Err(e) = audio_backend.switch_output(None).await {
+                    log::warn!("av-media: switch_output(None) failed: {e}");
+                }
+                if let Err(e) = audio_backend.switch_input(None).await {
+                    log::warn!("av-media: switch_input(None) failed: {e}");
+                }
+            }
+            match audio_backend.default_input().await {
+                Ok(mic) => Ok(Box::new(mic)),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// Pull mic frames until we see energy or `budget` elapses. Returns peak abs.
+fn warm_up_mic(
+    mic: &mut dyn iroh_live::media::traits::AudioSource,
+    budget: std::time::Duration,
+) -> f32 {
+    let deadline = std::time::Instant::now() + budget;
+    let mut buf = vec![0.0f32; 960];
+    let mut peak = 0.0f32;
+    let mut ready = 0u32;
+    while std::time::Instant::now() < deadline {
+        match mic.pop_samples(&mut buf) {
+            Ok(Some(n)) if n > 0 => {
+                ready = ready.saturating_add(1);
+                for &s in &buf[..n] {
+                    peak = peak.max(s.abs());
+                }
+                if peak > 1e-3 {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("av-media: mic warm-up read error: {e:#}");
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    log::info!("av-media: mic warm-up ready_frames={ready} peak={peak:.4}");
+    peak
+}
+
+/// Always-ready mono 48 kHz silence — keeps an Opus track advertised when
+/// no capture device is available (listen-only join).
+struct SilenceSource {
+    format: iroh_live::media::format::AudioFormat,
+}
+
+impl Default for SilenceSource {
+    fn default() -> Self {
+        Self {
+            format: iroh_live::media::format::AudioFormat::mono_48k(),
+        }
+    }
+}
+
+impl iroh_live::media::traits::AudioSource for SilenceSource {
+    fn format(&self) -> iroh_live::media::format::AudioFormat {
+        self.format
+    }
+
+    fn pop_samples(
+        &mut self,
+        buf: &mut [f32],
+    ) -> anyhow::Result<Option<usize>> {
+        for s in buf.iter_mut() {
+            *s = 0.0;
+        }
+        Ok(Some(buf.len()))
+    }
 }
 
 #[cfg(not(target_os = "android"))]
-fn open_camera() -> Result<CameraCapturer> {
-    let config = CameraConfig {
+fn camera_config() -> CameraConfig {
+    CameraConfig {
         selector: CameraSelector::TargetResolution(640, 360),
         preferred_format: None,
-        zero_copy: true,
+        // CPU RGBA — safer for local preview tee + software H.264.
+        zero_copy: false,
+    }
+}
+
+/// Open preferred camera, then fall back through the device list (hardware first).
+///
+/// Deliberately **does not** start/stop/probe frames here. V4L2 `dqbuf` is
+/// blocking with no timeout — a probe that hangs leaves the device busy so
+/// every later open fails (audio-only calls + blank self-view tile). Parent
+/// behavior was `CameraCapturer::open` only; SharedVideoSource starts streaming
+/// when the first preview/encoder subscriber arrives.
+///
+/// Virtual nodes (OBS / v4l2loopback) are skipped unless no hardware camera
+/// opens successfully.
+#[cfg(not(target_os = "android"))]
+fn open_camera_with_fallback(preferred: Option<&str>) -> Result<(CameraCapturer, Option<String>)> {
+    let config = camera_config();
+    let preferred = preferred.filter(|s| !s.is_empty());
+
+    let listed = match CameraCapturer::list() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("av-media: CameraCapturer::list failed: {e}");
+            Vec::new()
+        }
     };
-    CameraCapturer::with_config(None, &config).context("open camera")
+    log::info!(
+        "av-media: cameras available: {}",
+        if listed.is_empty() {
+            "(none)".into()
+        } else {
+            listed
+                .iter()
+                .map(|c| {
+                    let v = if is_virtual_camera(&c.name, &c.id) {
+                        " [virtual]"
+                    } else {
+                        ""
+                    };
+                    format!("{} ({}){v}", c.name, c.id)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+
+    let is_virt = |id: &str| {
+        listed
+            .iter()
+            .find(|c| c.id == id || c.name == id)
+            .map(|c| is_virtual_camera(&c.name, &c.id))
+            .unwrap_or_else(|| is_virtual_camera(id, id))
+    };
+
+    // Hardware candidates first (preferred real cam at front).
+    let mut hardware: Vec<Option<String>> = Vec::new();
+    let mut virtuals: Vec<Option<String>> = Vec::new();
+
+    if let Some(id) = preferred {
+        if is_virt(id) {
+            log::info!(
+                "av-media: ignoring virtual preferred camera {id} until hardware fails"
+            );
+            virtuals.push(Some(id.to_string()));
+        } else {
+            hardware.push(Some(id.to_string()));
+        }
+    }
+
+    let mut cams = listed;
+    cams.sort_by(|a, b| {
+        let av = is_virtual_camera(&a.name, &a.id);
+        let bv = is_virtual_camera(&b.name, &b.id);
+        av.cmp(&bv)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    for c in cams {
+        let id = c.id.clone();
+        let already = |list: &[Option<String>]| {
+            list.iter()
+                .any(|x| x.as_deref() == Some(id.as_str()) || x.as_deref() == Some(c.name.as_str()))
+        };
+        if c.supported_formats.is_empty() {
+            log::debug!(
+                "av-media: skip camera {} ({}): no supported formats",
+                c.name,
+                c.id
+            );
+            continue;
+        }
+        if is_virtual_camera(&c.name, &c.id) {
+            if !already(&virtuals) && !already(&hardware) {
+                virtuals.push(Some(id));
+            }
+        } else if !already(&hardware) {
+            hardware.push(Some(id));
+        }
+    }
+
+    // Try hardware, then virtual, then system default.
+    let mut candidates = hardware;
+    candidates.extend(virtuals);
+    if !candidates.iter().any(|c| c.is_none()) {
+        candidates.push(None);
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for cand in &candidates {
+        let label = cand.as_deref().unwrap_or("(default)");
+        match CameraCapturer::open(None, cand.as_deref(), &config) {
+            Ok(cam) => {
+                log::info!(
+                    "av-media: opened camera id={label:?} name={}",
+                    cam.name()
+                );
+                if preferred.is_some_and(|p| Some(p) != cand.as_deref()) {
+                    log::warn!(
+                        "av-media: preferred camera {preferred:?} not used; using {label}"
+                    );
+                }
+                return Ok((cam, cand.clone()));
+            }
+            Err(e) => {
+                log::warn!("av-media: open camera {label}: {e:#}");
+                errors.push(format!("{label}: {e}"));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no working camera ({})",
+        errors.join(" | ")
+    ))
+}
+
+/// Mid-call device switch uses the same fallback path.
+#[cfg(not(target_os = "android"))]
+fn open_camera(id: Option<&str>) -> Result<CameraCapturer> {
+    open_camera_with_fallback(id).map(|(c, _)| c)
 }
 
 /// Wraps camera capture: when disabled, drain frames but publish none so the
-/// H.264 track stays in the catalog (peers who already subscribed keep the
-/// video rendition for when the camera comes back).
+/// H.264 track stays in the catalog. Always tees enabled frames into
+/// `__local__` for self-view (requires a SharedVideoSource subscriber — we
+/// hold `broadcast.preview()` as keepalive).
 #[cfg(not(target_os = "android"))]
 struct GatedCameraSource {
     inner: CameraCapturer,
     enabled: Arc<AtomicBool>,
     preview: VideoFrameStore,
+    frame_count: Arc<AtomicU64>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -420,23 +1434,171 @@ impl VideoSource for GatedCameraSource {
     ) -> anyhow::Result<Option<iroh_live::media::format::VideoFrame>> {
         let frame = self.inner.pop_frame()?;
         if !self.enabled.load(Ordering::Relaxed) {
-            // Drain so the capture pipeline doesn't back up.
+            // Drain so the capture pipeline doesn't back up; hide self-view.
+            // Peers still have the video track in the catalog but get no frames
+            // until the camera is turned back on.
+            self.preview.remove("__local__");
+            let n = self.frame_count.load(Ordering::Relaxed);
+            if n > 0 && n % 300 == 0 {
+                log::debug!("av-media: camera gated off (publish idle), drained={n}");
+            }
             return Ok(None);
         }
         if let Some(ref f) = frame {
             let (w, h) = (f.width(), f.height());
-            let rgba = f.rgba_image();
-            let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
-            self.preview.set("__local__", w, h, bytes);
+            // Best-effort local preview — never fail the encode path.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rgba = f.rgba_image();
+                let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
+                (w, h, bytes)
+            })) {
+                Ok((w, h, bytes)) => {
+                    self.preview.set("__local__", w, h, bytes);
+                    let n = self.frame_count.fetch_add(1, Ordering::Relaxed);
+                    if n == 0 {
+                        log::info!(
+                            "av-media: first published/preview frame {w}x{h} (outbound video live)"
+                        );
+                    } else if n == 30 || n == 300 || n == 3000 {
+                        log::info!("av-media: published frames={n} ({w}x{h})");
+                    }
+                }
+                Err(_) => {
+                    log::warn!("av-media: rgba_image panicked on local frame {w}x{h}");
+                    // Still count as a publishable frame even if preview tee failed.
+                    let n = self.frame_count.fetch_add(1, Ordering::Relaxed);
+                    if n == 0 {
+                        log::info!("av-media: first publish frame {w}x{h} (preview tee failed)");
+                    }
+                }
+            }
         }
         Ok(frame)
     }
 }
 
+/// RMS of a PCM buffer — used by tests and as a simple energy metric.
+pub fn pcm_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Continuous 48 kHz mono sine — freeq mesh rate (see freeq-av `SPEAK_RATE`).
+///
+/// Used by interop tests as a deterministic non-silent capture substitute so
+/// we prove Opus encode/decode energy without requiring a real microphone.
+struct ToneSource {
+    format: iroh_live::media::format::AudioFormat,
+    phase: f32,
+    frequency: f32,
+}
+
+impl ToneSource {
+    fn hz440() -> Self {
+        Self {
+            format: iroh_live::media::format::AudioFormat::mono_48k(),
+            phase: 0.0,
+            frequency: 440.0,
+        }
+    }
+}
+
+impl iroh_live::media::traits::AudioSource for ToneSource {
+    fn format(&self) -> iroh_live::media::format::AudioFormat {
+        self.format
+    }
+
+    fn pop_samples(
+        &mut self,
+        buf: &mut [f32],
+    ) -> anyhow::Result<Option<usize>> {
+        let channels = self.format.channel_count.max(1) as usize;
+        let frames = buf.len() / channels;
+        let phase_inc = self.frequency / self.format.sample_rate as f32;
+        for i in 0..frames {
+            let sample = (2.0 * std::f32::consts::PI * self.phase).sin() * 0.5;
+            for ch in 0..channels {
+                buf[i * channels + ch] = sample;
+            }
+            self.phase += phase_inc;
+            self.phase -= self.phase.floor();
+        }
+        // Always a full buffer — never `None` (iroh-live encoder skips `None`).
+        Ok(Some(buf.len()))
+    }
+}
+
+/// Target peak after AGC (linear). Browsers apply getUserMedia AGC; cpal/PW
+/// does not — EMEET often lands at peak ~0.005 which Opus/bots treat as silence.
+const AGC_TARGET_PEAK: f32 = 0.28;
+/// Cap boost so noise floor alone doesn't become roar (≈ +32 dB).
+const AGC_MAX_GAIN: f32 = 40.0;
+/// Don't boost pure digital silence / inactive rings.
+const AGC_MIN_PEAK: f32 = 5e-5;
+/// Speech-ish energy after gain (for diagnostics).
+const VOICED_PEAK: f32 = 0.02;
+
 /// Wraps an AudioSource and emits silence while muted (keeps the Opus track live).
+///
+/// Mic level is measured on the **post-AGC** samples before mute zeros them.
+///
+/// When the inner source returns `None` (cpal ring not ready yet), we still
+/// hand the encoder a full silence frame. The iroh-live encoder skips ticks
+/// on `None`, which means **no Opus packets go out** — peers hear nothing
+/// until the ring becomes ready, and intermittent `None`s produce dropouts.
+/// Padding matches freeq-sdk-ffi `PushAudioSource` (always `Some(buf.len())`).
+///
+/// Short `Some(n)` reads are also padded to a full buffer so underruns never
+/// starve the Opus encoder of continuous frames.
 struct MuteableSource {
     inner: Box<dyn iroh_live::media::traits::AudioSource>,
     muted: Arc<AtomicBool>,
+    level: MicLevel,
+    /// Encode pulls (each ~20ms). Used for sparse diagnostics.
+    pulls: u64,
+    /// Pulls that had post-AGC energy above [`VOICED_PEAK`].
+    voiced: u64,
+    /// Adaptive linear gain (smoothed).
+    gain: f32,
+    /// Smoothed pre-gain peak for AGC.
+    smooth_peak: f32,
+}
+
+impl MuteableSource {
+    fn silence(muted: Arc<AtomicBool>, level: MicLevel) -> Self {
+        Self {
+            inner: Box::new(SilenceSource::default()),
+            muted,
+            level,
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        }
+    }
+
+    fn apply_agc(&mut self, buf: &mut [f32], pre_peak: f32) -> f32 {
+        // Slow envelope so gain doesn't pump on every syllable.
+        self.smooth_peak = self.smooth_peak * 0.92 + pre_peak * 0.08;
+        if self.smooth_peak >= AGC_MIN_PEAK {
+            let desired = (AGC_TARGET_PEAK / self.smooth_peak).clamp(1.0, AGC_MAX_GAIN);
+            self.gain = self.gain * 0.9 + desired * 0.1;
+        } else {
+            // Decay gain when capture is dead so we don't explode on first sample.
+            self.gain = (self.gain * 0.95).max(1.0);
+        }
+        let g = self.gain;
+        let mut post_peak = 0.0f32;
+        for s in buf.iter_mut() {
+            let v = (*s * g).clamp(-0.95, 0.95);
+            *s = v;
+            post_peak = post_peak.max(v.abs());
+        }
+        post_peak
+    }
 }
 
 impl iroh_live::media::traits::AudioSource for MuteableSource {
@@ -448,14 +1610,425 @@ impl iroh_live::media::traits::AudioSource for MuteableSource {
         &mut self,
         buf: &mut [f32],
     ) -> anyhow::Result<Option<usize>> {
-        let result = self.inner.pop_samples(buf)?;
-        if let Some(n) = result {
-            if self.muted.load(Ordering::Relaxed) {
-                for s in &mut buf[..n] {
+        let mut pre_peak = 0.0f32;
+        let n = match self.inner.pop_samples(buf)? {
+            Some(n) if n > 0 => {
+                let take = n.min(buf.len());
+                for &s in &buf[..take] {
+                    pre_peak = pre_peak.max(s.abs());
+                }
+                // Pad remainder before AGC so we gain a full encoder frame.
+                for s in &mut buf[take..] {
                     *s = 0.0;
+                }
+                let post = self.apply_agc(buf, pre_peak);
+                self.level.observe(buf);
+                let _ = post;
+                buf.len()
+            }
+            Some(_) | None => {
+                // Capture underrun / not-ready / empty: keep the track alive.
+                for s in buf.iter_mut() {
+                    *s = 0.0;
+                }
+                self.level.observe(&[]);
+                self.smooth_peak *= 0.9;
+                buf.len()
+            }
+        };
+        let mut post_peak = 0.0f32;
+        for &s in buf.iter() {
+            post_peak = post_peak.max(s.abs());
+        }
+        self.pulls = self.pulls.saturating_add(1);
+        if post_peak > VOICED_PEAK {
+            self.voiced = self.voiced.saturating_add(1);
+        }
+        let is_muted = self.muted.load(Ordering::Relaxed);
+        if is_muted {
+            for s in buf.iter_mut() {
+                *s = 0.0;
+            }
+        }
+        // Sparse log: first encode pull, then every ~5s (250 * 20ms).
+        if self.pulls == 1 || self.pulls % 250 == 0 {
+            log::info!(
+                "av-media: outbound encode pulls={} voiced={} muted={} \
+                 pre_peak={pre_peak:.4} post_peak={post_peak:.4} gain={:.1}x",
+                self.pulls,
+                self.voiced,
+                is_muted,
+                self.gain
+            );
+        }
+        // Always `Some(full)` — continuous Opus packets while the call is live.
+        Ok(Some(n))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh_live::media::codec::AudioCodec;
+    use iroh_live::media::format::{AudioFormat, AudioPreset};
+    use iroh_live::media::playout::PlaybackPolicy;
+    use iroh_live::media::publish::LocalBroadcast;
+    use iroh_live::media::subscribe::RemoteBroadcast;
+    use iroh_live::media::traits::{
+        AudioSink, AudioSinkHandle, AudioSource, AudioStreamFactory,
+    };
+    use n0_future::boxed::BoxFuture;
+    use std::time::Duration;
+
+    /// Source that always returns `None` — models cpal InputNotReady.
+    struct AlwaysNone;
+
+    impl AudioSource for AlwaysNone {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_48k()
+        }
+        fn pop_samples(&mut self, _buf: &mut [f32]) -> anyhow::Result<Option<usize>> {
+            Ok(None)
+        }
+    }
+
+    /// Source that returns short buffers (partial read underrun).
+    struct ShortRead {
+        n: usize,
+    }
+
+    impl AudioSource for ShortRead {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::mono_48k()
+        }
+        fn pop_samples(&mut self, buf: &mut [f32]) -> anyhow::Result<Option<usize>> {
+            let n = self.n.min(buf.len());
+            for s in &mut buf[..n] {
+                *s = 0.25;
+            }
+            Ok(Some(n))
+        }
+    }
+
+    #[test]
+    fn muteable_source_never_returns_none_on_underrun() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut src = MuteableSource {
+            inner: Box::new(AlwaysNone),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        let mut buf = [1.0f32; 960]; // 20ms @ 48k
+        for _ in 0..50 {
+            let n = src.pop_samples(&mut buf).unwrap();
+            assert_eq!(n, Some(buf.len()), "encoder must get continuous frames");
+            assert!(
+                buf.iter().all(|&s| s == 0.0),
+                "underrun padding must be silence"
+            );
+        }
+    }
+
+    #[test]
+    fn muteable_source_pads_short_reads_to_full_buffer() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut src = MuteableSource {
+            inner: Box::new(ShortRead { n: 100 }),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        let mut buf = [0.0f32; 960];
+        let n = src.pop_samples(&mut buf).unwrap();
+        assert_eq!(n, Some(960));
+        // AGC may boost above 0.25; pad region stays 0.
+        assert!(
+            buf[..100].iter().all(|&s| s > 0.2),
+            "short-read region should keep signal (with AGC)"
+        );
+        assert!(buf[100..].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn muteable_source_zeros_when_muted_but_keeps_frames() {
+        let muted = Arc::new(AtomicBool::new(true));
+        let mut src = MuteableSource {
+            inner: Box::new(ToneSource::hz440()),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        let mut buf = [0.0f32; 480];
+        let n = src.pop_samples(&mut buf).unwrap();
+        assert_eq!(n, Some(buf.len()));
+        assert_eq!(pcm_rms(&buf), 0.0, "muted must be silence");
+        // Level still saw pre-mute energy from the tone.
+        assert!(
+            src.level.get() > 0.01,
+            "mic meter should move while muted"
+        );
+    }
+
+    #[test]
+    fn muteable_source_tone_has_energy_when_unmuted() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut src = MuteableSource {
+            inner: Box::new(ToneSource::hz440()),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        let mut buf = [0.0f32; 4800]; // 100ms
+        let n = src.pop_samples(&mut buf).unwrap();
+        assert_eq!(n, Some(buf.len()));
+        let rms = pcm_rms(&buf);
+        assert!(
+            rms > 0.1,
+            "unmuted tone RMS {rms} should be clearly non-silent"
+        );
+    }
+
+    #[test]
+    fn silence_source_is_continuous_zeros() {
+        let mut s = SilenceSource::default();
+        let mut buf = [1.0f32; 320];
+        assert_eq!(s.pop_samples(&mut buf).unwrap(), Some(320));
+        assert!(buf.iter().all(|&x| x == 0.0));
+    }
+
+    /// freeq-av-style tap: capture decoded PCM instead of playing it.
+    struct TapBackend {
+        tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    }
+
+    impl AudioStreamFactory for TapBackend {
+        fn create_input(
+            &self,
+            format: AudioFormat,
+        ) -> BoxFuture<anyhow::Result<Box<dyn AudioSource>>> {
+            let src = SilenceSource {
+                format: if format.sample_rate == 0 {
+                    AudioFormat::mono_48k()
+                } else {
+                    format
+                },
+            };
+            Box::pin(async move { Ok(Box::new(src) as Box<dyn AudioSource>) })
+        }
+
+        fn create_output(
+            &self,
+            format: AudioFormat,
+        ) -> BoxFuture<anyhow::Result<Box<dyn AudioSink>>> {
+            let tx = self.tx.clone();
+            Box::pin(async move {
+                Ok(Box::new(TapSink {
+                    format,
+                    paused: Arc::new(AtomicBool::new(false)),
+                    tx,
+                }) as Box<dyn AudioSink>)
+            })
+        }
+    }
+
+    struct TapSink {
+        format: AudioFormat,
+        paused: Arc<AtomicBool>,
+        tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    }
+
+    impl AudioSinkHandle for TapSink {
+        fn cloned_boxed(&self) -> Box<dyn AudioSinkHandle> {
+            Box::new(TapSinkHandle {
+                paused: self.paused.clone(),
+            })
+        }
+        fn pause(&self) {
+            self.paused.store(true, Ordering::Relaxed);
+        }
+        fn resume(&self) {
+            self.paused.store(false, Ordering::Relaxed);
+        }
+        fn is_paused(&self) -> bool {
+            self.paused.load(Ordering::Relaxed)
+        }
+        fn toggle_pause(&self) {
+            let _ = self
+                .paused
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(!v));
+        }
+    }
+
+    impl AudioSink for TapSink {
+        fn format(&self) -> anyhow::Result<AudioFormat> {
+            Ok(self.format)
+        }
+        fn push_samples(&mut self, buf: &[f32]) -> anyhow::Result<()> {
+            let _ = self.tx.try_send(buf.to_vec());
+            Ok(())
+        }
+        fn handle(&self) -> Box<dyn AudioSinkHandle> {
+            Box::new(TapSinkHandle {
+                paused: self.paused.clone(),
+            })
+        }
+    }
+
+    struct TapSinkHandle {
+        paused: Arc<AtomicBool>,
+    }
+
+    impl AudioSinkHandle for TapSinkHandle {
+        fn cloned_boxed(&self) -> Box<dyn AudioSinkHandle> {
+            Box::new(TapSinkHandle {
+                paused: self.paused.clone(),
+            })
+        }
+        fn pause(&self) {
+            self.paused.store(true, Ordering::Relaxed);
+        }
+        fn resume(&self) {
+            self.paused.store(false, Ordering::Relaxed);
+        }
+        fn is_paused(&self) -> bool {
+            self.paused.load(Ordering::Relaxed)
+        }
+        fn toggle_pause(&self) {
+            let _ = self
+                .paused
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(!v));
+        }
+    }
+
+    /// Publish through the shipped MuteableSource → LocalBroadcast Opus path,
+    /// subscribe like freeq-av/eve (RemoteBroadcast + tap sink), assert energy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_muteable_tone_is_audible_to_subscriber() {
+        let path = broadcast_path("01TESTSESS", "desktop", "a1b2c3d4");
+        assert_eq!(path, "01TESTSESS/desktop~a1b2c3d4");
+
+        let broadcast = LocalBroadcast::new();
+        let muted = Arc::new(AtomicBool::new(false));
+        let muteable = MuteableSource {
+            inner: Box::new(ToneSource::hz440()),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        broadcast
+            .audio()
+            .set(muteable, AudioCodec::Opus, [AudioPreset::Hq])
+            .expect("set Opus source (shipped publish path)");
+
+        let consumer = broadcast.consume();
+        // Keep producer alive for the duration of the test.
+        let _keepalive = broadcast;
+
+        let remote = RemoteBroadcast::with_playback_policy(
+            &path,
+            consumer,
+            PlaybackPolicy::unmanaged(),
+        )
+        .await
+        .expect("catalog from LocalBroadcast");
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(64);
+        let backend = TapBackend { tx };
+        let _track = remote
+            .audio_ready(&backend)
+            .await
+            .expect("audio_ready — catalog must advertise Opus");
+
+        // Collect decoded PCM for ~1.5s of wall time (Opus frame cadence).
+        let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+        let mut samples: Vec<f32> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => samples.extend_from_slice(&chunk),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if samples.len() > 48_000 / 2 {
+                break; // ~0.5s mono 48k is enough for RMS
+            }
+        }
+
+        assert!(
+            !samples.is_empty(),
+            "subscriber got no PCM — publish path not producing Opus frames"
+        );
+        let rms = pcm_rms(&samples);
+        assert!(
+            rms > 0.01,
+            "decoded RMS {rms:.6} too low (samples={}) — bot would hear silence",
+            samples.len()
+        );
+    }
+
+    /// Catalog-only silence when capture is missing still produces frames
+    /// (listen-only), so agents stay attached rather than seeing no track.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silence_source_still_publishes_continuous_opus_track() {
+        let broadcast = LocalBroadcast::new();
+        let muted = Arc::new(AtomicBool::new(true));
+        let muteable = MuteableSource {
+            inner: Box::new(SilenceSource::default()),
+            muted,
+            level: MicLevel::new(),
+            pulls: 0,
+            voiced: 0,
+            gain: 1.0,
+            smooth_peak: 0.0,
+        };
+        broadcast
+            .audio()
+            .set(muteable, AudioCodec::Opus, [AudioPreset::Hq])
+            .expect("silence Opus set");
+        let consumer = broadcast.consume();
+        let _keepalive = broadcast;
+
+        let remote = RemoteBroadcast::with_playback_policy(
+            "sess/listen-only",
+            consumer,
+            PlaybackPolicy::unmanaged(),
+        )
+        .await
+        .expect("catalog");
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(32);
+        let backend = TapBackend { tx };
+        let _track = remote.audio_ready(&backend).await.expect("audio track");
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(800);
+        let mut got = 0usize;
+        while std::time::Instant::now() < deadline {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(40)) {
+                got += chunk.len();
+                if got > 2000 {
+                    break;
                 }
             }
         }
-        Ok(result)
+        assert!(
+            got > 0,
+            "listen-only silence must still emit continuous frames (got 0 samples)"
+        );
     }
+
 }

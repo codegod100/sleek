@@ -7,9 +7,8 @@ license = "MIT"
 publish = false
 
 # Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
-# cargo-apk / newer cargo require explicit members (empty [workspace] fails parse).
+# Empty [workspace] — cargo-apk 0.9.x rejects members = ["."] with UnexpectedWorkspace.
 [workspace]
-members = ["."]
 
 [lib]
 name = "sleek"
@@ -80,6 +79,8 @@ moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main",
 ] }
 moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main" }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+# BoxFuture for AudioStreamFactory impls (freeq-av-style PCM tap in tests).
+n0-future = "0.3"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = { version = "0.31", default-features = false, features = [
@@ -106,6 +107,10 @@ iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc53
     "h264",
     "capture-camera",
 ] }
+# Enable cpal's native PipeWire host (feature-unified into moq-media's cpal).
+# Without this we only see ALSA PCMs ("pipewire", "sysdefault") and cannot pick
+# the real OS sources the browser uses (e.g. "EMEET SmartCam C960 Mono").
+cpal = { path = "../vendor/cpal", features = ["pipewire"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = [
@@ -160,7 +165,31 @@ target_sdk_version = 34
 
 [package.metadata.android.application]
 label = "Sleek"
+# Required so the system loads APK classes.dex (SleekActivity). cargo-apk
+# defaults hasCode=false for pure-native apps.
+has_code = true
 orientations = ["Portrait", "Landscape"]
+
+# Subclass of NativeActivity (classes.dex injected post cargo-apk) so
+# onNewIntent can capture freeq:// OAuth callbacks while the app is warm.
+# freeq-android uses the same scheme + singleTask pattern.
+[package.metadata.android.application.activity]
+name = "uk.nandi.sleek.SleekActivity"
+# Reuse the existing task when the browser opens freeq://auth — do not spawn
+# a second NativeActivity (which would re-enter android_main mid-session).
+launch_mode = "singleTask"
+exported = true
+
+# OAuth / notification deep links: freeq://auth?… and freeq://chat/…
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = [
+    "android.intent.category.DEFAULT",
+    "android.intent.category.BROWSABLE",
+]
+
+[[package.metadata.android.application.activity.intent_filter.data]]
+scheme = "freeq"
 
 # Local patch: smithay→arboard text fallback + emit Ctrl+V Key when clipboard has no text
 # (so compose-bar image paste can run). Upstream still swallows V on image-only paste.

@@ -1,10 +1,10 @@
 //! Chat detail — messages + compose (freeq-android ChatDetailScreen inspired).
 
-use eframe::egui::{self, Align, Align2, CursorIcon, Layout, RichText, Sense, ScrollArea, Vec2};
+use eframe::egui::{self, text::CCursor, text::CCursorRange, Align, Align2, CursorIcon, Layout, RichText, Sense, ScrollArea, Vec2};
 use vidya::{button, dim_label, primary_button, Theme};
 
 use crate::clipboard;
-use crate::state::AppState;
+use crate::state::{AppState, NickTabComplete};
 use crate::ui::widgets::{avatar_circle, empty_state, message_bubble, MessageBubbleAction};
 
 pub enum ChatAction {
@@ -24,6 +24,12 @@ pub enum ChatAction {
     AvToggleMute,
     /// Toggle camera publish (desktop MoQ).
     AvToggleCamera,
+    /// Select camera device (`None` = system first / default).
+    AvSelectCamera(Option<String>),
+    /// Select microphone by name (`None` = system default).
+    AvSelectMic(Option<String>),
+    /// Select speaker by name (`None` = system default).
+    AvSelectSpeaker(Option<String>),
     /// Jump to the channel that holds our active call.
     OpenCallChannel(String),
     /// Toggle our reaction on a message (`+react` / `+freeq.at/unreact`).
@@ -201,17 +207,25 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     if is_channel && joined && state.local_call.is_none() {
         let prev_muted = state.av_pref_muted;
         let prev_camera = state.av_pref_camera;
-        if let Some(act) = av_call_banner(
-            ui,
-            th,
-            channel,
-            channel_call.as_ref(),
-            &mut state.av_pref_muted,
-            &mut state.av_pref_camera,
-        ) {
+        let prev_cam_id = state.av_pref_camera_id.clone();
+        let prev_mic = state.av_pref_mic_id.clone();
+        let prev_spk = state.av_pref_speaker_id.clone();
+        // Refresh device lists when the pre-call banner is shown (cheap).
+        if state.av_device_cameras.is_empty()
+            && state.av_device_mics.is_empty()
+            && state.av_device_speakers.is_empty()
+        {
+            state.refresh_av_devices();
+        }
+        if let Some(act) = av_call_banner(ui, th, channel, channel_call.as_ref(), state) {
             action = act;
         }
-        if state.av_pref_muted != prev_muted || state.av_pref_camera != prev_camera {
+        if state.av_pref_muted != prev_muted
+            || state.av_pref_camera != prev_camera
+            || state.av_pref_camera_id != prev_cam_id
+            || state.av_pref_mic_id != prev_mic
+            || state.av_pref_speaker_id != prev_spk
+        {
             state.persist_av_prefs();
         }
         ui.add_space(sp.sm);
@@ -371,8 +385,21 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
             ui.set_min_width(inner_w);
             ui.set_max_width(inner_w);
 
+            let compose_id = egui::Id::new(("chat_compose", channel));
+            // Build nick candidates before mutably borrowing compose for Tab complete.
+            let nick_candidates =
+                nick_completion_candidates(&members, &messages, is_channel, channel, state);
+            // Consume Tab before TextEdit so it does not insert `\t` / steal focus.
+            try_nick_tab_complete(
+                ui,
+                compose_id,
+                &mut state.compose,
+                &mut state.compose_nick_tab,
+                &nick_candidates,
+            );
+
             if has_image {
-                if let Some(send) = compose_image_composer(ui, th, state) {
+                if let Some(send) = compose_image_composer(ui, th, state, compose_id) {
                     action = ChatAction::Send {
                         target: channel.to_string(),
                         text: send,
@@ -395,6 +422,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     72.0,
                     attach_tip,
                     true,
+                    compose_id,
                 );
                 if attach_clicked && !pick_busy {
                     state.start_file_pick();
@@ -535,6 +563,7 @@ fn compose_image_composer(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
+    compose_id: egui::Id,
 ) -> Option<String> {
     let p = &th.palette;
     let sp = &th.spacing;
@@ -658,6 +687,7 @@ fn compose_image_composer(
         80.0,
         attach_tip,
         !uploading,
+        compose_id,
     );
     if attach_clicked && !uploading && !pick_busy {
         state.start_file_pick();
@@ -693,6 +723,8 @@ fn compose_image_composer(
 /// - Theme `item_spacing` is zeroed so gaps are only the explicit `sp.sm`
 ///   (otherwise spacing stacks and clips the action button on the right).
 /// - All three controls share `control_height` so baselines match.
+/// - `lock_focus(true)` keeps Tab in the field for nick completion (handled
+///   by [`try_nick_tab_complete`] before this runs).
 fn compose_input_row(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -702,6 +734,7 @@ fn compose_input_row(
     action_w: f32,
     attach_tooltip: &str,
     field_interactive: bool,
+    field_id: egui::Id,
 ) -> (egui::Response, bool, bool) {
     let p = &th.palette;
     let sp = &th.spacing;
@@ -746,7 +779,10 @@ fn compose_input_row(
             // Fixed single-line height; Shift+Enter inserts a newline, bare Enter sends.
             // Center text so the hint matches attach/action baselines
             // (multiline defaults to TOP; button labels are centered).
+            // lock_focus: Tab stays here for nick complete (not focus-next).
             let te = egui::TextEdit::multiline(text)
+                .id(field_id)
+                .lock_focus(true)
                 .margin(th.text_edit_margin())
                 .desired_width(field_w)
                 .desired_rows(1)
@@ -784,6 +820,210 @@ fn compose_input_row(
         attach_clicked,
         action_clicked,
     )
+}
+
+// ── Tab nick completion ──────────────────────────────────────────────────────
+
+/// Characters that form an IRC-ish nick (and freeq display names).
+fn is_nick_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '[' | ']' | '{' | '}' | '\\' | '|' | '^' | '-' | '_' | '`' | '.' | '/'
+        )
+}
+
+/// Word ending at `cursor` (char index): `(start, text)` including a leading `@` if present.
+fn word_before_cursor(text: &str, cursor: usize) -> (usize, String) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let mut start = cursor;
+    while start > 0 && is_nick_char(chars[start - 1]) {
+        start -= 1;
+    }
+    if start > 0 && chars[start - 1] == '@' {
+        start -= 1;
+    }
+    let word: String = chars[start..cursor].iter().collect();
+    (start, word)
+}
+
+fn completion_text(nick: &str, leading: bool) -> String {
+    if leading {
+        format!("{nick}: ")
+    } else {
+        format!("{nick} ")
+    }
+}
+
+/// Nicks available for Tab complete: room members, message authors, DM peer.
+fn nick_completion_candidates(
+    members: &[String],
+    messages: &[crate::state::ChatMessage],
+    is_channel: bool,
+    channel: &str,
+    state: &AppState,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |n: &str| {
+        let n = n.trim();
+        if n.is_empty() {
+            return;
+        }
+        if out.iter().any(|e| e.eq_ignore_ascii_case(n)) {
+            return;
+        }
+        out.push(n.to_string());
+    };
+
+    for m in members {
+        push(m);
+    }
+    for msg in messages {
+        if !msg.is_system && !msg.from.is_empty() {
+            push(&msg.from);
+        }
+    }
+    if !is_channel {
+        push(&state.display_name_for(channel));
+        push(channel);
+    }
+    out
+}
+
+fn expected_completion(tab: &NickTabComplete) -> String {
+    let mut body = completion_text(&tab.matches[tab.index], tab.leading);
+    if tab.had_at {
+        body.insert(0, '@');
+    }
+    body
+}
+
+/// Tab / Shift+Tab: complete the nick under the cursor against `candidates`.
+///
+/// Must run **before** the compose [`egui::TextEdit`] so Tab is not inserted as
+/// a tab character. Call with a stable `field_id` shared with that TextEdit.
+fn try_nick_tab_complete(
+    ui: &mut egui::Ui,
+    field_id: egui::Id,
+    compose: &mut String,
+    tab: &mut NickTabComplete,
+    candidates: &[String],
+) {
+    let focused = ui.memory(|m| m.has_focus(field_id));
+    if !focused {
+        return;
+    }
+
+    // Shift+Tab cycles backward; plain Tab forward. Match Shift first.
+    let backward = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+    let forward =
+        !backward && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    if !forward && !backward {
+        return;
+    }
+
+    let cursor = egui::TextEdit::load_state(ui.ctx(), field_id)
+        .and_then(|s| s.cursor.char_range())
+        .map(|r| r.primary.index)
+        .unwrap_or_else(|| compose.chars().count());
+
+    let cycling = tab.active
+        && !tab.matches.is_empty()
+        && cursor == tab.cursor_end
+        && {
+            let expected = expected_completion(tab);
+            let have: String = compose
+                .chars()
+                .skip(tab.word_start)
+                .take(cursor.saturating_sub(tab.word_start))
+                .collect();
+            have == expected
+        };
+
+    if cycling {
+        let n = tab.matches.len();
+        tab.index = if backward {
+            (tab.index + n - 1) % n
+        } else {
+            (tab.index + 1) % n
+        };
+    } else {
+        let (word_start, word) = word_before_cursor(compose, cursor);
+        let had_at = word.starts_with('@');
+        let prefix = if had_at {
+            word[1..].to_string()
+        } else {
+            word
+        };
+        let prefix_lc = prefix.to_lowercase();
+        let leading = compose.chars().take(word_start).all(|c| c.is_whitespace());
+
+        let mut matches: Vec<String> = candidates
+            .iter()
+            .filter(|n| n.to_lowercase().starts_with(&prefix_lc))
+            .cloned()
+            .collect();
+        // Prefer exact case-prefix matches, then alphabetical (case-insensitive).
+        matches.sort_by(|a, b| {
+            let a_exact = a.starts_with(&prefix);
+            let b_exact = b.starts_with(&prefix);
+            b_exact
+                .cmp(&a_exact)
+                .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+                .then_with(|| a.cmp(b))
+        });
+        matches.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+        if matches.is_empty() {
+            tab.clear();
+            return;
+        }
+
+        // If the typed word already is a full match, advance to the next one.
+        let mut index = 0;
+        if !prefix.is_empty() {
+            if let Some(i) = matches
+                .iter()
+                .position(|m| m.eq_ignore_ascii_case(&prefix))
+            {
+                index = if backward {
+                    (i + matches.len() - 1) % matches.len()
+                } else {
+                    (i + 1) % matches.len()
+                };
+            }
+        }
+
+        *tab = NickTabComplete {
+            active: true,
+            word_start,
+            matches,
+            index,
+            leading,
+            had_at,
+            cursor_end: cursor,
+        };
+    }
+
+    let body = expected_completion(tab);
+    let mut chars: Vec<char> = compose.chars().collect();
+    let end = cursor.min(chars.len());
+    let start = tab.word_start.min(end);
+    chars.splice(start..end, body.chars());
+    *compose = chars.into_iter().collect();
+
+    let new_cursor = start + body.chars().count();
+    tab.cursor_end = new_cursor;
+    tab.word_start = start;
+    tab.active = true;
+
+    if let Some(mut te_state) = egui::TextEdit::load_state(ui.ctx(), field_id) {
+        te_state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor))));
+        egui::TextEdit::store_state(ui.ctx(), field_id, te_state);
+    }
 }
 
 /// If the user pastes (Ctrl/Cmd+V) and the clipboard holds an image, attach it
@@ -912,17 +1152,51 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
             .truncate(),
         );
 
-        if matches!(lc.media, crate::av::MediaStatus::Live) {
+        // Paint tiles as soon as we are Connecting or Live so self-view can
+        // appear the moment capture starts (not only after MoQ Live toast).
+        if matches!(
+            lc.media,
+            crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
+        ) {
             paint_av_video_tiles(ui, th, state);
         }
 
         ui.add_space(sp.xs);
+        // Primary chrome only: mute / camera / leave. Device pickers live under
+        // a Devices toggle so long Cam/Mic/Out combos don't wrap over chat.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = sp.sm;
-            if av_icon_toggle(ui, th, "🎤", lc.muted, if lc.muted { "Unmute" } else { "Mute" })
-                .clicked()
+            if av_icon_toggle(
+                ui,
+                th,
+                "🎤",
+                lc.muted || !lc.has_mic,
+                if !lc.has_mic {
+                    "No microphone (listen-only)"
+                } else if lc.muted {
+                    "Unmute"
+                } else {
+                    "Mute"
+                },
+            )
+            .clicked()
             {
-                action = Some(ChatAction::AvToggleMute);
+                // Listen-only: toggling mute is a no-op (nothing to send).
+                if lc.has_mic {
+                    action = Some(ChatAction::AvToggleMute);
+                }
+            }
+            // Live mic volume meter (updates while media is Live).
+            if matches!(lc.media, crate::av::MediaStatus::Live) {
+                let level = state
+                    .av_mic_level
+                    .as_ref()
+                    .map(|m| m.get())
+                    .unwrap_or(0.0);
+                paint_mic_level_meter(ui, th, level, lc.muted || !lc.has_mic);
+                // Capture thread writes levels continuously — keep the bar moving.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
             }
             if lc.has_camera {
                 if av_icon_toggle(
@@ -949,10 +1223,97 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
                     action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
                 }
             }
+            av_devices_toggle_button(ui, th, state);
         });
+
+        if state.av_show_devices {
+            if state.av_device_cameras.is_empty()
+                && state.av_device_mics.is_empty()
+                && state.av_device_speakers.is_empty()
+            {
+                state.refresh_av_devices();
+            }
+            ui.add_space(sp.xs);
+            if let Some(act) = av_device_selectors(ui, th, state, /*in_call=*/ true) {
+                action = Some(act);
+            }
+        }
     });
 
     action
+}
+
+/// Compact Devices ▾ / ▴ control (no extra row of pickers).
+fn av_devices_toggle_button(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
+    let devices_label = if state.av_show_devices {
+        "Devices ▴"
+    } else {
+        "Devices ▾"
+    };
+    if button(ui, th, devices_label).clicked() {
+        state.av_show_devices = !state.av_show_devices;
+        if state.av_show_devices {
+            state.refresh_av_devices();
+        }
+    }
+}
+
+/// Horizontal mic volume bar next to the mute control (0.0..=1.0).
+///
+/// Dimmed when muted; green→yellow→red segments at higher levels so peaks
+/// are obvious. Level is measured pre-mute so the bar still moves while muted.
+fn paint_mic_level_meter(ui: &mut egui::Ui, th: &Theme, level: f32, muted: bool) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let level = level.clamp(0.0, 1.0);
+    let h = (sp.control_height * 0.42).max(8.0);
+    let w = (sp.control_height * 2.4).max(48.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+
+    let painter = ui.painter();
+    let rounding = sp.radius_sm.min(h * 0.5);
+    let track = if muted {
+        p.button_bg.gamma_multiply(0.85)
+    } else {
+        p.button_bg
+    };
+    painter.rect(
+        rect,
+        rounding,
+        track,
+        egui::Stroke::new(1.0_f32, p.border_soft),
+        egui::StrokeKind::Inside,
+    );
+
+    if level > 0.01 {
+        let fill_w = (rect.width() * level).max(2.0);
+        let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
+        // Quiet = accent; mid = warm; hot peaks = destructive.
+        let fill = if muted {
+            p.text_secondary.gamma_multiply(0.55)
+        } else if level < 0.55 {
+            p.accent
+        } else if level < 0.82 {
+            egui::Color32::from_rgb(230, 180, 60)
+        } else {
+            p.destructive
+        };
+        painter.rect(
+            fill_rect,
+            rounding,
+            fill,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let pct = (level * 100.0).round() as i32;
+    let tip = if muted {
+        format!("Mic level {pct}% (muted — still showing input)")
+    } else {
+        format!("Mic level {pct}%")
+    };
+    response.on_hover_text(tip);
 }
 
 /// Square mic/camera toggle: icon only, diagonal slash when off/muted.
@@ -1012,32 +1373,31 @@ fn av_icon_toggle(
 }
 
 /// Pre-call mic/camera toggles (icons match in-call controls).
-fn av_media_prefs_row(
-    ui: &mut egui::Ui,
-    th: &Theme,
-    pref_muted: &mut bool,
-    pref_camera: &mut bool,
-) {
+fn av_media_prefs_row(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     let sp = &th.spacing;
     ui.horizontal(|ui| {
         if av_icon_toggle(
             ui,
             th,
             "🎤",
-            *pref_muted,
-            if *pref_muted { "Unmute" } else { "Mute" },
+            state.av_pref_muted,
+            if state.av_pref_muted {
+                "Unmute"
+            } else {
+                "Mute"
+            },
         )
         .clicked()
         {
-            *pref_muted = !*pref_muted;
+            state.av_pref_muted = !state.av_pref_muted;
         }
         ui.add_space(sp.sm);
         if av_icon_toggle(
             ui,
             th,
             "📷",
-            !*pref_camera,
-            if *pref_camera {
+            !state.av_pref_camera,
+            if state.av_pref_camera {
                 "Turn camera off"
             } else {
                 "Turn camera on"
@@ -1045,9 +1405,223 @@ fn av_media_prefs_row(
         )
         .clicked()
         {
-            *pref_camera = !*pref_camera;
+            state.av_pref_camera = !state.av_pref_camera;
         }
     });
+}
+
+/// Camera / mic / speaker combo boxes. Emits `AvSelect*` when the choice changes
+/// mid-call so the media plane can switch immediately; pre-call only updates prefs.
+///
+/// Stacked full-width rows (not horizontal wrap) so long device names don't
+/// pile Cam + Mic on one line and shove Out under chat text.
+fn av_device_selectors(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    in_call: bool,
+) -> Option<ChatAction> {
+    let sp = &th.spacing;
+    let mut action = None;
+
+    // Hide entirely when nothing was discovered (Android / headless).
+    if state.av_device_cameras.is_empty()
+        && state.av_device_mics.is_empty()
+        && state.av_device_speakers.is_empty()
+    {
+        return None;
+    }
+
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = sp.xs;
+        ui.set_width(ui.available_width());
+
+        // ── Camera ──
+        if !state.av_device_cameras.is_empty() {
+            let current = state
+                .av_pref_camera_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .av_device_cameras
+                        .iter()
+                        .find(|d| &d.id == id)
+                        .map(|d| d.name.clone())
+                })
+                .unwrap_or_else(|| "Default".to_string());
+            let options: Vec<(String, String, bool)> = state
+                .av_device_cameras
+                .iter()
+                .map(|d| (d.id.clone(), d.name.clone(), d.is_default))
+                .collect();
+            let selected_id = state.av_pref_camera_id.clone();
+            if let Some(id) = av_device_combo_row_selected(
+                ui,
+                th,
+                "Cam",
+                "av_sel_camera",
+                &current,
+                "Default",
+                selected_id.is_none(),
+                &options,
+                selected_id.as_deref(),
+            ) {
+                if in_call {
+                    action = Some(ChatAction::AvSelectCamera(id));
+                } else {
+                    state.av_pref_camera_id = id;
+                }
+            }
+        }
+
+        // ── Mic ──
+        if !state.av_device_mics.is_empty() {
+            let current = state
+                .av_pref_mic_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .av_device_mics
+                        .iter()
+                        .find(|d| &d.id == id)
+                        .map(|d| d.name.clone())
+                })
+                .or_else(|| {
+                    state
+                        .av_device_mics
+                        .iter()
+                        .find(|d| d.is_default)
+                        .map(|d| d.name.clone())
+                })
+                .unwrap_or_else(|| "Default".to_string());
+            let options: Vec<(String, String, bool)> = state
+                .av_device_mics
+                .iter()
+                .map(|d| (d.id.clone(), d.name.clone(), d.is_default))
+                .collect();
+            let selected_id = state.av_pref_mic_id.clone();
+            if let Some(id) = av_device_combo_row_selected(
+                ui,
+                th,
+                "Mic",
+                "av_sel_mic",
+                &current,
+                "System default",
+                selected_id.is_none(),
+                &options,
+                selected_id.as_deref(),
+            ) {
+                if in_call {
+                    action = Some(ChatAction::AvSelectMic(id));
+                } else {
+                    state.av_pref_mic_id = id;
+                }
+            }
+        }
+
+        // ── Speaker ──
+        if !state.av_device_speakers.is_empty() {
+            let current = state
+                .av_pref_speaker_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .av_device_speakers
+                        .iter()
+                        .find(|d| &d.id == id)
+                        .map(|d| d.name.clone())
+                })
+                .or_else(|| {
+                    state
+                        .av_device_speakers
+                        .iter()
+                        .find(|d| d.is_default)
+                        .map(|d| d.name.clone())
+                })
+                .unwrap_or_else(|| "Default".to_string());
+            let options: Vec<(String, String, bool)> = state
+                .av_device_speakers
+                .iter()
+                .map(|d| (d.id.clone(), d.name.clone(), d.is_default))
+                .collect();
+            let selected_id = state.av_pref_speaker_id.clone();
+            if let Some(id) = av_device_combo_row_selected(
+                ui,
+                th,
+                "Out",
+                "av_sel_speaker",
+                &current,
+                "System default",
+                selected_id.is_none(),
+                &options,
+                selected_id.as_deref(),
+            ) {
+                if in_call {
+                    action = Some(ChatAction::AvSelectSpeaker(id));
+                } else {
+                    state.av_pref_speaker_id = id;
+                }
+            }
+        }
+    });
+
+    action
+}
+
+/// Device picker row with correct id-based selection highlighting.
+fn av_device_combo_row_selected(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    label: &str,
+    id_salt: &str,
+    current: &str,
+    none_label: &str,
+    none_selected: bool,
+    options: &[(String, String, bool)],
+    selected_id: Option<&str>,
+) -> Option<Option<String>> {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let label_w = 36.0_f32;
+    let mut picked: Option<Option<String>> = None;
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = sp.sm;
+        let row_h = sp.control_height.max(th.type_scale.caption * 1.6);
+        ui.allocate_ui_with_layout(
+            Vec2::new(label_w, row_h),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.label(
+                    RichText::new(label)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
+                );
+            },
+        );
+        let combo_w = (ui.available_width() - sp.sm).clamp(120.0, 420.0);
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(current)
+            .width(combo_w)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(none_selected, none_label).clicked() {
+                    picked = Some(None);
+                }
+                for (id, name, is_default) in options {
+                    let sel = selected_id == Some(id.as_str());
+                    let row_label = if *is_default {
+                        format!("{name} (default)")
+                    } else {
+                        name.clone()
+                    };
+                    if ui.selectable_label(sel, row_label).clicked() {
+                        picked = Some(Some(id.clone()));
+                    }
+                }
+            });
+    });
+
+    picked
 }
 
 /// Per-channel call strip when we are not in any local call:
@@ -1058,8 +1632,7 @@ fn av_call_banner(
     th: &Theme,
     channel: &str,
     channel_call: Option<&crate::av::ChannelCall>,
-    pref_muted: &mut bool,
-    pref_camera: &mut bool,
+    state: &mut AppState,
 ) -> Option<ChatAction> {
     let sp = &th.spacing;
     let p = &th.palette;
@@ -1074,7 +1647,10 @@ fn av_call_banner(
             dim_label(ui, th, "Voice & video over MoQ");
         });
         ui.add_space(sp.xs);
-        av_media_prefs_row(ui, th, pref_muted, pref_camera);
+        av_media_prefs_row(ui, th, state);
+        // Device pickers stay behind Devices so Cam/Mic/Out don't dominate idle chat.
+        ui.add_space(sp.xs);
+        av_devices_disclosure(ui, th, state, /*in_call=*/ false, &mut action);
         return action;
     }
 
@@ -1132,23 +1708,94 @@ fn av_call_banner(
             }
         });
         ui.add_space(sp.xs);
-        av_media_prefs_row(ui, th, pref_muted, pref_camera);
+        av_media_prefs_row(ui, th, state);
+        ui.add_space(sp.xs);
+        av_devices_disclosure(ui, th, state, /*in_call=*/ false, &mut action);
     });
 
     action
 }
 
-/// Paint remote (+ local preview) video tiles from the MoQ frame store.
-/// Click a tile to enlarge/focus it; click the focused tile again to restore the grid.
-fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
-    let Some(store) = state.av_video.clone() else {
+/// Devices ▾ toggle + stacked Cam/Mic/Out rows when open.
+fn av_devices_disclosure(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    in_call: bool,
+    action: &mut Option<ChatAction>,
+) {
+    av_devices_toggle_button(ui, th, state);
+    if !state.av_show_devices {
         return;
-    };
-    let mut frames = store.snapshot();
+    }
+    if state.av_device_cameras.is_empty()
+        && state.av_device_mics.is_empty()
+        && state.av_device_speakers.is_empty()
+    {
+        state.refresh_av_devices();
+    }
+    ui.add_space(th.spacing.xs);
+    if let Some(act) = av_device_selectors(ui, th, state, in_call) {
+        *action = Some(act);
+    }
+}
+
+/// Column count for an equal video grid (classic call layouts).
+fn av_grid_cols(n: usize) -> usize {
+    match n {
+        0 | 1 => 1,
+        2 => 2,
+        3..=4 => 2,
+        5..=9 => 3,
+        _ => 4,
+    }
+}
+
+/// Paint remote (+ local preview) video tiles from the MoQ frame store.
+///
+/// Streams are laid out in a fixed multi-column grid (or focus + filmstrip)
+/// so frames never share the same rect. Click a tile to enlarge/focus it;
+/// click the focused tile again to restore the grid.
+fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
+    use std::sync::Arc;
+
+    let store = state.av_video.clone();
+    let mut frames = store
+        .as_ref()
+        .map(|s| s.snapshot())
+        .unwrap_or_default();
+    // Local camera open + on, but no frame yet — keep a "You" slot while
+    // capture warms up. Only when has_camera is true (device actually opened);
+    // otherwise a dark blank square looks like broken video.
+    let want_local = state
+        .local_call
+        .as_ref()
+        .is_some_and(|lc| lc.has_camera && lc.camera);
+    let has_local = frames.iter().any(|(k, _)| k == "__local__");
+    if want_local && !has_local {
+        // Distinct warm-up pattern (not solid black) so users can tell
+        // "waiting for first frame" from a dead tile.
+        let mut px = Vec::with_capacity(8 * 8 * 4);
+        for y in 0..8 {
+            for x in 0..8 {
+                let on = (x + y) % 2 == 0;
+                let v = if on { 48u8 } else { 28u8 };
+                px.extend_from_slice(&[v, v, v.saturating_add(12), 255]);
+            }
+        }
+        frames.push((
+            "__local__".into(),
+            crate::av::RgbaVideoFrame {
+                width: 8,
+                height: 8,
+                rgba: Arc::<[u8]>::from(px),
+            },
+        ));
+    }
     if frames.is_empty() {
         return;
     }
-    // Local preview first, then remotes alphabetically.
+    // Local preview first, then remotes alphabetically (key = nick or nick~instance).
     frames.sort_by(|a, b| {
         let a_local = a.0 == "__local__";
         let b_local = b.0 == "__local__";
@@ -1173,19 +1820,19 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
 
     // Upload / refresh GPU textures first so paint helpers only need ids + dims.
     let mut tiles: Vec<(String, egui::TextureId, u32, u32)> = Vec::with_capacity(frames.len());
-    for (nick, frame) in &frames {
+    for (key, frame) in &frames {
         let color = egui::ColorImage::from_rgba_unmultiplied(
             [frame.width as usize, frame.height as usize],
             frame.rgba.as_ref(),
         );
-        let tex_id = match state.av_video_textures.entry(nick.clone()) {
+        let tex_id = match state.av_video_textures.entry(key.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 e.get_mut().set(color, egui::TextureOptions::LINEAR);
                 e.get().id()
             }
             std::collections::hash_map::Entry::Vacant(e) => {
                 let tex = ui.ctx().load_texture(
-                    format!("av_video_{nick}"),
+                    format!("av_video_{key}"),
                     color,
                     egui::TextureOptions::LINEAR,
                 );
@@ -1194,25 +1841,23 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
                 id
             }
         };
-        tiles.push((nick.clone(), tex_id, frame.width, frame.height));
+        tiles.push((key.clone(), tex_id, frame.width, frame.height));
     }
 
     let focused = state.av_focused_video.clone();
     let mut clicked: Option<String> = None;
 
-    if let Some(focus_nick) = focused.as_ref() {
+    if let Some(focus_key) = focused.as_ref() {
         // Enlarged primary + filmstrip of the rest.
-        let avail = ui.available_width();
+        let avail = ui.available_width().max(1.0);
         let primary_w = avail;
-        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 420.0);
-        let thumb_w = ((avail - sp.sm) / 4.0).clamp(72.0, 140.0);
-        let thumb_h = thumb_w * 9.0 / 16.0;
+        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 360.0);
 
-        if let Some((nick, tex_id, w, h)) = tiles.iter().find(|(n, _, _, _)| n == focus_nick) {
+        if let Some((key, tex_id, w, h)) = tiles.iter().find(|(n, _, _, _)| n == focus_key) {
             if paint_av_video_tile(
                 ui,
                 th,
-                nick,
+                key,
                 *tex_id,
                 *w,
                 *h,
@@ -1221,87 +1866,113 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             )
             .clicked()
             {
-                clicked = Some(nick.clone());
+                clicked = Some(key.clone());
             }
         }
 
         let others: Vec<_> = tiles
             .iter()
-            .filter(|(n, _, _, _)| n != focus_nick)
+            .filter(|(n, _, _, _)| n != focus_key)
             .cloned()
             .collect();
         if !others.is_empty() {
             ui.add_space(sp.xs);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
-                for (nick, tex_id, w, h) in others {
-                    if paint_av_video_tile(
-                        ui,
-                        th,
-                        &nick,
-                        tex_id,
-                        w,
-                        h,
-                        Vec2::new(thumb_w, thumb_h),
-                        false,
-                    )
-                    .clicked()
-                    {
-                        clicked = Some(nick);
-                    }
-                }
-            });
+            let n_thumbs = others.len();
+            let thumb_cols = n_thumbs.min(4).max(1);
+            let gaps = sp.sm * (thumb_cols.saturating_sub(1) as f32);
+            let thumb_w = ((avail - gaps) / thumb_cols as f32).clamp(64.0, 160.0);
+            let thumb_h = thumb_w * 9.0 / 16.0;
+            paint_av_video_grid(
+                ui,
+                th,
+                &others,
+                thumb_cols,
+                Vec2::new(thumb_w, thumb_h),
+                &mut clicked,
+            );
         }
     } else {
-        // Equal grid — use full panel width so a single stream isn't a tiny 280px tile
-        // with a huge empty gutter (looked like the AV section was truncated).
-        let avail = ui.available_width();
+        // Equal grid: columns from stream count, cell size from full panel width
+        // so tiles sit side-by-side instead of stacking/overlapping.
+        let avail = ui.available_width().max(1.0);
         let n = tiles.len().max(1);
+        let cols = av_grid_cols(n);
+        let gaps = sp.sm * (cols.saturating_sub(1) as f32);
         let tile_w = if n == 1 {
             avail
-        } else if n == 2 {
-            ((avail - sp.sm) / 2.0).max(120.0)
         } else {
-            ((avail - sp.sm) / 2.0).clamp(100.0, 280.0)
+            ((avail - gaps) / cols as f32).max(72.0)
         };
-        let tile_h = (tile_w * 9.0 / 16.0).clamp(90.0, 420.0);
+        let tile_h = if n == 1 {
+            (tile_w * 9.0 / 16.0).clamp(140.0, 360.0)
+        } else {
+            (tile_w * 9.0 / 16.0).clamp(72.0, 280.0)
+        };
+        let size = Vec2::new(tile_w, tile_h);
 
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(sp.sm, sp.sm);
-            for (nick, tex_id, w, h) in &tiles {
-                if paint_av_video_tile(
-                    ui,
-                    th,
-                    nick,
-                    *tex_id,
-                    *w,
-                    *h,
-                    Vec2::new(tile_w, tile_h),
-                    false,
-                )
-                .clicked()
-                {
-                    clicked = Some(nick.clone());
-                }
-            }
-        });
+        // Cap height when many streams so the call bar doesn't eat the chat.
+        let rows = n.div_ceil(cols);
+        let grid_h = rows as f32 * tile_h + (rows.saturating_sub(1) as f32) * sp.sm;
+        const MAX_GRID_H: f32 = 420.0;
+        if grid_h > MAX_GRID_H {
+            ScrollArea::vertical()
+                .id_salt("av_video_grid_scroll")
+                .max_height(MAX_GRID_H)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    paint_av_video_grid(ui, th, &tiles, cols, size, &mut clicked);
+                });
+        } else {
+            paint_av_video_grid(ui, th, &tiles, cols, size, &mut clicked);
+        }
     }
 
-    if let Some(nick) = clicked {
+    if let Some(key) = clicked {
         // Toggle: click focused tile to restore grid; otherwise switch focus.
-        if state.av_focused_video.as_deref() == Some(nick.as_str()) {
+        if state.av_focused_video.as_deref() == Some(key.as_str()) {
             state.av_focused_video = None;
         } else {
-            state.av_focused_video = Some(nick);
+            state.av_focused_video = Some(key);
         }
     }
 }
 
-/// One clickable video tile. Returns the interaction response (for click handling).
+/// Place tiles in a fixed column grid (no wrap race / no shared rects).
+fn paint_av_video_grid(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    tiles: &[(String, egui::TextureId, u32, u32)],
+    cols: usize,
+    size: Vec2,
+    clicked: &mut Option<String>,
+) {
+    let cols = cols.max(1);
+    let sp = th.spacing.sm;
+    egui::Grid::new("av_video_grid")
+        .num_columns(cols)
+        .spacing(Vec2::new(sp, sp))
+        .min_col_width(size.x)
+        .max_col_width(size.x)
+        .show(ui, |ui| {
+            for (i, (key, tex_id, w, h)) in tiles.iter().enumerate() {
+                if paint_av_video_tile(ui, th, key, *tex_id, *w, *h, size, false).clicked() {
+                    *clicked = Some(key.clone());
+                }
+                if (i + 1) % cols == 0 {
+                    ui.end_row();
+                }
+            }
+            if !tiles.is_empty() && tiles.len() % cols != 0 {
+                ui.end_row();
+            }
+        });
+}
+
+/// One clickable video tile. Allocates an exact cell so neighbours cannot share space.
 fn paint_av_video_tile(
     ui: &mut egui::Ui,
     th: &Theme,
-    nick: &str,
+    key: &str,
     tex_id: egui::TextureId,
     frame_w: u32,
     frame_h: u32,
@@ -1310,80 +1981,81 @@ fn paint_av_video_tile(
 ) -> egui::Response {
     let sp = &th.spacing;
     let p = &th.palette;
-    let label = if nick == "__local__" {
-        "You"
+    // Store keys are `nick`, `nick~instance`, or `__local__`.
+    let label = if key == "__local__" {
+        "You".to_string()
     } else {
-        nick
+        crate::av::path_nick(key).to_string()
     };
 
-    ui.vertical(|ui| {
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-        let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-        if resp.hovered() || focused {
-            // Subtle ring when hovered or currently focused.
-            let stroke_c = if focused {
-                p.accent
+    // Exact cell size — no nested vertical (those expand to full row width and
+    // made multi-stream tiles stack on the same rect).
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, sp.radius_sm, p.card_bg);
+
+    if resp.hovered() || focused {
+        let stroke_c = if focused {
+            p.accent
+        } else {
+            p.accent.gamma_multiply(0.55)
+        };
+        painter.rect_stroke(
+            rect,
+            sp.radius_sm,
+            egui::Stroke::new(if focused { 2.0_f32 } else { 1.5_f32 }, stroke_c),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let aspect = frame_w as f32 / frame_h.max(1) as f32;
+    let fit = if aspect > size.x / size.y {
+        Vec2::new(size.x, size.x / aspect)
+    } else {
+        Vec2::new(size.y * aspect, size.y)
+    };
+    let img_rect = egui::Rect::from_center_size(rect.center(), fit).intersect(rect);
+    painter.image(
+        tex_id,
+        img_rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+
+    // Nick chip — truncate long nicks so they stay inside the tile.
+    let nick_font = egui::FontId::proportional(th.type_scale.caption);
+    let max_nick_w = (rect.width() - 12.0).max(24.0);
+    let galley = ui.fonts(|f| f.layout_no_wrap(label.clone(), nick_font.clone(), p.text));
+    let nick_text = if galley.size().x > max_nick_w {
+        let chars: Vec<char> = label.chars().collect();
+        let mut lo = 0usize;
+        let mut hi = chars.len();
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2;
+            let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+            let g = ui.fonts(|f| f.layout_no_wrap(candidate, nick_font.clone(), p.text));
+            if g.size().x <= max_nick_w {
+                lo = mid;
             } else {
-                p.accent.gamma_multiply(0.55)
-            };
-            ui.painter().rect_stroke(
-                rect,
-                sp.radius_sm,
-                egui::Stroke::new(if focused { 2.0_f32 } else { 1.5_f32 }, stroke_c),
-                egui::StrokeKind::Outside,
-            );
+                hi = mid - 1;
+            }
         }
-        let aspect = frame_w as f32 / frame_h.max(1) as f32;
-        let fit = if aspect > size.x / size.y {
-            Vec2::new(size.x, size.x / aspect)
+        if lo == 0 {
+            "…".to_string()
         } else {
-            Vec2::new(size.y * aspect, size.y)
-        };
-        let img_rect = egui::Rect::from_center_size(rect.center(), fit);
-        ui.painter().rect_filled(rect, sp.radius_sm, p.card_bg);
-        ui.painter().image(
-            tex_id,
-            img_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
-        // Nick chip — truncate long nicks so they stay inside the tile.
-        let nick_font = egui::FontId::proportional(th.type_scale.caption);
-        let max_nick_w = (rect.width() - 12.0).max(24.0);
-        let galley = ui.fonts(|f| {
-            f.layout_no_wrap(label.to_string(), nick_font.clone(), p.text)
-        });
-        let nick_text = if galley.size().x > max_nick_w {
-            // Binary-search a prefix that fits with an ellipsis.
-            let chars: Vec<char> = label.chars().collect();
-            let mut lo = 0usize;
-            let mut hi = chars.len();
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2;
-                let candidate: String = chars[..mid].iter().collect::<String>() + "…";
-                let g = ui.fonts(|f| f.layout_no_wrap(candidate, nick_font.clone(), p.text));
-                if g.size().x <= max_nick_w {
-                    lo = mid;
-                } else {
-                    hi = mid - 1;
-                }
-            }
-            if lo == 0 {
-                "…".to_string()
-            } else {
-                chars[..lo].iter().collect::<String>() + "…"
-            }
-        } else {
-            label.to_string()
-        };
-        ui.painter().text(
-            rect.left_bottom() + Vec2::new(6.0, -4.0),
-            Align2::LEFT_BOTTOM,
-            nick_text,
-            nick_font,
-            p.text,
-        );
-        resp
-    })
-    .inner
+            chars[..lo].iter().collect::<String>() + "…"
+        }
+    } else {
+        label
+    };
+    painter.text(
+        rect.left_bottom() + Vec2::new(6.0, -4.0),
+        Align2::LEFT_BOTTOM,
+        nick_text,
+        nick_font,
+        p.text,
+    );
+    resp
 }

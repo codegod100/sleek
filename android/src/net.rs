@@ -89,6 +89,12 @@ pub enum NetCmd {
         muted: bool,
         /// Initial camera publish from pre-call prefs.
         camera: bool,
+        /// Preferred camera id (`None` = first available).
+        camera_id: Option<String>,
+        /// Preferred mic name (`None` = system default).
+        mic_id: Option<String>,
+        /// Preferred speaker name (`None` = system default).
+        speaker_id: Option<String>,
     },
     /// Tear down MoQ media (leave call / disconnect).
     AvMediaStop,
@@ -96,6 +102,12 @@ pub enum NetCmd {
     AvMute { muted: bool },
     /// Enable / disable camera publish (media plane only; desktop).
     AvCamera { enabled: bool },
+    /// Switch camera device mid-call (desktop).
+    AvCameraDevice { id: Option<String> },
+    /// Switch microphone mid-call.
+    AvMicDevice { id: Option<String> },
+    /// Switch speaker / output mid-call.
+    AvSpeakerDevice { id: Option<String> },
     /// TAGMSG `+react` + `+reply` — add a reaction on a message.
     React {
         target: String,
@@ -163,6 +175,10 @@ pub enum NetEvent {
         video: Option<crate::av::VideoFrameStore>,
         /// True when a capture device is publishing (desktop).
         has_camera: bool,
+        /// Live mic envelope (0..=1) while media is Live.
+        mic_level: Option<crate::av::MicLevel>,
+        /// True when a real mic is feeding outbound Opus (false = silence/listen-only).
+        has_mic: bool,
     },
 }
 
@@ -247,7 +263,7 @@ async fn network_loop(
                             }
                             if matches!(ev, Event::Disconnected { .. }) {
                                 handle = None;
-                                media.stop();
+                                media.stop().await;
                                 // fall through: clear events after send
                                 let _ = event_tx.send(NetEvent::Sdk(ev));
                                 events = None;
@@ -258,7 +274,7 @@ async fn network_loop(
                         None => {
                             handle = None;
                             events = None;
-                            media.stop();
+                            media.stop().await;
                             let _ = event_tx.send(NetEvent::Sdk(Event::Disconnected {
                                 reason: "event channel closed".into(),
                             }));
@@ -309,9 +325,11 @@ struct NetMedia {
 }
 
 impl NetMedia {
-    fn stop(&mut self) {
+    /// Clean teardown: soft-stop MoQ so we unpublish (avoid SFU ghost nicks
+    /// that peers subscribe to and hear silence from).
+    async fn stop(&mut self) {
         if let Some(mut s) = self.session.take() {
-            s.stop();
+            s.stop_and_wait(std::time::Duration::from_millis(1500)).await;
         }
     }
 
@@ -325,6 +343,24 @@ impl NetMedia {
     fn set_camera(&mut self, enabled: bool) {
         if let Some(s) = self.session.as_ref() {
             s.set_camera_enabled(enabled);
+        }
+    }
+
+    fn set_camera_device(&mut self, id: Option<String>) {
+        if let Some(s) = self.session.as_ref() {
+            s.set_camera_device(id);
+        }
+    }
+
+    fn set_mic_device(&mut self, id: Option<String>) {
+        if let Some(s) = self.session.as_ref() {
+            s.set_mic_device(id);
+        }
+    }
+
+    fn set_speaker_device(&mut self, id: Option<String>) {
+        if let Some(s) = self.session.as_ref() {
+            s.set_speaker_device(id);
         }
     }
 }
@@ -345,22 +381,37 @@ async fn apply_cmd(
             let _ = event_tx.send(NetEvent::Status(
                 "Opening browser for Bluesky sign-in…".into(),
             ));
-            match auth::bluesky_login_loopback(
-                &auth_broker,
-                &bsky_handle,
-                Duration::from_secs(5 * 60),
-                |msg| {
-                    let _ = event_tx.send(NetEvent::Status(msg));
-                },
-            )
-            .await
+            #[cfg(target_os = "android")]
             {
-                Ok(tokens) => {
-                    let _ = event_tx.send(NetEvent::Status("Sign-in complete".into()));
-                    let _ = event_tx.send(NetEvent::AuthReady(tokens));
-                }
-                Err(e) => {
+                // freeq:// deep link (SleekActivity intent-filter) — UI polls
+                // take_pending_deep_link and applies tokens; no loopback server.
+                if let Err(e) = auth::bluesky_login_mobile(&auth_broker, &bsky_handle, |msg| {
+                    let _ = event_tx.send(NetEvent::Status(msg));
+                })
+                .await
+                {
                     let _ = event_tx.send(NetEvent::Failed(format!("Sign-in failed: {e}")));
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                match auth::bluesky_login_loopback(
+                    &auth_broker,
+                    &bsky_handle,
+                    Duration::from_secs(5 * 60),
+                    |msg| {
+                        let _ = event_tx.send(NetEvent::Status(msg));
+                    },
+                )
+                .await
+                {
+                    Ok(tokens) => {
+                        let _ = event_tx.send(NetEvent::Status("Sign-in complete".into()));
+                        let _ = event_tx.send(NetEvent::AuthReady(tokens));
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(NetEvent::Failed(format!("Sign-in failed: {e}")));
+                    }
                 }
             }
         }
@@ -606,11 +657,13 @@ async fn apply_cmd(
             session_id,
             instance,
         } => {
-            media.stop();
+            media.stop().await;
             let _ = event_tx.send(NetEvent::AvMediaStatus {
                 status: crate::av::MediaStatus::Idle,
                 video: None,
                 has_camera: false,
+                mic_level: None,
+                has_mic: false,
             });
             if let Some(h) = handle {
                 if let Err(e) = h.av_leave(&channel, &session_id, &instance).await {
@@ -625,8 +678,11 @@ async fn apply_cmd(
             instance,
             muted,
             camera,
+            camera_id,
+            mic_id,
+            speaker_id,
         } => {
-            media.stop();
+            media.stop().await;
             let url: url::Url = match sfu_url.parse() {
                 Ok(u) => u,
                 Err(e) => {
@@ -634,15 +690,12 @@ async fn apply_cmd(
                         status: crate::av::MediaStatus::Failed(format!("bad SFU URL: {e}")),
                         video: None,
                         has_camera: false,
+                        mic_level: None,
+                        has_mic: false,
                     });
                     return;
                 }
             };
-            let _ = event_tx.send(NetEvent::AvMediaStatus {
-                status: crate::av::MediaStatus::Connecting,
-                video: None,
-                has_camera: false,
-            });
             media.muted = Arc::new(AtomicBool::new(muted));
             let tx = event_tx.clone();
             let session = AvMediaSession::start(
@@ -653,33 +706,61 @@ async fn apply_cmd(
                     instance,
                     muted,
                     camera_enabled: camera,
+                    camera_id,
+                    mic_id,
+                    speaker_id,
                 },
                 move |update| {
                     use crate::av_media::AvMediaUpdate;
-                    let (status, video, has_camera) = match update {
-                        AvMediaUpdate::Live { video, has_camera } => {
-                            (crate::av::MediaStatus::Live, Some(video), has_camera)
+                    let (status, video, has_camera, mic_level, has_mic) = match update {
+                        AvMediaUpdate::Live {
+                            video,
+                            has_camera,
+                            mic_level,
+                            has_mic,
+                        } => (
+                            crate::av::MediaStatus::Live,
+                            Some(video),
+                            has_camera,
+                            Some(mic_level),
+                            has_mic,
+                        ),
+                        AvMediaUpdate::Ended => {
+                            (crate::av::MediaStatus::Idle, None, false, None, false)
                         }
-                        AvMediaUpdate::Ended => (crate::av::MediaStatus::Idle, None, false),
                         AvMediaUpdate::Failed(e) => {
-                            (crate::av::MediaStatus::Failed(e), None, false)
+                            (crate::av::MediaStatus::Failed(e), None, false, None, false)
                         }
                     };
                     let _ = tx.send(NetEvent::AvMediaStatus {
                         status,
                         video,
                         has_camera,
+                        mic_level,
+                        has_mic,
                     });
                 },
             );
+            // Attach the live frame store immediately while still Connecting so
+            // local preview frames can paint before MoQ Live (camera opens
+            // before the SFU handshake finishes).
+            let _ = event_tx.send(NetEvent::AvMediaStatus {
+                status: crate::av::MediaStatus::Connecting,
+                video: Some(session.video.clone()),
+                has_camera: false,
+                mic_level: Some(session.mic_level.clone()),
+                has_mic: false,
+            });
             media.session = Some(session);
         }
         NetCmd::AvMediaStop => {
-            media.stop();
+            media.stop().await;
             let _ = event_tx.send(NetEvent::AvMediaStatus {
                 status: crate::av::MediaStatus::Idle,
                 video: None,
                 has_camera: false,
+                mic_level: None,
+                has_mic: false,
             });
         }
         NetCmd::AvMute { muted } => {
@@ -688,8 +769,17 @@ async fn apply_cmd(
         NetCmd::AvCamera { enabled } => {
             media.set_camera(enabled);
         }
+        NetCmd::AvCameraDevice { id } => {
+            media.set_camera_device(id);
+        }
+        NetCmd::AvMicDevice { id } => {
+            media.set_mic_device(id);
+        }
+        NetCmd::AvSpeakerDevice { id } => {
+            media.set_speaker_device(id);
+        }
         NetCmd::Quit => {
-            media.stop();
+            media.stop().await;
             if let Some(h) = handle.take() {
                 let _ = h.quit(Some("Sleek quit")).await;
             }

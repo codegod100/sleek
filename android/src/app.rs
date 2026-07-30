@@ -140,6 +140,13 @@ impl SleekApp {
             fill_viewport: fit_viewport,
             fit_viewport_pending: fit_viewport,
         };
+        // Cold-start OAuth: freeq://auth may have launched us; prefer that over
+        // auto-reconnect / guest so the broker callback is not discarded.
+        #[cfg(target_os = "android")]
+        if let Some(url) = crate::android_media::take_pending_deep_link() {
+            app.apply_freeq_deep_link(&url);
+            return app;
+        }
         // freeq-android FreeqApp: auto-reconnect saved broker session on launch.
         // Guest path: same idea — reconnect with the remembered nick.
         if app.state.has_saved_session() {
@@ -278,6 +285,7 @@ impl SleekApp {
                 } else {
                     self.state.compose_image = None;
                     self.state.compose.clear();
+                    self.state.compose_nick_tab.clear();
                     self.state.show_toast("Image sent");
                     if let Some(media) = sent {
                         self.do_send_local_echo(&media.target, media.text);
@@ -342,6 +350,7 @@ impl SleekApp {
                         muted: self.state.av_pref_muted,
                         camera: self.state.av_pref_camera,
                         has_camera: false,
+                        has_mic: false,
                         media: MediaStatus::Idle,
                         awaiting_start: started,
                     });
@@ -373,13 +382,30 @@ impl SleekApp {
                 status,
                 video,
                 has_camera,
+                mic_level,
+                has_mic,
             } => {
+                let mut sync_camera: Option<bool> = None;
                 if let Some(lc) = self.state.local_call.as_mut() {
                     lc.media = status.clone();
                     if matches!(status, MediaStatus::Live) {
                         lc.has_camera = has_camera;
-                        // Keep pre-call / in-call camera intent; force off if no hardware.
-                        lc.camera = has_camera && lc.camera;
+                        lc.has_mic = has_mic;
+                        // No capture device → force muted UI so the user sees
+                        // listen-only instead of a green mic that isn't sending.
+                        if !has_mic {
+                            lc.muted = true;
+                            self.state.av_pref_muted = true;
+                        }
+                        // Do NOT wipe camera intent when hardware is missing:
+                        // `lc.camera = has_camera && lc.camera` permanently forced
+                        // camera off after a failed open, so a later re-dial opened
+                        // the device but published no frames (gated off).
+                        if has_camera {
+                            // Hardware present — keep join/pre-call intent; re-sync
+                            // the media plane in case AtomicBool drifted.
+                            sync_camera = Some(lc.camera);
+                        }
                     }
                     if matches!(
                         status,
@@ -387,10 +413,14 @@ impl SleekApp {
                     ) {
                         // Media plane down — hide camera control; keep mute/camera prefs.
                         lc.has_camera = false;
+                        lc.has_mic = false;
                     }
                 }
                 if let Some(store) = video {
                     self.state.av_video = Some(store);
+                }
+                if let Some(level) = mic_level {
+                    self.state.av_mic_level = Some(level);
                 }
                 if matches!(
                     status,
@@ -398,11 +428,36 @@ impl SleekApp {
                 ) {
                     self.state.clear_av_media();
                 }
+                if let Some(enabled) = sync_camera {
+                    self.net.send(NetCmd::AvCamera { enabled });
+                }
                 match &status {
                     MediaStatus::Live => {
-                        let cam = if has_camera { " + camera" } else { "" };
+                        let cam = if has_camera {
+                            if self
+                                .state
+                                .local_call
+                                .as_ref()
+                                .is_some_and(|lc| lc.camera)
+                            {
+                                " + camera on"
+                            } else {
+                                " + camera (off)"
+                            }
+                        } else if self.state.av_pref_camera {
+                            // User wanted video but open failed (busy device,
+                            // dead OBS node, etc.) — make it visible in the toast.
+                            " · camera unavailable"
+                        } else {
+                            ""
+                        };
+                        let mic = if has_mic {
+                            ""
+                        } else {
+                            " · no mic (listen-only)"
+                        };
                         self.state
-                            .show_toast(format!("Call media connected{cam}"));
+                            .show_toast(format!("Call media connected{cam}{mic}"));
                     }
                     MediaStatus::Failed(e) => {
                         self.state.show_toast(format!("Call media failed: {e}"));
@@ -991,7 +1046,13 @@ impl SleekApp {
                 return;
             }
         }
-        let sfu = match av::sfu_moq_url(&self.state.server, token) {
+        // freeq-app parity: `?inst=` always (media revocation), `?jwt=` when minted.
+        let inst = if instance.is_empty() {
+            None
+        } else {
+            Some(instance)
+        };
+        let sfu = match av::sfu_moq_dial_url(&self.state.server, token, inst) {
             Ok(u) => u.to_string(),
             Err(e) => {
                 if let Some(lc) = self.state.local_call.as_mut() {
@@ -1007,6 +1068,7 @@ impl SleekApp {
             .as_ref()
             .map(|lc| lc.muted)
             .unwrap_or(self.state.av_pref_muted);
+        // In-call intent if set; otherwise persisted pref.
         let camera = self
             .state
             .local_call
@@ -1022,6 +1084,34 @@ impl SleekApp {
                 }
             }
         }
+        // Scrub virtual camera prefs before dial (OBS /dev/video10 etc.). The
+        // media plane also prefers hardware, but a sticky virtual id confuses
+        // the Devices UI and keeps getting re-persisted on leave.
+        if let Some(id) = self.state.av_pref_camera_id.as_deref() {
+            let cams = crate::av_media::list_cameras();
+            let is_virt = cams
+                .iter()
+                .find(|c| c.id == id || c.name == id)
+                .map(|c| {
+                    let s = format!("{} {}", c.name, c.id).to_ascii_lowercase();
+                    s.contains("virtual")
+                        || s.contains("obs")
+                        || s.contains("loopback")
+                        || s.contains("v4l2loopback")
+                })
+                .unwrap_or(false);
+            if is_virt {
+                log::info!("av-media: clearing virtual camera pref {id:?} before dial");
+                self.state.av_pref_camera_id = None;
+                self.state.persist_av_prefs();
+            }
+        }
+        log::info!(
+            "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?}",
+            self.state.av_pref_camera_id,
+            self.state.av_pref_mic_id,
+            self.state.av_pref_speaker_id
+        );
         self.net.send(NetCmd::AvMediaConnect {
             sfu_url: sfu,
             session_id: session_id.to_string(),
@@ -1029,6 +1119,9 @@ impl SleekApp {
             instance: instance.to_string(),
             muted,
             camera,
+            camera_id: self.state.av_pref_camera_id.clone(),
+            mic_id: self.state.av_pref_mic_id.clone(),
+            speaker_id: self.state.av_pref_speaker_id.clone(),
         });
     }
 
@@ -1046,6 +1139,7 @@ impl SleekApp {
             muted: self.state.av_pref_muted,
             camera: self.state.av_pref_camera,
             has_camera: false,
+            has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: true,
         });
@@ -1065,6 +1159,7 @@ impl SleekApp {
             muted: self.state.av_pref_muted,
             camera: self.state.av_pref_camera,
             has_camera: false,
+            has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: false,
         });
@@ -1125,6 +1220,30 @@ impl SleekApp {
         self.net.send(NetCmd::AvCamera {
             enabled: camera,
         });
+    }
+
+    fn do_av_select_camera(&mut self, id: Option<String>) {
+        self.state.av_pref_camera_id = id.clone();
+        self.state.persist_av_prefs();
+        if self.state.local_call.is_some() {
+            self.net.send(NetCmd::AvCameraDevice { id });
+        }
+    }
+
+    fn do_av_select_mic(&mut self, id: Option<String>) {
+        self.state.av_pref_mic_id = id.clone();
+        self.state.persist_av_prefs();
+        if self.state.local_call.is_some() {
+            self.net.send(NetCmd::AvMicDevice { id });
+        }
+    }
+
+    fn do_av_select_speaker(&mut self, id: Option<String>) {
+        self.state.av_pref_speaker_id = id.clone();
+        self.state.persist_av_prefs();
+        if self.state.local_call.is_some() {
+            self.net.send(NetCmd::AvSpeakerDevice { id });
+        }
     }
 
     fn do_connect(&mut self) {
@@ -1194,10 +1313,18 @@ impl SleekApp {
         self.state.error = None;
         self.state.awaiting_oauth = true;
         self.state.connection = ConnectionState::Connecting;
-        self.state.status_line =
-            "Browser opened for sign-in — look for the Chromium window (Alt+Tab if covered).".into();
-        // Fullscreen Sleek sits above everything on Fluxbox/VNC; yield first.
-        self.yield_to_oauth_browser(ctx);
+        #[cfg(target_os = "android")]
+        {
+            let _ = ctx;
+            self.state.status_line =
+                "Browser opened — finish sign-in; Sleek reopens via freeq://".into();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.state.status_line = "Browser opened for sign-in — look for the Chromium window (Alt+Tab if covered).".into();
+            // Fullscreen Sleek sits above everything on Fluxbox/VNC; yield first.
+            self.yield_to_oauth_browser(ctx);
+        }
         self.net.send(NetCmd::BlueskyLogin {
             handle,
             auth_broker: self.state.auth_broker.clone(),
@@ -1220,6 +1347,56 @@ impl SleekApp {
             }
         }
     }
+
+    /// Consume a `freeq://auth?…` deep link (Android intent-filter / paste parity).
+    fn apply_freeq_deep_link(&mut self, raw: &str) {
+        let raw = raw.trim();
+        if !raw.starts_with("freeq://") {
+            return;
+        }
+        // freeq://chat/… could be handled later; OAuth is freeq://auth?…
+        if raw.starts_with("freeq://auth") {
+            match auth::parse_freeq_auth_url(raw) {
+                Ok(tokens) => {
+                    log::info!("oauth deep link applied (nick={})", tokens.nick);
+                    self.state.awaiting_oauth = false;
+                    self.state.status_line = "Sign-in complete".into();
+                    self.apply_auth_tokens(tokens, /*connect=*/ true);
+                }
+                Err(e) => {
+                    log::warn!("oauth deep link invalid: {e}");
+                    self.state.error = Some(format!("Invalid freeq://auth callback: {e}"));
+                    self.state.awaiting_oauth = false;
+                    if self.state.connection == ConnectionState::Connecting {
+                        self.state.connection = ConnectionState::Disconnected;
+                    }
+                }
+            }
+        } else {
+            log::debug!("ignored freeq deep link: {raw}");
+        }
+    }
+
+    /// Poll Android for a pending freeq:// OAuth deep link (SleekActivity).
+    ///
+    /// Warm path: browser redirects to freeq://auth while we are still running
+    /// (`awaiting_oauth`); `onNewIntent` stashes the URI for this poll.
+    #[cfg(target_os = "android")]
+    fn poll_oauth_deep_link(&mut self, ctx: &egui::Context) {
+        if !self.state.awaiting_oauth {
+            return;
+        }
+        if let Some(url) = crate::android_media::take_pending_deep_link() {
+            self.apply_freeq_deep_link(&url);
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn poll_oauth_deep_link(&mut self, _ctx: &egui::Context) {}
+
 
     fn do_reconnect_session(&mut self) {
         let Some(broker_token) = self.state.broker_token.clone() else {
@@ -1307,6 +1484,7 @@ impl SleekApp {
             return;
         }
         self.state.compose.clear();
+        self.state.compose_nick_tab.clear();
         self.do_send_local_echo(&target, text.clone());
         self.net.send(NetCmd::Privmsg { target, text });
     }
@@ -1478,47 +1656,12 @@ fn server_time_from_tags(
         .map(|dt| dt.with_timezone(&chrono::Local))
 }
 
-/// Lift all UI above the soft keyboard while a text field has focus.
-///
-/// Soft keyboards on phones are typically ~35–45% of portrait height (Pixel
-/// logcat showed ~988px IME on a 2400px display). We only reserve while
-/// `wants_keyboard_input` so dismissing the keyboard restores full layout.
-fn reserve_ime_chrome(ctx: &egui::Context, th: &Theme) {
-    #[cfg(target_os = "android")]
-    {
-        if !ctx.wants_keyboard_input() {
-            return;
-        }
-        let h = ctx.screen_rect().height();
-        // Total clearance ≈ 40% of screen (typical soft keyboard). Subtract
-        // vidya's fixed nav chrome (~48) so we don't double-pad.
-        let nav_chrome = 48.0_f32;
-        let total = (h * 0.40).clamp(240.0, h * 0.52);
-        let ime_h = (total - nav_chrome).max(0.0);
-        if ime_h < 1.0 {
-            return;
-        }
-        let fill = th.palette.headerbar_bg;
-        egui::TopBottomPanel::bottom("sleek_ime_chrome")
-            .exact_height(ime_h)
-            .frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::ZERO))
-            .show_separator_line(false)
-            .show(ctx, |ui| {
-                ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-            });
-        ctx.request_repaint();
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = (ctx, th);
-    }
-}
-
 impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
+        self.poll_oauth_deep_link(ctx);
 
         let th = self.theme();
         let p = &th.palette;
@@ -1528,11 +1671,10 @@ impl eframe::App for SleekApp {
         // Codespace/noVNC: use the full window, not a centered 480px phone column.
         let fill = phone || self.fill_viewport;
 
+        // vidya::reserve_system_chrome already grows the bottom inset while a
+        // text field has focus (IME clearance). Do not add a second IME band
+        // here — that double-padded ~80% of the screen gray on join/search.
         reserve_system_chrome(ctx, &th);
-        // NativeActivity rarely resizes the GL surface for the soft keyboard
-        // (adjustResize is a no-op for the surface). When a text field is
-        // focused, reserve extra bottom space so compose / forms sit above IME.
-        reserve_ime_chrome(ctx, &th);
 
         let connected = self.state.connection == ConnectionState::Registered
             || self.state.connection == ConnectionState::Connected
@@ -1590,6 +1732,9 @@ impl eframe::App for SleekApp {
                             ChatAction::AvLeave => self.do_av_leave(),
                             ChatAction::AvToggleMute => self.do_av_toggle_mute(),
                             ChatAction::AvToggleCamera => self.do_av_toggle_camera(),
+                            ChatAction::AvSelectCamera(id) => self.do_av_select_camera(id),
+                            ChatAction::AvSelectMic(id) => self.do_av_select_mic(id),
+                            ChatAction::AvSelectSpeaker(id) => self.do_av_select_speaker(id),
                             ChatAction::OpenCallChannel(ch) => {
                                 self.state.open_chat(&ch);
                             }
@@ -1770,6 +1915,15 @@ impl eframe::App for SleekApp {
                     }
                     ChatAction::AvToggleCamera => {
                         self.do_av_toggle_camera();
+                    }
+                    ChatAction::AvSelectCamera(id) => {
+                        self.do_av_select_camera(id);
+                    }
+                    ChatAction::AvSelectMic(id) => {
+                        self.do_av_select_mic(id);
+                    }
+                    ChatAction::AvSelectSpeaker(id) => {
+                        self.do_av_select_speaker(id);
                     }
                     ChatAction::OpenCallChannel(ch) => {
                         self.state.open_chat(&ch);

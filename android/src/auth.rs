@@ -1,9 +1,12 @@
 //! freeq auth-broker login (mirrors freeq-android).
 //!
 //! Flow:
-//! 1. Open `{auth_broker}/auth/login?handle=…&return_to=http://127.0.0.1:PORT`
-//!    (or `mobile=1` → `freeq://auth?…` which we also parse when pasted).
-//! 2. Broker redirects with a short-lived SASL `web-token` + durable `broker_token`.
+//! 1. **Desktop:** open `{auth_broker}/auth/login?handle=…&return_to=http://127.0.0.1:PORT`
+//!    and capture the `#oauth=` handoff on loopback.
+//!    **Android:** open `…&mobile=1` so the broker redirects to `freeq://auth?…`;
+//!    `SleekActivity` (intent-filter on scheme `freeq`, `singleTask`) delivers the
+//!    URI via JNI — no paste, no manual task switch.
+//! 2. Broker issues a short-lived SASL `web-token` + durable `broker_token`.
 //! 3. Connect to IRC with `ConnectConfig.web_token` (SASL ATPROTO-CHALLENGE / web-token).
 //! 4. On reconnect, `POST {auth_broker}/session` with `broker_token` mints a fresh web-token.
 //!
@@ -59,6 +62,15 @@ pub struct SavedPrefs {
     /// Publish camera when hardware is available (desktop MoQ).
     #[serde(default = "default_true")]
     pub av_pref_camera: bool,
+    /// Preferred camera id (`CameraInfo.id`). Empty / missing = first available.
+    #[serde(default)]
+    pub av_pref_camera_id: Option<String>,
+    /// Preferred microphone name. Empty / missing = system default.
+    #[serde(default)]
+    pub av_pref_mic_id: Option<String>,
+    /// Preferred speaker name. Empty / missing = system default.
+    #[serde(default)]
+    pub av_pref_speaker_id: Option<String>,
     /// Channels the user has visited / joined — auto-rejoined on connect.
     /// MRU order (most recent first). Default lobby is `#general`.
     #[serde(default = "default_recent_channels")]
@@ -70,6 +82,9 @@ impl Default for SavedPrefs {
         Self {
             av_pref_muted: false,
             av_pref_camera: true,
+            av_pref_camera_id: None,
+            av_pref_mic_id: None,
+            av_pref_speaker_id: None,
             recent_channels: default_recent_channels(),
         }
     }
@@ -84,7 +99,23 @@ impl SavedPrefs {
     }
 
     pub fn load() -> Self {
-        load_prefs(&Self::path()).unwrap_or_default()
+        let mut prefs = load_prefs(&Self::path()).unwrap_or_default();
+        // Drop virtual camera prefs by name/id substring (OBS / loopback).
+        // Device paths like `/dev/video10` are scrubbed at dial time once we
+        // can match against the live camera list.
+        if let Some(id) = prefs.av_pref_camera_id.as_deref() {
+            let s = id.to_ascii_lowercase();
+            if s.contains("virtual")
+                || s.contains("obs")
+                || s.contains("loopback")
+                || s.contains("v4l2loopback")
+            {
+                log::info!("prefs: clearing virtual camera id {id:?}");
+                prefs.av_pref_camera_id = None;
+                let _ = prefs.save();
+            }
+        }
+        prefs
     }
 
     pub fn save(&self) -> Result<()> {
@@ -465,10 +496,38 @@ fn which_bin(name: &str) -> Option<std::path::PathBuf> {
     })
 }
 
+/// Open the broker login URL with `mobile=1` (Android deep-link path).
+///
+/// The auth broker redirects to `freeq://auth?…`; `SleekActivity` captures that
+/// intent and the UI polls [`crate::android_media::take_pending_deep_link`].
+/// Does **not** wait for tokens — return is immediate after browser open.
+#[cfg(target_os = "android")]
+pub async fn bluesky_login_mobile(
+    auth_broker: &str,
+    handle: &str,
+    mut on_status: impl FnMut(String),
+) -> Result<()> {
+    let url = login_url(auth_broker, handle, None);
+    log::info!("bluesky mobile login url: {url}");
+    match open_system_browser(&url) {
+        Ok(()) => on_status(
+            "Browser opened — complete Bluesky sign-in; Sleek will resume via freeq://".into(),
+        ),
+        Err(e) => {
+            log::warn!("failed to open browser: {e}; url={url}");
+            on_status(format!(
+                "Could not open browser ({e}). Open this URL, then return to Sleek:\n{url}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Run a one-shot loopback OAuth capture server and open the broker login URL.
 ///
 /// Blocks until tokens arrive or `timeout` elapses. Intended to run on the
-/// network tokio runtime (or a blocking thread).
+/// network tokio runtime (or a blocking thread). Used on **desktop** (and as a
+/// fallback); Android prefers [`bluesky_login_mobile`] + `freeq://` deep link.
 ///
 /// `on_status` is invoked for progress notes (e.g. browser open failure with the
 /// URL so the UI is not stuck on a silent "Opening browser…").

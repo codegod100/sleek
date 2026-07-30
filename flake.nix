@@ -229,6 +229,7 @@
               rustAndroid
               pkgs.cargo-apk
               pkgs.jdk17_headless
+              pkgs.python3
               rustPlatformAndroid.cargoSetupHook
             ];
 
@@ -248,8 +249,18 @@
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME/.android"
 
-              # cargo-apk debug profile auto-creates $HOME/.android/debug.keystore
-              # when missing; ensure parent dir exists and HOME is writable.
+              # cargo-apk --release requires [package.metadata.android.signing.release].
+              # Generate a local install keystore (same defaults as Android debug).
+              keystore="$HOME/.android/sleek-release.keystore"
+              if [[ ! -f "$keystore" ]]; then
+                keytool -genkeypair -v \
+                  -keystore "$keystore" \
+                  -storepass android \
+                  -alias androiddebugkey \
+                  -keypass android \
+                  -keyalg RSA -keysize 2048 -validity 10000 \
+                  -dname "CN=Sleek Local,O=Sleek,C=US"
+              fi
 
               ndk="$ANDROID_NDK_HOME"
               if [[ ! -d "$ndk" ]]; then
@@ -282,14 +293,42 @@
               export AR_aarch64_linux_android=llvm-ar
               export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=llvm-ar
 
-              echo "cargo apk build --target ${androidTarget} -p sleek" >&2
+              echo "cargo apk build --release --target ${androidTarget} -p sleek" >&2
               echo "  ANDROID_HOME=$ANDROID_HOME" >&2
               echo "  ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >&2
               echo "  linker=$CC_aarch64_linux_android" >&2
 
               pushd sleek/android >/dev/null
               # cargo-apk rejects workspaces unless a package is selected (-p).
-              cargo apk build --target ${androidTarget} -p sleek --lib
+              # --release: optimized, no debuginfo — APK stays installable size.
+              # Inject release signing (path is absolute; not committed to Cargo.toml).
+              if ! grep -q 'signing.release' Cargo.toml; then
+                cat >> Cargo.toml <<EOF
+
+[package.metadata.android.signing.release]
+path = "$keystore"
+keystore_password = "android"
+key_alias = "androiddebugkey"
+key_password = "android"
+EOF
+              fi
+              cargo apk build --release --target ${androidTarget} -p sleek --lib
+
+              # Inject SleekActivity as classes.dex so freeq:// OAuth deep links work.
+              apk="$(find target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              if [[ -z "''${apk:-}" ]]; then
+                apk="$(find target -type f -name 'sleek.apk' -o -name '*-release.apk' | head -1 || true)"
+              fi
+              [[ -n "''${apk:-}" && -f "$apk" ]] || {
+                echo "APK not found for dex inject under sleek/android/target" >&2
+                exit 1
+              }
+              export SLEEK_KEYSTORE="$keystore"
+              export SLEEK_KEYSTORE_PASSWORD=android
+              export SLEEK_KEY_ALIAS=androiddebugkey
+              export SLEEK_KEY_PASSWORD=android
+              bash scripts/inject-activity-dex.sh "$apk" src/assets/sleek_activity.dex
+
               popd >/dev/null
 
               runHook postBuild
@@ -298,7 +337,11 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-debug.apk' \) | head -1 || true)"
+              # Prefer release APK (cargo-apk writes target/*/release/apk/ or target/release/apk/).
+              apk="$(find sleek/android/target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              if [[ -z "''${apk:-}" ]]; then
+                apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-release.apk' -o -name '*-debug.apk' \) | head -1 || true)"
+              fi
               if [[ -z "''${apk:-}" ]]; then
                 apk="$(find sleek/android/target -type f -name '*.apk' | head -1 || true)"
               fi
@@ -312,8 +355,9 @@
               ln -s sleek.apk $out/app.apk
               cat > $out/metadata.txt <<EOF
               package=uk.nandi.sleek
-              activity=android.app.NativeActivity
+              activity=uk.nandi.sleek.SleekActivity
               target=${androidTarget}
+              profile=release
               EOF
               runHook postInstall
             '';
@@ -333,7 +377,7 @@
               set -euo pipefail
               APK="${sleek-android}/sleek.apk"
               PKG="uk.nandi.sleek"
-              ACTIVITY="$PKG/android.app.NativeActivity"
+              ACTIVITY="$PKG/uk.nandi.sleek.SleekActivity"
 
               if [[ ! -f "$APK" ]]; then
                 echo "error: APK missing at $APK (build .#android first?)" >&2

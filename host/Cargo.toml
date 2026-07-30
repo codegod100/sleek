@@ -43,3 +43,7 @@ web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "
 # Same rev freeq locks: 63ea9fffbd3b15af0180f0800a61a3c4fec9b88a
 [patch."https://github.com/RustAudio/cpal.git"]
 cpal = { path = "../vendor/cpal" }
+
+# See android/Cargo.toml — feature-unify native PipeWire host for moq-media audio.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal = { path = "../vendor/cpal", features = ["pipewire"] }

@@ -16,6 +16,31 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// Max messages retained per buffer.
 const MAX_MESSAGES: usize = 500;
 
+/// IRC-style Tab nick completion cycle for the chat compose field.
+#[derive(Debug, Clone, Default)]
+pub struct NickTabComplete {
+    /// True while Tab is cycling through matches for the same prefix.
+    pub active: bool,
+    /// Character index where the completed word starts (includes `@` if any).
+    pub word_start: usize,
+    /// Matching nicks (display casing, no `@` prefix).
+    pub matches: Vec<String>,
+    /// Index of the last applied match.
+    pub index: usize,
+    /// Start-of-line completion uses `nick: `; otherwise `nick `.
+    pub leading: bool,
+    /// User typed `@` before the nick — keep it while cycling.
+    pub had_at: bool,
+    /// Cursor character index after the last applied completion.
+    pub cursor_end: usize,
+}
+
+impl NickTabComplete {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     Disconnected,
@@ -818,6 +843,8 @@ pub struct AppState {
     pub compose_uploading: bool,
     /// One-shot: focus the compose / caption TextEdit next frame (after attach).
     pub focus_compose: bool,
+    /// Tab-cycle state for compose nick completion (IRC-style).
+    pub compose_nick_tab: NickTabComplete,
     /// In-flight OS image file dialog (attach button). Polled each frame.
     pub file_pick_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::PickImageResult>>,
     /// When `file_pick_rx` was set — used to unlock the compose bar if the OS
@@ -857,14 +884,30 @@ pub struct AppState {
     /// Toggleable before start/join; applied when hardware is available.
     /// Persisted in prefs.json (survives logout).
     pub av_pref_camera: bool,
+    /// Preferred camera device id (`None` = first available). Persisted.
+    pub av_pref_camera_id: Option<String>,
+    /// Preferred mic device name (`None` = system default). Persisted.
+    pub av_pref_mic_id: Option<String>,
+    /// Preferred speaker device name (`None` = system default). Persisted.
+    pub av_pref_speaker_id: Option<String>,
     /// Shared latest video frames from the MoQ media plane (desktop).
     pub av_video: Option<VideoFrameStore>,
-    /// GPU textures for call video tiles (`nick` → texture), refreshed each paint.
+    /// Live mic level meter (shared with capture thread) while media is Live.
+    pub av_mic_level: Option<crate::av::MicLevel>,
+    /// GPU textures for call video tiles (`path_key` → texture), refreshed each paint.
+    /// Keys are `__local__` or `nick[~instance]` (see [`crate::av::path_key`]).
     /// Wrapped so `AppState: Debug` does not require `TextureHandle: Debug`.
     pub av_video_textures: AvVideoTextures,
-    /// Focused/enlarged video tile nick (`"__local__"` for self). `None` = equal grid.
+    /// Focused/enlarged video tile key (`"__local__"` for self). `None` = equal grid.
     /// Click a tile to focus; click the focused tile again to restore the grid.
     pub av_focused_video: Option<String>,
+    /// Cached device lists for AV selectors (refreshed when the call panel opens).
+    pub av_device_cameras: Vec<crate::av_media::MediaDevice>,
+    pub av_device_mics: Vec<crate::av_media::MediaDevice>,
+    pub av_device_speakers: Vec<crate::av_media::MediaDevice>,
+    /// In-call / pre-call: show Cam/Mic/Out pickers (collapsed by default mid-call
+    /// so mute/leave stay uncluttered; expanded when the user opens Devices).
+    pub av_show_devices: bool,
 
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
@@ -928,6 +971,7 @@ impl AppState {
             compose_image: None,
             compose_uploading: false,
             focus_compose: false,
+            compose_nick_tab: NickTabComplete::default(),
             file_pick_rx: None,
             file_pick_started: None,
             media: MediaCache::default(),
@@ -949,9 +993,21 @@ impl AppState {
             local_call: None,
             av_pref_muted: prefs.av_pref_muted,
             av_pref_camera: prefs.av_pref_camera,
+            av_pref_camera_id: prefs.av_pref_camera_id.filter(|s| !s.is_empty()),
+            // Clear ALSA virtual PCMs (sysdefault/dmix/…) — they break under
+            // PipeWire and used to take down both mic and speaker streams.
+            av_pref_mic_id: crate::av_media::sanitize_audio_device_pref(prefs.av_pref_mic_id),
+            av_pref_speaker_id: crate::av_media::sanitize_audio_device_pref(
+                prefs.av_pref_speaker_id,
+            ),
             av_video: None,
+            av_mic_level: None,
             av_video_textures: AvVideoTextures::default(),
             av_focused_video: None,
+            av_device_cameras: Vec::new(),
+            av_device_mics: Vec::new(),
+            av_device_speakers: Vec::new(),
+            av_show_devices: false,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
@@ -1109,11 +1165,21 @@ impl AppState {
         let prefs = crate::auth::SavedPrefs {
             av_pref_muted: self.av_pref_muted,
             av_pref_camera: self.av_pref_camera,
+            av_pref_camera_id: self.av_pref_camera_id.clone(),
+            av_pref_mic_id: self.av_pref_mic_id.clone(),
+            av_pref_speaker_id: self.av_pref_speaker_id.clone(),
             recent_channels: self.recent_channels.clone(),
         };
         if let Err(e) = prefs.save() {
             log::warn!("failed to save prefs: {e}");
         }
+    }
+
+    /// Refresh cached camera/mic/speaker lists for the device pickers.
+    pub fn refresh_av_devices(&mut self) {
+        self.av_device_cameras = crate::av_media::list_cameras();
+        self.av_device_mics = crate::av_media::list_microphones();
+        self.av_device_speakers = crate::av_media::list_speakers();
     }
 
     /// Alias kept for call sites that only touch AV toggles.
@@ -1398,6 +1464,7 @@ impl AppState {
             self.compose.clear();
             self.compose_image = None;
             self.compose_uploading = false;
+            self.compose_nick_tab.clear();
         }
         self.ensure_buffer(&key);
         self.active_channel = Some(key.clone());
@@ -1418,6 +1485,7 @@ impl AppState {
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
+        self.compose_nick_tab.clear();
     }
 
     /// Open the full emoji reaction picker on `msgid` (clears any prior search).
@@ -1468,16 +1536,20 @@ impl AppState {
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
+        self.compose_nick_tab.clear();
         self.local_call = None;
         self.clear_av_media();
         self.status_line = "Disconnected".into();
     }
 
-    /// Drop MoQ video store, textures, and focus (call ended or media stopped).
+    /// Drop MoQ video store, textures, mic meter, and focus (call ended or media stopped).
     pub fn clear_av_media(&mut self) {
         self.av_video = None;
+        self.av_mic_level = None;
         self.av_video_textures.clear();
         self.av_focused_video = None;
+        // Next call starts with a clean control strip (Devices collapsed).
+        self.av_show_devices = false;
     }
 
     /// Full sign-out: disconnect buffers + wipe cached account / guest so the

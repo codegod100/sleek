@@ -2,8 +2,9 @@
 //!
 //! Opens the **system document / photo picker** (`ACTION_OPEN_DOCUMENT` /
 //! `GET_CONTENT` / `ACTION_PICK_IMAGES`) via JNI, then recovers the result
-//! Intent from `ActivityThread` pending results so we do not need a custom
-//! Java `Activity` subclass (cargo-apk ships plain `NativeActivity`).
+//! Intent from a helper fragment / `ActivityThread` pending results.
+//! OAuth deep links use `uk.nandi.sleek.SleekActivity` (NativeActivity subclass
+//! injected as APK `classes.dex`) so `onNewIntent` can capture `freeq://auth`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -1164,4 +1165,105 @@ pub fn open_url(url: &str) -> Result<(), String> {
         Ok(())
     })
     .map_err(|e| format!("Failed to open URL: {e}"))
+}
+
+/// Take a pending `freeq://…` deep link (OAuth callback), if any.
+///
+/// Prefers `SleekActivity.takePendingDeepLink()` (set from `onCreate` /
+/// `onNewIntent`). Falls back to `Activity.getIntent().getDataString()` for
+/// cold-start races, then clears the intent data so we do not re-apply.
+pub fn take_pending_deep_link() -> Option<String> {
+    let app = android_app()?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return None;
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return None;
+    }
+
+    use jni::objects::{JObject, JString, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    // SAFETY: vm from live AndroidApp.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+
+    let result = vm.attach_current_thread(|env| -> jni::errors::Result<Option<String>> {
+        // 1) SleekActivity static (warm onNewIntent + cold onCreate).
+        if let Ok(cls) = env.find_class(jni_str!("uk/nandi/sleek/SleekActivity")) {
+            if let Ok(v) = env.call_static_method(
+                &cls,
+                jni_str!("takePendingDeepLink"),
+                jni_sig!(() -> java.lang.String),
+                &[],
+            ) {
+                if let Ok(obj) = v.l() {
+                    if !obj.is_null() {
+                        if let Ok(js) = env.cast_local::<JString>(obj) {
+                            let s = format!("{js}");
+                            if s.starts_with("freeq://") {
+                                return Ok(Some(s));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2) Fallback: current Activity intent data (cold start without static).
+        // SAFETY: activity global ref owned by the runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+        let intent = env
+            .call_method(
+                &activity,
+                jni_str!("getIntent"),
+                jni_sig!(() -> android.content.Intent),
+                &[],
+            )?
+            .l()?;
+        if intent.is_null() {
+            return Ok(None);
+        }
+        let data = env
+            .call_method(
+                &intent,
+                jni_str!("getDataString"),
+                jni_sig!(() -> java.lang.String),
+                &[],
+            )?
+            .l()?;
+        if data.is_null() {
+            return Ok(None);
+        }
+        let js = match env.cast_local::<JString>(data) {
+            Ok(js) => js,
+            Err(_) => return Ok(None),
+        };
+        let s = format!("{js}");
+        if !s.starts_with("freeq://") {
+            return Ok(None);
+        }
+
+        // Clear intent data so a later resume does not re-apply tokens.
+        // Pass a null Uri (JNI null jobject).
+        let null_uri = JObject::null();
+        let _ = env.call_method(
+            &intent,
+            jni_str!("setData"),
+            jni_sig!((android.net.Uri)),
+            &[JValue::Object(null_uri.as_ref())],
+        );
+
+        Ok(Some(s))
+    });
+
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!("take_pending_deep_link: {e}");
+            None
+        }
+    }
 }
