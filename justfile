@@ -16,6 +16,12 @@ enter *args:
 bootstrap:
     bash scripts/codespace-bootstrap.sh
 
+# Clone sibling freeq+vidya (path deps) and run desktop host on VNC :1
+#   just codespace-host       # foreground
+#   just codespace-host --bg  # background + /tmp/sleek-logs/host.log
+codespace-host *args:
+    bash scripts/codespace-host.sh {{args}}
+
 # Desktop window (egui needs SLEEK_LD_LIBRARY_PATH from nix develop — not ambient)
 # On Codespaces, desktop-lite exposes Fluxbox + noVNC on :1 (port 6080).
 host *args:

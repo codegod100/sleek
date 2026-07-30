@@ -112,12 +112,23 @@ The devcontainer includes **[desktop-lite](https://github.com/devcontainers/feat
 2. Wait for bootstrap (`nix develop` warms; first boot can take several minutes).
 3. In the **Ports** view, open **6080** (label: *noVNC desktop*).
 4. Click **Connect**, password: **`vscode`**.
-5. In the Codespace terminal:
+5. In the Codespace terminal (or via `gh codespace ssh`):
 
 ```bash
-just host          # DISPLAY=:1 + software GL on Codespaces
+# One-shot: clone sibling freeq+vidya if needed, then run on VNC :1
+just codespace-host          # foreground
+just codespace-host --bg     # background → /tmp/sleek-logs/host.log
+
+# Or only the binary (deps already present):
+just host
 # or:
 nix run
+```
+
+From a laptop:
+
+```bash
+gh codespace ssh -c <name> -- bash /workspaces/sleek/scripts/codespace-host.sh --bg
 ```
 
 The window appears on the Fluxbox desktop inside noVNC. Right-click the
