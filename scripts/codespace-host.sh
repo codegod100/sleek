@@ -39,6 +39,57 @@ done
 
 log() { echo "sleek-host: $*" >&2; }
 
+# desktop-lite defaults to 1440x768 — often wider than a browser tab, so the
+# remote desktop is bigger than the noVNC viewport (scroll/pan). Shrink the X
+# screen when possible. Override: SLEEK_VIEWPORT=1280x720
+# noVNC also scales if opened with ?resize=scale (see README / bootstrap).
+fit_vnc_desktop() {
+  export DISPLAY="${DISPLAY:-:1}"
+  if [[ ! -S /tmp/.X11-unix/X1 && ! -S /tmp/.X11-unix/X0 ]]; then
+    return 0
+  fi
+  if ! command -v xrandr >/dev/null 2>&1; then
+    return 0
+  fi
+  local geom="${SLEEK_VIEWPORT:-1280x720}"
+  geom="${geom%%x[0-9]}" # strip optional depth from 1280x720x16 if present
+  # Accept WxH or WxHxD
+  local wh
+  wh="$(echo "$geom" | sed -E 's/^([0-9]+x[0-9]+).*/\1/')"
+  [[ "$wh" =~ ^[0-9]+x[0-9]+$ ]] || wh="1280x720"
+  local out
+  out="$(xrandr 2>/dev/null | awk '/ connected/{print $1; exit}')"
+  if [[ -z "$out" ]]; then
+    return 0
+  fi
+  if xrandr --query 2>/dev/null | grep -qE "^${out} connected.*${wh}"; then
+    log "VNC desktop already ${wh}"
+    return 0
+  fi
+  if xrandr --query 2>/dev/null | grep -qE "^\s+${wh}\s"; then
+    log "resizing VNC desktop → ${wh} (was bigger than typical browser viewport)"
+    xrandr --output "$out" --mode "$wh" 2>/dev/null || true
+  else
+    log "mode ${wh} not listed; leave geometry as-is (use noVNC ?resize=scale)"
+  fi
+}
+
+# Prefer noVNC "Local scaling" so a large remote desktop still fits the browser.
+prefer_novnc_scale() {
+  local ui
+  for ui in /usr/local/novnc/noVNC*/app/ui.js; do
+    [[ -f "$ui" ]] || continue
+    if grep -q "initSetting('resize', 'off')" "$ui" 2>/dev/null; then
+      if sed -i "s/initSetting('resize', 'off')/initSetting('resize', 'scale')/" "$ui" 2>/dev/null; then
+        log "noVNC default resize → scale ($ui)"
+      elif command -v sudo >/dev/null 2>&1; then
+        sudo sed -i "s/initSetting('resize', 'off')/initSetting('resize', 'scale')/" "$ui" 2>/dev/null \
+          && log "noVNC default resize → scale ($ui)" || true
+      fi
+    fi
+  done
+}
+
 ensure_clone() {
   local dest="$1" url="$2" name="$3"
   if [[ -f "$dest/Cargo.toml" ]] || [[ -f "$dest/freeq-sdk/Cargo.toml" ]]; then
@@ -99,6 +150,12 @@ if [[ "$MODE" == deps ]]; then
   exit 0
 fi
 
+# Before launch: shrink oversized X desktop + prefer noVNC scale-to-fit.
+if [[ -n "${SLEEK_CODESPACE:-}" || -n "${CODESPACE_NAME:-}" || -S /tmp/.X11-unix/X1 ]]; then
+  prefer_novnc_scale || true
+  fit_vnc_desktop || true
+fi
+
 if [[ "$MODE" == bg ]]; then
   mkdir -p "$LOG_DIR"
   # Avoid stacking hosts
@@ -114,7 +171,7 @@ if [[ "$MODE" == bg ]]; then
   echo $! >"$LOG_DIR/host.pid"
   log "pid $(cat "$LOG_DIR/host.pid")  tail -f $LOG"
   if [[ -n "${CODESPACE_NAME:-}" ]]; then
-    log "noVNC: https://${CODESPACE_NAME}-6080.app.github.dev  (password: vscode)"
+    log "noVNC: https://${CODESPACE_NAME}-6080.app.github.dev/vnc.html?resize=scale&autoconnect=true&password=vscode"
   fi
   exit 0
 fi

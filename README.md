@@ -108,9 +108,21 @@ The devcontainer includes **[desktop-lite](https://github.com/devcontainers/feat
 | **6080** | noVNC web client (open from the Ports panel → Globe) |
 | **5901** | Raw VNC (optional local viewer) |
 
+Desktop geometry defaults to **1280×720** (`VNC_RESOLUTION`). desktop-lite’s stock
+1440×768 is often **larger than the browser pane**, so you pan/scroll the remote
+desktop. noVNC is configured to **Local scaling** (fit the browser). Prefer:
+
+```text
+https://<codespace>-6080.app.github.dev/vnc.html?resize=scale&autoconnect=true&password=vscode
+```
+
+Or Settings (gear) → Scaling mode → **Local scaling**. Override size with
+`SLEEK_VIEWPORT=1280x720` when starting the host.
+
 1. Create / open a Codespace on this repo (rebuild if the container predates desktop-lite).
 2. Wait for bootstrap (`nix develop` warms; first boot can take several minutes).
-3. In the **Ports** view, open **6080** (label: *noVNC desktop*).
+3. In the **Ports** view, open **6080** (label: *noVNC desktop*), or use the
+   `?resize=scale` URL above.
 4. Click **Connect**, password: **`vscode`**.
 5. In the Codespace terminal (or via `gh codespace ssh`):
 

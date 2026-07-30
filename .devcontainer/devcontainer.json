@@ -34,14 +34,16 @@
     "DISPLAY": ":1",
     "LIBGL_ALWAYS_SOFTWARE": "1",
     "NIX_CONFIG": "experimental-features = nix-command flakes",
-    "CACHIX_CACHE": "codegod100"
+    "CACHIX_CACHE": "codegod100",
+    "VNC_RESOLUTION": "1280x720x16"
   },
   "remoteEnv": {
     "SLEEK_CODESPACE": "1",
     "DISPLAY": ":1",
     "LIBGL_ALWAYS_SOFTWARE": "1",
     "NIX_CONFIG": "experimental-features = nix-command flakes",
-    "CACHIX_CACHE": "codegod100"
+    "CACHIX_CACHE": "codegod100",
+    "VNC_RESOLUTION": "1280x720x16"
   },
   "customizations": {
     "vscode": {
