@@ -1,6 +1,6 @@
 //! Discover tab — popular channels + custom join.
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, CursorIcon, Layout, RichText};
 use vidya::{body, dim_label, primary_button, title, title_2, Theme};
 
 use crate::state::{AppState, POPULAR_CHANNELS};
@@ -27,15 +27,19 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
         ui.horizontal(|ui| {
             ui.set_width(ui.available_width());
             let field_w = (ui.available_width() - 88.0).max(80.0);
-            ui.add(
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut state.discover_input)
                     .margin(th.text_edit_margin())
                     .desired_width(field_w)
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            // singleline TextEdit surrenders focus on Enter — join when that happens.
+            let enter = resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(sp.sm);
-            if primary_button(ui, th, "Join").clicked() {
+            let join_clicked = primary_button(ui, th, "Join").clicked();
+            if join_clicked || enter {
                 let ch = AppState::normalize_channel(&state.discover_input);
                 if !ch.is_empty() {
                     state.discover_input.clear();
@@ -50,10 +54,10 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
     ui.add_space(sp.md);
 
     for (name, blurb) in POPULAR_CHANNELS {
-        let joined = state
-            .channels
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case(name));
+        // Only treat successful membership as joined (not pending / denied).
+        let joined = state.channels.values().any(|b| {
+            b.name.eq_ignore_ascii_case(name) && b.is_joined()
+        });
 
         let resp = egui::Frame::new()
             .fill(p.card_bg)
@@ -85,7 +89,8 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
                 });
             })
             .response
-            .interact(egui::Sense::click());
+            .interact(egui::Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
 
         if resp.clicked() && !joined {
             action = DiscoverAction::Join((*name).to_string());

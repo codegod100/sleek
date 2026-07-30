@@ -46,15 +46,19 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
         ui.horizontal(|ui| {
             ui.set_width(ui.available_width());
             let field_w = (ui.available_width() - 88.0).max(80.0);
-            ui.add(
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut state.join_input)
                     .margin(th.text_edit_margin())
                     .desired_width(field_w)
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            // singleline TextEdit surrenders focus on Enter — join when that happens.
+            let enter = resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(sp.sm);
-            if primary_button(ui, th, "Join").clicked() {
+            let join_clicked = primary_button(ui, th, "Join").clicked();
+            if join_clicked || enter {
                 let ch = AppState::normalize_channel(&state.join_input);
                 if !ch.is_empty() {
                     state.join_input.clear();
@@ -65,12 +69,13 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     });
     ui.add_space(sp.md);
 
-    let conversations: Vec<(String, bool, u32, String, String, i64)> = state
+    let conversations: Vec<(String, String, bool, u32, String, String, i64)> = state
         .sorted_conversations()
         .into_iter()
         .map(|b| {
             (
                 b.name.clone(),
+                state.display_name_for(&b.name),
                 state
                     .active_channel
                     .as_ref()
@@ -97,26 +102,37 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
         return action;
     }
 
-    for (name, selected, _unread, _preview, _topic, _) in &conversations {
+    let n = conversations.len();
+    for (i, (name, display, selected, _unread, _preview, _topic, _)) in
+        conversations.iter().enumerate()
+    {
         // Re-borrow buffer for rendering
-        if let Some(buf) = state.channels.get(name) {
-            let resp = conversation_row(ui, th, buf, *selected);
+        let row_rect = if let Some(buf) = state.channels.get(name) {
+            let resp = conversation_row(ui, th, buf, display, *selected);
             if resp.clicked() {
                 action = ChatsAction::Open(name.clone());
             }
+            Some(resp.rect)
         } else {
             let _ = selected;
-        }
-        ui.add_space(sp.xs);
+            None
+        };
 
-        // Soft divider
-        let w = ui.available_width();
-        let y = ui.cursor().top();
-        ui.painter().hline(
-            ui.min_rect().left() + sp.md..=ui.min_rect().left() + w - sp.md,
-            y,
-            egui::Stroke::new(1.0_f32, p.border_soft),
-        );
+        // Soft divider between rows — same horizontal span as the row hover/fill.
+        if i + 1 < n {
+            if let Some(rect) = row_rect {
+                ui.add_space(sp.xs);
+                let y = ui.cursor().top();
+                ui.painter().hline(
+                    rect.left()..=rect.right(),
+                    y,
+                    egui::Stroke::new(1.0_f32, p.border_soft),
+                );
+                ui.add_space(sp.xs);
+            } else {
+                ui.add_space(sp.xs);
+            }
+        }
     }
 
     action

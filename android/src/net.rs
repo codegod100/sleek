@@ -1,14 +1,20 @@
 //! Async freeq-sdk bridge: background tokio runtime ↔ egui UI thread.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use freeq_sdk::av::new_av_instance;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 
 use crate::auth::{self, AuthTokens};
 use crate::state::{prefer_websocket, websocket_url_for};
+
+#[cfg(not(target_os = "android"))]
+use crate::av_media::{AvMediaConfig, AvMediaSession};
 
 /// Commands from the UI into the network thread.
 #[derive(Debug, Clone)]
@@ -38,6 +44,55 @@ pub enum NetCmd {
         target: String,
         text: String,
     },
+    /// Upload image bytes to freeq `/api/v1/upload`, then PRIVMSG the URL (+ caption).
+    UploadAndSend {
+        target: String,
+        caption: String,
+        bytes: Vec<u8>,
+        content_type: String,
+        did: String,
+        /// e.g. `https://irc.freeq.at`
+        api_base: String,
+    },
+    /// CHATHISTORY LATEST — pull backlog when joining / opening a channel.
+    HistoryLatest {
+        target: String,
+        count: usize,
+    },
+    /// CHATHISTORY TARGETS — DM conversation list (seeds chat list on cold connect).
+    HistoryTargets {
+        limit: usize,
+    },
+    /// Download an image for inline chat preview.
+    FetchImage { url: String },
+    /// Fetch Open Graph metadata for a link card.
+    FetchLinkPreview { url: String },
+    /// Open a freeq AV call in `channel` (sends `av-start`).
+    AvStart { channel: String },
+    /// Join an existing call by session id.
+    AvJoin {
+        channel: String,
+        session_id: String,
+    },
+    /// Leave the call we are in.
+    AvLeave {
+        channel: String,
+        session_id: String,
+        instance: String,
+    },
+    /// Dial the MoQ SFU for media (desktop). Signaling must already be up.
+    AvMediaConnect {
+        sfu_url: String,
+        session_id: String,
+        nick: String,
+        instance: String,
+    },
+    /// Tear down MoQ media (leave call / disconnect).
+    AvMediaStop,
+    /// Mute / unmute local mic (media plane only).
+    AvMute { muted: bool },
+    /// Enable / disable camera publish (media plane only; desktop).
+    AvCamera { enabled: bool },
     Quit,
 }
 
@@ -49,6 +104,58 @@ pub enum NetEvent {
     Failed(String),
     /// Browser OAuth completed (or pasted freeq://auth was applied client-side).
     AuthReady(AuthTokens),
+    /// Image upload finished; UI should clear compose attachment state.
+    /// On success, `sent` is the PRIVMSG body that was just written to the server.
+    UploadFinished {
+        /// `None` on success; error message on failure.
+        error: Option<String>,
+        /// Set when upload+send succeeded (for optimistic local echo).
+        sent: Option<MediaSent>,
+    },
+    /// Remote image decoded for chat embed.
+    ImageFetched {
+        url: String,
+        width: usize,
+        height: usize,
+        rgba: std::sync::Arc<[u8]>,
+    },
+    ImageFetchFailed {
+        url: String,
+    },
+    /// Open Graph metadata for a link card.
+    LinkPreviewFetched {
+        url: String,
+        title: Option<String>,
+        description: Option<String>,
+        thumb_url: Option<String>,
+        site_name: Option<String>,
+    },
+    LinkPreviewFailed {
+        url: String,
+    },
+    /// Instance id we used for av-start / av-join (UI tracks LocalCall).
+    AvSignalingSent {
+        channel: String,
+        session_id: Option<String>,
+        instance: String,
+        /// true = start, false = join
+        started: bool,
+    },
+    /// MoQ media plane status update.
+    AvMediaStatus {
+        status: crate::av::MediaStatus,
+        /// Present when status is Live — shared latest remote (and local preview) frames.
+        video: Option<crate::av::VideoFrameStore>,
+        /// True when a capture device is publishing (desktop).
+        has_camera: bool,
+    },
+}
+
+/// Payload after a successful image upload + PRIVMSG.
+#[derive(Debug, Clone)]
+pub struct MediaSent {
+    pub target: String,
+    pub text: String,
 }
 
 /// Sync façade used by the egui app.
@@ -104,6 +211,7 @@ async fn network_loop(
     let mut handle: Option<ClientHandle> = None;
     let mut events: Option<mpsc::Receiver<Event>> = None;
     let mut pending_joins: Vec<String> = Vec::new();
+    let mut media: NetMedia = NetMedia::default();
 
     loop {
         // Prefer draining IRC events when connected; also wait for UI commands.
@@ -124,6 +232,7 @@ async fn network_loop(
                             }
                             if matches!(ev, Event::Disconnected { .. }) {
                                 handle = None;
+                                media.stop();
                                 // fall through: clear events after send
                                 let _ = event_tx.send(NetEvent::Sdk(ev));
                                 events = None;
@@ -134,6 +243,7 @@ async fn network_loop(
                         None => {
                             handle = None;
                             events = None;
+                            media.stop();
                             let _ = event_tx.send(NetEvent::Sdk(Event::Disconnected {
                                 reason: "event channel closed".into(),
                             }));
@@ -148,6 +258,7 @@ async fn network_loop(
                                 &mut handle,
                                 &mut events,
                                 &mut pending_joins,
+                                &mut media,
                                 &event_tx,
                             )
                             .await;
@@ -164,6 +275,7 @@ async fn network_loop(
                         &mut handle,
                         &mut events,
                         &mut pending_joins,
+                        &mut media,
                         &event_tx,
                     )
                     .await;
@@ -174,11 +286,59 @@ async fn network_loop(
     }
 }
 
+/// MoQ media session owned by the net thread (desktop only).
+#[derive(Default)]
+struct NetMedia {
+    #[cfg(not(target_os = "android"))]
+    session: Option<AvMediaSession>,
+    #[cfg(not(target_os = "android"))]
+    muted: Arc<AtomicBool>,
+}
+
+impl NetMedia {
+    fn stop(&mut self) {
+        #[cfg(not(target_os = "android"))]
+        {
+            if let Some(mut s) = self.session.take() {
+                s.stop();
+            }
+        }
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        #[cfg(not(target_os = "android"))]
+        {
+            if let Some(s) = self.session.as_ref() {
+                s.set_muted(muted);
+            }
+            self.muted = Arc::new(AtomicBool::new(muted));
+        }
+        #[cfg(target_os = "android")]
+        {
+            let _ = muted;
+        }
+    }
+
+    fn set_camera(&mut self, enabled: bool) {
+        #[cfg(not(target_os = "android"))]
+        {
+            if let Some(s) = self.session.as_ref() {
+                s.set_camera_enabled(enabled);
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            let _ = enabled;
+        }
+    }
+}
+
 async fn apply_cmd(
     cmd: NetCmd,
     handle: &mut Option<ClientHandle>,
     events: &mut Option<mpsc::Receiver<Event>>,
     pending_joins: &mut Vec<String>,
+    media: &mut NetMedia,
     event_tx: &std::sync::mpsc::Sender<NetEvent>,
 ) {
     match cmd {
@@ -270,7 +430,245 @@ async fn apply_cmd(
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
             }
         }
+        NetCmd::UploadAndSend {
+            target,
+            caption,
+            bytes,
+            content_type,
+            did,
+            api_base,
+        } => {
+            if handle.is_none() {
+                let _ = event_tx.send(NetEvent::UploadFinished {
+                    error: Some("Not connected".into()),
+                    sent: None,
+                });
+                return;
+            }
+            match upload_media(&api_base, &did, &target, &caption, &content_type, bytes).await {
+                Ok(url) => {
+                    let text = if caption.trim().is_empty() {
+                        url
+                    } else {
+                        format!("{url} {}", caption.trim())
+                    };
+                    if let Some(h) = handle {
+                        if let Err(e) = h.privmsg(&target, &text).await {
+                            let _ = event_tx.send(NetEvent::UploadFinished {
+                                error: Some(format!("Upload ok, send failed: {e}")),
+                                sent: None,
+                            });
+                            return;
+                        }
+                    }
+                    let _ = event_tx.send(NetEvent::UploadFinished {
+                        error: None,
+                        sent: Some(MediaSent { target, text }),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::UploadFinished {
+                        error: Some(e),
+                        sent: None,
+                    });
+                }
+            }
+        }
+        NetCmd::HistoryLatest { target, count } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.history_latest(&target, count).await {
+                    log::warn!("history_latest {target}: {e}");
+                }
+            }
+        }
+        NetCmd::HistoryTargets { limit } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.chathistory_targets(limit).await {
+                    log::warn!("chathistory_targets: {e}");
+                }
+            }
+        }
+        NetCmd::FetchImage { url } => {
+            // Fire-and-forget so IRC event loop stays responsive.
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_image_bytes(&url).await {
+                    Ok((width, height, rgba)) => {
+                        let _ = tx.send(NetEvent::ImageFetched {
+                            url,
+                            width,
+                            height,
+                            rgba,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("image fetch {url}: {e}");
+                        let _ = tx.send(NetEvent::ImageFetchFailed { url });
+                    }
+                }
+            });
+        }
+        NetCmd::FetchLinkPreview { url } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match freeq_sdk::media::fetch_link_preview(&url).await {
+                    Ok(preview) => {
+                        let _ = tx.send(NetEvent::LinkPreviewFetched {
+                            url,
+                            title: preview.title,
+                            description: preview.description,
+                            thumb_url: preview.thumb_url,
+                            site_name: preview.site_name,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("link preview {url}: {e}");
+                        let _ = tx.send(NetEvent::LinkPreviewFailed { url });
+                    }
+                }
+            });
+        }
+        NetCmd::AvStart { channel } => {
+            let Some(h) = handle else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+                return;
+            };
+            let instance = new_av_instance();
+            match h.av_start(&channel, &instance, None).await {
+                Ok(()) => {
+                    let _ = event_tx.send(NetEvent::AvSignalingSent {
+                        channel,
+                        session_id: None,
+                        instance,
+                        started: true,
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::Failed(format!("av-start: {e}")));
+                }
+            }
+        }
+        NetCmd::AvJoin {
+            channel,
+            session_id,
+        } => {
+            let Some(h) = handle else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+                return;
+            };
+            let instance = new_av_instance();
+            match h.av_join(&channel, &session_id, &instance).await {
+                Ok(()) => {
+                    let _ = event_tx.send(NetEvent::AvSignalingSent {
+                        channel,
+                        session_id: Some(session_id),
+                        instance,
+                        started: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(NetEvent::Failed(format!("av-join: {e}")));
+                }
+            }
+        }
+        NetCmd::AvLeave {
+            channel,
+            session_id,
+            instance,
+        } => {
+            media.stop();
+            let _ = event_tx.send(NetEvent::AvMediaStatus {
+                status: crate::av::MediaStatus::Idle,
+                video: None,
+                has_camera: false,
+            });
+            if let Some(h) = handle {
+                if let Err(e) = h.av_leave(&channel, &session_id, &instance).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("av-leave: {e}")));
+                }
+            }
+        }
+        NetCmd::AvMediaConnect {
+            sfu_url,
+            session_id,
+            nick,
+            instance,
+        } => {
+            media.stop();
+            #[cfg(not(target_os = "android"))]
+            {
+                let url: url::Url = match sfu_url.parse() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let _ = event_tx.send(NetEvent::AvMediaStatus {
+                            status: crate::av::MediaStatus::Failed(format!("bad SFU URL: {e}")),
+                            video: None,
+                            has_camera: false,
+                        });
+                        return;
+                    }
+                };
+                let _ = event_tx.send(NetEvent::AvMediaStatus {
+                    status: crate::av::MediaStatus::Connecting,
+                    video: None,
+                    has_camera: false,
+                });
+                let tx = event_tx.clone();
+                let session = AvMediaSession::start(
+                    AvMediaConfig {
+                        sfu_url: url,
+                        session_id,
+                        nick,
+                        instance,
+                    },
+                    move |update| {
+                        use crate::av_media::AvMediaUpdate;
+                        let (status, video, has_camera) = match update {
+                            AvMediaUpdate::Live { video, has_camera } => {
+                                (crate::av::MediaStatus::Live, Some(video), has_camera)
+                            }
+                            AvMediaUpdate::Ended => {
+                                (crate::av::MediaStatus::Idle, None, false)
+                            }
+                            AvMediaUpdate::Failed(e) => {
+                                (crate::av::MediaStatus::Failed(e), None, false)
+                            }
+                        };
+                        let _ = tx.send(NetEvent::AvMediaStatus {
+                            status,
+                            video,
+                            has_camera,
+                        });
+                    },
+                );
+                media.session = Some(session);
+            }
+            #[cfg(target_os = "android")]
+            {
+                let _ = (sfu_url, session_id, nick, instance);
+                let _ = event_tx.send(NetEvent::AvMediaStatus {
+                    status: crate::av::MediaStatus::BrowserOnly,
+                    video: None,
+                    has_camera: false,
+                });
+            }
+        }
+        NetCmd::AvMediaStop => {
+            media.stop();
+            let _ = event_tx.send(NetEvent::AvMediaStatus {
+                status: crate::av::MediaStatus::Idle,
+                video: None,
+                has_camera: false,
+            });
+        }
+        NetCmd::AvMute { muted } => {
+            media.set_muted(muted);
+        }
+        NetCmd::AvCamera { enabled } => {
+            media.set_camera(enabled);
+        }
         NetCmd::Quit => {
+            media.stop();
             if let Some(h) = handle.take() {
                 let _ = h.quit(Some("Sleek quit")).await;
             }
@@ -381,4 +779,143 @@ async fn do_connect(
             }
         }
     }
+}
+
+/// POST multipart image to freeq `/api/v1/upload` (private media; needs active DID session).
+async fn upload_media(
+    api_base: &str,
+    did: &str,
+    channel: &str,
+    alt: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Empty image".into());
+    }
+    if bytes.len() > 10 * 1024 * 1024 {
+        return Err("Image is too large (max 10MB)".into());
+    }
+
+    let base = api_base.trim_end_matches('/');
+    let url = format!("{base}/api/v1/upload");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))?;
+
+    let file_name = match content_type {
+        "image/jpeg" => "paste.jpg",
+        "image/gif" => "paste.gif",
+        "image/webp" => "paste.webp",
+        _ => "paste.png",
+    };
+
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name.to_string())
+        .mime_str(content_type)
+        .map_err(|e| format!("multipart: {e}"))?;
+
+    let mut form = reqwest::multipart::Form::new()
+        .text("did", did.to_string())
+        .text("channel", channel.to_string())
+        .part("file", part);
+    if !alt.trim().is_empty() {
+        form = form.text("alt", alt.trim().to_string());
+    }
+
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Upload request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let short = body.chars().take(120).collect::<String>();
+        let msg = match status.as_u16() {
+            401 => "Not authorized — stay signed in and connected, then try again".into(),
+            413 => "Image is too large".into(),
+            _ => format!("Upload failed ({status}) {short}").trim().to_string(),
+        };
+        return Err(msg);
+    }
+
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Upload response: {e}"))?;
+    v.get("url")
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Upload response missing url".into())
+}
+
+/// Fetch and decode a remote image for chat inline preview (SSRF-safe).
+async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u8]>), String> {
+    use crate::preview::{MAX_IMAGE_BYTES, MAX_IMAGE_DIM};
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) image URLs".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("Bad URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?
+        .to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+
+    let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
+        .await
+        .map_err(|e| format!("SSRF check: {e}"))?;
+
+    // DNS-pin + limited redirects (CDN image hosts often 302).
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder.build().map_err(|e| format!("HTTP client: {e}"))?;
+
+    let resp = client
+        .get(url)
+        .header("Accept", "image/*,*/*;q=0.8")
+        .header("User-Agent", "Sleek/0.1 (chat image preview)")
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("HTTP error: {e}"))?;
+
+    if let Some(len) = resp.content_length() {
+        if len > MAX_IMAGE_BYTES as u64 {
+            return Err("Image too large".into());
+        }
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Body: {e}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("Image too large".into());
+    }
+
+    let dyn_img = image::load_from_memory(&bytes).map_err(|e| format!("Decode: {e}"))?;
+    let dyn_img = if dyn_img.width() > MAX_IMAGE_DIM || dyn_img.height() > MAX_IMAGE_DIM {
+        dyn_img.thumbnail(MAX_IMAGE_DIM, MAX_IMAGE_DIM)
+    } else {
+        dyn_img
+    };
+    let rgba = dyn_img.to_rgba8();
+    let width = rgba.width() as usize;
+    let height = rgba.height() as usize;
+    Ok((width, height, std::sync::Arc::from(rgba.into_raw())))
 }

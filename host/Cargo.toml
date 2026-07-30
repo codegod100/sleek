@@ -21,3 +21,25 @@ eframe = { version = "0.31", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+
+# Same patches as android/ (host is its own workspace root).
+[patch.crates-io]
+egui-winit = { path = "../vendor/egui-winit" }
+# Pin rev (not floating main) — same as freeq Cargo.lock; main tip is 1.1.0 and breaks iroh 0.97.
+noq = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
+noq-proto = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
+noq-udp = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
+iroh = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-relay = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-gossip = { git = "https://github.com/n0-computer/iroh-gossip", rev = "1038f721" }
+web-transport-iroh = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-noq = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-proto = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+
+# moq-media depends on cpal git `branch = "master"` (floats). Pin via path so
+# Cargo.lock cannot pick a master tip that dropped StreamError / Device::name().
+# Same rev freeq locks: 63ea9fffbd3b15af0180f0800a61a3c4fec9b88a
+[patch."https://github.com/RustAudio/cpal.git"]
+cpal = { path = "../vendor/cpal" }

@@ -38,16 +38,37 @@ pub struct AuthTokens {
     pub handle: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Disk-persisted session (no single-use web-token).
+///
+/// Two shapes:
+/// - **Bluesky**: non-empty `broker_token` (+ did/handle/nick).
+/// - **Guest**: `guest: true`, empty broker/did, remembered nick + server for
+///   auto-reconnect on next launch.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SavedSession {
+    #[serde(default)]
     pub broker_token: String,
+    #[serde(default)]
     pub did: String,
+    #[serde(default)]
     pub handle: String,
+    #[serde(default)]
     pub nick: String,
+    #[serde(default)]
     pub server: String,
     #[serde(default)]
     pub last_login_unix: i64,
+    /// Last successful connect was guest (no SASL). Used for auto guest login.
+    #[serde(default)]
+    pub guest: bool,
+    #[serde(default = "default_true")]
+    pub use_tls: bool,
+    #[serde(default)]
+    pub use_websocket: bool,
 }
 
 impl SavedSession {
@@ -71,8 +92,14 @@ impl SavedSession {
         let _ = std::fs::remove_file(p);
     }
 
+    /// Durable Bluesky / auth-broker session.
     pub fn has_session(&self) -> bool {
         !self.broker_token.is_empty()
+    }
+
+    /// Remembered guest nick for auto-connect (no broker token).
+    pub fn has_guest(&self) -> bool {
+        self.guest && !self.nick.is_empty() && self.broker_token.is_empty()
     }
 }
 

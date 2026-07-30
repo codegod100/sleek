@@ -70,7 +70,36 @@
           libxrandr
           # Software GL for Codespaces desktop-lite / headless X11 (llvmpipe)
           mesa
+          # freeq AV MoQ media (cpal / iroh-live audio + camera)
+          alsa-lib
+          # Optional PipeWire backends
+          pipewire
+          # v4l2r bindgen (iroh-live capture-camera) needs libclang + videodev2.h
+          llvmPackages.libclang
+          linuxHeaders
         ];
+
+      # rusty-capture/v4l2r bindgen on NixOS: must use nix libclang (not Android
+      # NDK — that needs libz.so.1 and is the wrong toolchain) plus glibc +
+      # linux headers + clang resource dir so videodev2.h can find sys/time.h.
+      v4l2BindgenEnv =
+        pkgs:
+        let
+          libclang = pkgs.llvmPackages.libclang;
+          clangMajor = pkgs.lib.versions.major libclang.version;
+        in
+        {
+          LIBCLANG_PATH = "${libclang.lib}/lib";
+          # also expose for justfile to re-assert after ambient env pollution
+          SLEEK_LIBCLANG_PATH = "${libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.concatStringsSep " " [
+            "-isystem ${pkgs.glibc.dev}/include"
+            "-I${pkgs.linuxHeaders}/include"
+            "-isystem ${libclang.lib}/lib/clang/${clangMajor}/include"
+          ];
+          # v4l2r defaults to /usr/include/linux which is missing on NixOS
+          V4L2R_VIDEODEV2_H_PATH = "${pkgs.linuxHeaders}/include/linux";
+        };
 
       # Layout expected by android/Cargo.toml path deps:
       #   parent/sleek/{android,host}
@@ -129,46 +158,49 @@
           };
           srcTree = sleekSrcTree pkgs;
 
-          sleek-host = rustPlatform.buildRustPackage {
-            pname = "sleek";
-            version = "0.1.0";
-            src = srcTree;
+          sleek-host = rustPlatform.buildRustPackage (
+            {
+              pname = "sleek";
+              version = "0.1.0";
+              src = srcTree;
 
-            # Build the desktop host binary (package name sleek-host, bin name sleek).
-            cargoRoot = "sleek/host";
-            buildAndTestSubdir = "sleek/host";
+              # Build the desktop host binary (package name sleek-host, bin name sleek).
+              cargoRoot = "sleek/host";
+              buildAndTestSubdir = "sleek/host";
 
-            cargoLock = {
-              lockFile = ./host/Cargo.lock;
-              # Path deps (vidya, freeq-*) have no crates.io source.
-              allowBuiltinFetchGit = true;
-            };
+              cargoLock = {
+                lockFile = ./host/Cargo.lock;
+                # Path deps (vidya, freeq-*) have no crates.io source.
+                allowBuiltinFetchGit = true;
+              };
 
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-              makeWrapper
-            ];
-            buildInputs = libs;
+              nativeBuildInputs = with pkgs; [
+                pkg-config
+                makeWrapper
+                llvmPackages.libclang
+              ];
+              buildInputs = libs;
 
-            OPENSSL_NO_VENDOR = "1";
-            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+              OPENSSL_NO_VENDOR = "1";
+              PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+              doCheck = false;
 
-            doCheck = false;
+              # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
+              postInstall = ''
+                wrapProgram $out/bin/sleek \
+                  --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libs}
+              '';
 
-            # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
-            postInstall = ''
-              wrapProgram $out/bin/sleek \
-                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libs}
-            '';
-
-            meta = with pkgs.lib; {
-              description = "Sleek — desktop freeq client (egui/Vidya)";
-              homepage = "https://github.com/codegod100/sleek";
-              license = licenses.mit;
-              mainProgram = "sleek";
-              platforms = platforms.linux;
-            };
-          };
+              meta = with pkgs.lib; {
+                description = "Sleek — desktop freeq client (egui/Vidya)";
+                homepage = "https://github.com/codegod100/sleek";
+                license = licenses.mit;
+                mainProgram = "sleek";
+                platforms = platforms.linux;
+              };
+            }
+            // (v4l2BindgenEnv pkgs)
+          );
 
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
@@ -378,55 +410,64 @@
           };
         in
         {
-          default = pkgs.mkShell {
-            packages = [
-              rust
-              pkgs.just
-              pkgs.android-tools
-              pkgs.cargo-apk
-              pkgs.cachix
-              pkgs.pkg-config
-              pkgs.openssl
-            ]
-            ++ cliTools;
-            buildInputs = libs;
-            OPENSSL_NO_VENDOR = "1";
-            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
-            # Available to justfile / scripts; not injected into every process.
-            SLEEK_LD_LIBRARY_PATH = sleekLibPath;
-            shellHook = ''
-              # Marker for scripts/enter + codespace-env.sh (avoid nested re-exec).
-              export SLEEK_NIX_SHELL=1
-              export SLEEK_LD_LIBRARY_PATH="${sleekLibPath}"
-              # Never leave a stale ambient LD_LIBRARY_PATH from an older shell
-              # or direnv that pointed at nix openssl (breaks system git).
-              if [[ -n "''${LD_LIBRARY_PATH:-}" ]]; then
-                case ":''${LD_LIBRARY_PATH}:" in
-                  *"/nix/store/"*) unset LD_LIBRARY_PATH ;;
-                esac
-              fi
-              # After NDK / cargo PATH prepends, keep nix git/curl/ssh first so
-              # Codespaces /usr/local/git is never used with mixed loaders.
-              export PATH="$HOME/.cargo/bin:$PATH"
-              export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-$HOME/.local/share/android-ndk-r29}"
-              export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-              export ANDROID_HOME="''${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
-              export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$ANDROID_HOME/platform-tools:$PATH"
-              export PATH="${pkgs.lib.makeBinPath cliTools}:$PATH"
-              unset GIT_EXEC_PATH
-              export CC_x86_64_linux_android="''${CC_x86_64_linux_android:-x86_64-linux-android28-clang}"
-              export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$CC_x86_64_linux_android"
-              export AR_x86_64_linux_android="''${AR_x86_64_linux_android:-llvm-ar}"
-              export CC_aarch64_linux_android="''${CC_aarch64_linux_android:-aarch64-linux-android28-clang}"
-              export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-              export AR_aarch64_linux_android="''${AR_aarch64_linux_android:-llvm-ar}"
-              export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"
-              export NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-$SSL_CERT_FILE}"
-              if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                echo "sleek — just host | just waydroid | nix build .#android | nix run .#install-android"
-              fi
-            '';
-          };
+          default = pkgs.mkShell (
+            {
+              packages = [
+                rust
+                pkgs.just
+                pkgs.android-tools
+                pkgs.cargo-apk
+                pkgs.cachix
+                pkgs.pkg-config
+                pkgs.openssl
+              ]
+              ++ cliTools;
+              buildInputs = libs;
+              OPENSSL_NO_VENDOR = "1";
+              PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+              # Available to justfile / scripts; not injected into every process.
+              SLEEK_LD_LIBRARY_PATH = sleekLibPath;
+              shellHook = ''
+                # Marker for scripts/enter + codespace-env.sh (avoid nested re-exec).
+                export SLEEK_NIX_SHELL=1
+                export SLEEK_LD_LIBRARY_PATH="${sleekLibPath}"
+                # Never leave a stale ambient LD_LIBRARY_PATH from an older shell
+                # or direnv that pointed at nix openssl (breaks system git).
+                if [[ -n "''${LD_LIBRARY_PATH:-}" ]]; then
+                  case ":''${LD_LIBRARY_PATH}:" in
+                    *"/nix/store/"*) unset LD_LIBRARY_PATH ;;
+                  esac
+                fi
+                # After NDK / cargo PATH prepends, keep nix git/curl/ssh first so
+                # Codespaces /usr/local/git is never used with mixed loaders.
+                export PATH="$HOME/.cargo/bin:$PATH"
+                export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-$HOME/.local/share/android-ndk-r29}"
+                export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+                export ANDROID_HOME="''${ANDROID_HOME:-$HOME/.local/share/android-sdk}"
+                export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$ANDROID_HOME/platform-tools:$PATH"
+                export PATH="${pkgs.lib.makeBinPath cliTools}:$PATH"
+                unset GIT_EXEC_PATH
+                export CC_x86_64_linux_android="''${CC_x86_64_linux_android:-x86_64-linux-android28-clang}"
+                export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$CC_x86_64_linux_android"
+                export AR_x86_64_linux_android="''${AR_x86_64_linux_android:-llvm-ar}"
+                export CC_aarch64_linux_android="''${CC_aarch64_linux_android:-aarch64-linux-android28-clang}"
+                export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+                export AR_aarch64_linux_android="''${AR_aarch64_linux_android:-llvm-ar}"
+                export SSL_CERT_FILE="''${SSL_CERT_FILE:-${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt}"
+                export NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-$SSL_CERT_FILE}"
+                # Host bindgen (v4l2 camera) — re-assert after NDK path munging so
+                # clang-sys never loads NDK libclang (missing libz on host).
+                export LIBCLANG_PATH="${(v4l2BindgenEnv pkgs).LIBCLANG_PATH}"
+                export SLEEK_LIBCLANG_PATH="$LIBCLANG_PATH"
+                export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
+                export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
+                if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
+                  echo "sleek — just host | just waydroid | nix build .#android | nix run .#install-android"
+                fi
+              '';
+            }
+            // (v4l2BindgenEnv pkgs)
+          );
         }
       );
     };

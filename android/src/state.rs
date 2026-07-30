@@ -1,8 +1,17 @@
 //! Application state — channel buffers, connection, and freeq-inspired models.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
+use eframe::egui::{self, ColorImage, TextureHandle};
+
+use crate::av::{ChannelCall, LocalCall, VideoFrameStore};
+use crate::preview::Embed;
+
+/// How long toasts stay visible before auto-dismiss.
+const TOAST_DURATION: Duration = Duration::from_secs(4);
 
 /// Max messages retained per buffer.
 const MAX_MESSAGES: usize = 500;
@@ -64,6 +73,16 @@ pub enum Route {
     Chat(String),
 }
 
+/// Open Graph fields for a link card (from IRCv3 tags or a live fetch).
+#[derive(Debug, Clone, Default)]
+pub struct LinkMeta {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub thumb_url: Option<String>,
+    /// `og:site_name` (or application-name) when known.
+    pub site_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub id: String,
@@ -76,6 +95,10 @@ pub struct ChatMessage {
     pub timestamp: DateTime<Local>,
     pub reply_to: Option<String>,
     pub is_signed: bool,
+    /// Inline image / OG link embed (from tags or URL scan).
+    pub embed: Option<Embed>,
+    /// OG metadata when already known (IRCv3 link-preview tags).
+    pub link_meta: Option<LinkMeta>,
 }
 
 impl ChatMessage {
@@ -91,7 +114,16 @@ impl ChatMessage {
             timestamp: Local::now(),
             reply_to: None,
             is_signed: false,
+            embed: None,
+            link_meta: None,
         }
+    }
+
+    /// Resolve embed: prefer fields set at receive, else scan body text.
+    pub fn resolved_embed(&self) -> Option<Embed> {
+        self.embed
+            .clone()
+            .or_else(|| crate::preview::embed_from_text(&self.text))
     }
 
     pub fn time_label(&self) -> String {
@@ -108,10 +140,27 @@ impl ChatMessage {
         if self.is_action {
             return format!("* {} {}", self.from, self.text);
         }
-        if self.from.is_empty() {
-            self.text.clone()
+        let body = if let Some(title) = self
+            .link_meta
+            .as_ref()
+            .and_then(|m| m.title.as_ref())
+            .filter(|t| !t.trim().is_empty())
+        {
+            format!("🔗 {title}")
+        } else if matches!(
+            self.resolved_embed(),
+            Some(crate::preview::Embed::Image { .. })
+        ) && self.text.trim().starts_with("http")
+            && !self.text.trim().contains(char::is_whitespace)
+        {
+            "📷 Image".into()
         } else {
-            format!("{}: {}", self.from, self.text)
+            self.text.clone()
+        };
+        if self.from.is_empty() {
+            body
+        } else {
+            format!("{}: {}", self.from, body)
         }
     }
 }
@@ -125,6 +174,12 @@ pub struct Buffer {
     pub unread: u32,
     pub last_activity: i64,
     pub names_pending: bool,
+    /// True while a JOIN is in flight (optimistic open before confirmation).
+    pub join_pending: bool,
+    /// Server rejected JOIN (e.g. guest on a policy-gated channel like #policytest).
+    pub join_error: Option<String>,
+    /// Active freeq AV call in this channel (`av-state`), if any.
+    pub call: Option<ChannelCall>,
     message_ids: HashSet<String>,
 }
 
@@ -138,6 +193,9 @@ impl Buffer {
             unread: 0,
             last_activity: 0,
             names_pending: false,
+            join_pending: false,
+            join_error: None,
+            call: None,
             message_ids: HashSet::new(),
         }
     }
@@ -146,11 +204,33 @@ impl Buffer {
         self.name.starts_with('#') || self.name.starts_with('&')
     }
 
+    /// Successfully in the channel (not still joining, not denied).
+    pub fn is_joined(&self) -> bool {
+        if !self.is_channel() {
+            return true;
+        }
+        !self.join_pending && self.join_error.is_none()
+    }
+
     pub fn display_name(&self) -> &str {
         self.name.as_str()
     }
 
+    pub fn is_dm(&self) -> bool {
+        !self.is_channel() && self.name != "*status"
+    }
+
     pub fn last_preview(&self) -> String {
+        if let Some(err) = &self.join_error {
+            return err.clone();
+        }
+        if let Some(call) = &self.call {
+            let n = call.participants.max(1);
+            return format!("📞 Call active · {n} in call");
+        }
+        if self.join_pending && self.messages.is_empty() {
+            return "Joining…".into();
+        }
         self.messages
             .iter()
             .rev()
@@ -160,20 +240,92 @@ impl Buffer {
             .unwrap_or_else(|| "No messages yet".into())
     }
 
+    /// Seed `last_activity` from a CHATHISTORY TARGETS server-time tag so the
+    /// chat list sorts correctly before per-DM history backfills.
+    pub fn seed_activity_from_target(&mut self, server_time: Option<&str>) {
+        let Some(raw) = server_time.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let Ok(dt) = DateTime::parse_from_rfc3339(raw) else {
+            return;
+        };
+        let ts = dt.timestamp();
+        if self.messages.is_empty() || ts > self.last_activity {
+            self.last_activity = ts;
+        }
+    }
+
     pub fn append(&mut self, msg: ChatMessage) {
         if !msg.id.is_empty() && !self.message_ids.insert(msg.id.clone()) {
             return;
+        }
+        // Server echo of our own send: drop the optimistic local-* row so we
+        // don't show the same line twice (local unsigned + signed echo).
+        if !msg.is_system && !msg.id.starts_with("local-") {
+            self.consume_local_echo(&msg);
         }
         let ts = msg.timestamp.timestamp();
         if !msg.is_system && ts > self.last_activity {
             self.last_activity = ts;
         }
-        self.messages.push_back(msg);
+        // Insert chronologically so CHATHISTORY backfill lands above live lines.
+        if let Some(back) = self.messages.back() {
+            if msg.timestamp < back.timestamp {
+                let idx = self
+                    .messages
+                    .iter()
+                    .position(|m| msg.timestamp < m.timestamp)
+                    .unwrap_or(self.messages.len());
+                self.messages.insert(idx, msg);
+            } else {
+                self.messages.push_back(msg);
+            }
+        } else {
+            self.messages.push_back(msg);
+        }
         while self.messages.len() > MAX_MESSAGES {
             if let Some(old) = self.messages.pop_front() {
                 self.message_ids.remove(&old.id);
             }
         }
+    }
+
+    /// Absorb another buffer's messages/unread (DID-keyed DM merge).
+    fn absorb(&mut self, other: Buffer) {
+        self.unread = self.unread.saturating_add(other.unread);
+        if other.last_activity > self.last_activity {
+            self.last_activity = other.last_activity;
+        }
+        for m in other.messages {
+            self.append(m);
+        }
+        if self.topic.is_empty() && !other.topic.is_empty() {
+            self.topic = other.topic;
+        }
+        if self.call.is_none() {
+            self.call = other.call;
+        }
+    }
+
+    /// Remove a pending optimistic echo that matches an incoming server message.
+    fn consume_local_echo(&mut self, server_msg: &ChatMessage) {
+        if server_msg.from.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.messages.iter().rposition(|m| {
+            m.id.starts_with("local-")
+                && m.from.eq_ignore_ascii_case(&server_msg.from)
+                && m.text == server_msg.text
+        }) {
+            if let Some(old) = self.messages.remove(pos) {
+                self.message_ids.remove(&old.id);
+            }
+        }
+    }
+
+    /// True when the buffer has no real (non-system) chat lines yet.
+    pub fn has_chat_messages(&self) -> bool {
+        self.messages.iter().any(|m| !m.is_system)
     }
 
     pub fn mark_read(&mut self) {
@@ -231,6 +383,214 @@ pub enum ConnectMode {
     Guest,
 }
 
+/// Image attached to the compose bar (clipboard paste).
+#[derive(Clone)]
+pub struct ComposeImage {
+    pub width: usize,
+    pub height: usize,
+    /// Unpremultiplied RGBA8 pixels (`width * height * 4`).
+    pub rgba: Arc<[u8]>,
+    texture: Option<TextureHandle>,
+}
+
+impl std::fmt::Debug for ComposeImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComposeImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
+
+impl ComposeImage {
+    pub fn from_rgba(width: usize, height: usize, rgba: Arc<[u8]>) -> Self {
+        Self {
+            width,
+            height,
+            rgba,
+            texture: None,
+        }
+    }
+
+    /// Lazy GPU texture for the compose preview.
+    pub fn texture(&mut self, ctx: &egui::Context) -> &TextureHandle {
+        if self.texture.is_none() {
+            let color = ColorImage::from_rgba_unmultiplied(
+                [self.width, self.height],
+                self.rgba.as_ref(),
+            );
+            self.texture = Some(ctx.load_texture(
+                "compose_paste_image",
+                color,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.texture.as_ref().expect("texture just inserted")
+    }
+}
+
+// ── Chat media / OG preview cache ──────────────────────────────────────────
+
+/// Decoded remote image ready for (or already on) the GPU.
+#[derive(Clone)]
+pub struct CachedPixels {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Arc<[u8]>,
+    texture: Option<TextureHandle>,
+}
+
+impl std::fmt::Debug for CachedPixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedPixels")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
+
+impl CachedPixels {
+    pub fn new(width: usize, height: usize, rgba: Arc<[u8]>) -> Self {
+        Self {
+            width,
+            height,
+            rgba,
+            texture: None,
+        }
+    }
+
+    pub fn texture(&mut self, ctx: &egui::Context, id_salt: &str) -> &TextureHandle {
+        if self.texture.is_none() {
+            let color = ColorImage::from_rgba_unmultiplied(
+                [self.width, self.height],
+                self.rgba.as_ref(),
+            );
+            self.texture = Some(ctx.load_texture(
+                format!("chat_img_{id_salt}"),
+                color,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.texture.as_ref().expect("texture just inserted")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ImageState {
+    Loading,
+    Ready(CachedPixels),
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub enum LinkState {
+    Loading,
+    /// Fetched (or tag-provided) OG fields.
+    Ready(LinkMeta),
+    /// Fetch failed — UI still shows a domain card.
+    Failed,
+}
+
+/// Work items the UI wants the net thread to perform.
+#[derive(Debug, Clone)]
+pub enum MediaFetch {
+    Image(String),
+    LinkPreview(String),
+}
+
+/// In-memory cache of remote images and Open Graph cards, plus a pending queue.
+#[derive(Debug, Default)]
+pub struct MediaCache {
+    pub images: HashMap<String, ImageState>,
+    pub links: HashMap<String, LinkState>,
+    pending: Vec<MediaFetch>,
+}
+
+impl MediaCache {
+    /// Ensure an image fetch is in flight. Returns current state (if any).
+    pub fn touch_image(&mut self, url: &str) -> Option<&ImageState> {
+        if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        if !self.images.contains_key(url) {
+            self.images.insert(url.to_string(), ImageState::Loading);
+            self.pending.push(MediaFetch::Image(url.to_string()));
+        }
+        self.images.get(url)
+    }
+
+    /// Ensure an OG fetch is in flight (unless already seeded).
+    pub fn touch_link(&mut self, url: &str) -> Option<&LinkState> {
+        if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        if !self.links.contains_key(url) {
+            self.links.insert(url.to_string(), LinkState::Loading);
+            self.pending.push(MediaFetch::LinkPreview(url.to_string()));
+        }
+        self.links.get(url)
+    }
+
+    /// Seed OG meta from IRCv3 tags without a network round-trip.
+    pub fn seed_link(&mut self, url: &str, meta: LinkMeta) {
+        if url.is_empty() {
+            return;
+        }
+        // Prefer non-empty title/desc over a later failed fetch.
+        match self.links.get(url) {
+            Some(LinkState::Ready(existing))
+                if existing.title.is_some() || existing.description.is_some() => {}
+            _ => {
+                if let Some(ref thumb) = meta.thumb_url {
+                    self.touch_image(thumb);
+                }
+                self.links.insert(url.to_string(), LinkState::Ready(meta));
+            }
+        }
+    }
+
+    pub fn set_image_ready(&mut self, url: String, pixels: CachedPixels) {
+        self.images.insert(url, ImageState::Ready(pixels));
+    }
+
+    pub fn set_image_failed(&mut self, url: String) {
+        self.images.insert(url, ImageState::Failed);
+    }
+
+    pub fn set_link_ready(&mut self, url: String, meta: LinkMeta) {
+        if let Some(ref thumb) = meta.thumb_url {
+            self.touch_image(thumb);
+        }
+        self.links.insert(url, LinkState::Ready(meta));
+    }
+
+    pub fn set_link_failed(&mut self, url: String) {
+        self.links.insert(url, LinkState::Failed);
+    }
+
+    /// Drain pending fetch requests for the net bridge.
+    pub fn drain_pending(&mut self) -> Vec<MediaFetch> {
+        std::mem::take(&mut self.pending)
+    }
+
+    pub fn has_loading(&self) -> bool {
+        self.images.values().any(|s| matches!(s, ImageState::Loading))
+            || self.links.values().any(|s| matches!(s, LinkState::Loading))
+    }
+}
+
+/// HTTPS origin for freeq REST APIs derived from the IRC host:port.
+pub fn api_base_for_server(server: &str) -> String {
+    let host = server.split(':').next().unwrap_or(server).trim();
+    if host.is_empty() {
+        "https://irc.freeq.at".into()
+    } else {
+        format!("https://{host}")
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub connection: ConnectionState,
@@ -246,6 +606,8 @@ pub struct AppState {
     pub auth_broker: String,
     pub error: Option<String>,
     pub toast: Option<String>,
+    /// When the current toast should auto-dismiss (`None` if no toast).
+    pub toast_until: Option<Instant>,
     pub status_line: String,
     /// True while the loopback browser OAuth flow is waiting.
     pub awaiting_oauth: bool,
@@ -253,14 +615,30 @@ pub struct AppState {
     pub channels: HashMap<String, Buffer>,
     /// Ordered keys for list UI (channel names / dm keys).
     pub channel_order: Vec<String>,
+    /// Nick (lowercase) → peer DID — addressing-grade bindings for DM threads.
+    pub nick_to_did: HashMap<String, String>,
+    /// Peer DID → display nick (for rendering DID-keyed buffers).
+    pub did_to_nick: HashMap<String, String>,
     pub active_channel: Option<String>,
     pub route: Route,
     pub tab: Tab,
 
     pub compose: String,
+    /// Pending image from clipboard paste (shown above the text field).
+    pub compose_image: Option<ComposeImage>,
+    /// True while a pasted image is uploading to freeq.
+    pub compose_uploading: bool,
+    /// One-shot: focus the compose / caption TextEdit next frame (after attach).
+    pub focus_compose: bool,
+    /// In-flight OS image file dialog (attach button). Polled each frame.
+    pub file_pick_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::PickImageResult>>,
+    /// Remote image + Open Graph link-preview cache for chat embeds.
+    pub media: MediaCache,
     pub search: String,
     pub join_input: String,
     pub discover_input: String,
+    /// Channel member list open (chat detail only).
+    pub show_members: bool,
 
     /// Connect form fields (editable while disconnected).
     pub connect_mode: ConnectMode,
@@ -270,6 +648,41 @@ pub struct AppState {
     pub form_server: String,
     pub form_tls: bool,
     pub form_websocket: bool,
+    /// Guest session was loaded from disk — consumed once for launch auto-connect.
+    pub auto_guest_connect: bool,
+
+    /// Our active AV call (at most one at a time).
+    pub local_call: Option<LocalCall>,
+    /// Shared latest video frames from the MoQ media plane (desktop).
+    pub av_video: Option<VideoFrameStore>,
+    /// GPU textures for call video tiles (`nick` → texture), refreshed each paint.
+    /// Wrapped so `AppState: Debug` does not require `TextureHandle: Debug`.
+    pub av_video_textures: AvVideoTextures,
+}
+
+/// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
+#[derive(Default)]
+pub struct AvVideoTextures(pub HashMap<String, TextureHandle>);
+
+impl std::fmt::Debug for AvVideoTextures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AvVideoTextures")
+            .field(&self.0.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl std::ops::Deref for AvVideoTextures {
+    type Target = HashMap<String, TextureHandle>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for AvVideoTextures {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl AppState {
@@ -289,17 +702,26 @@ impl AppState {
             auth_broker: default_auth_broker(),
             error: None,
             toast: None,
+            toast_until: None,
             status_line: "Not connected".into(),
             awaiting_oauth: false,
             channels: HashMap::new(),
             channel_order: Vec::new(),
+            nick_to_did: HashMap::new(),
+            did_to_nick: HashMap::new(),
             active_channel: None,
             route: Route::Tabs,
             tab: Tab::Chats,
             compose: String::new(),
+            compose_image: None,
+            compose_uploading: false,
+            focus_compose: false,
+            file_pick_rx: None,
+            media: MediaCache::default(),
             search: String::new(),
             join_input: String::new(),
             discover_input: String::new(),
+            show_members: false,
             connect_mode: ConnectMode::Bluesky,
             form_handle: String::new(),
             form_callback: String::new(),
@@ -307,6 +729,10 @@ impl AppState {
             form_server: server,
             form_tls: true,
             form_websocket: use_ws,
+            auto_guest_connect: false,
+            local_call: None,
+            av_video: None,
+            av_video_textures: AvVideoTextures::default(),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -332,6 +758,21 @@ impl AppState {
                 if let Some(h) = &state.handle {
                     state.form_handle = h.clone();
                 }
+                state.connect_mode = ConnectMode::Bluesky;
+            } else if saved.has_guest() {
+                // Restore last guest nick/server and auto-connect on launch.
+                state.nick = saved.nick.clone();
+                state.form_nick = saved.nick;
+                if !saved.server.is_empty() {
+                    state.server = saved.server.clone();
+                    state.form_server = saved.server;
+                }
+                state.use_tls = saved.use_tls;
+                state.form_tls = saved.use_tls;
+                state.use_websocket = saved.use_websocket;
+                state.form_websocket = saved.use_websocket;
+                state.connect_mode = ConnectMode::Guest;
+                state.auto_guest_connect = true;
             }
         }
         state
@@ -343,35 +784,146 @@ impl AppState {
             .is_some_and(|t| !t.is_empty())
     }
 
-    pub fn persist_session(&self) {
-        let Some(broker_token) = self.broker_token.clone() else {
+    /// Remembered guest nick on disk (or about to auto-connect).
+    pub fn has_saved_guest(&self) -> bool {
+        self.auto_guest_connect
+            || crate::auth::SavedSession::load().is_some_and(|s| s.has_guest())
+    }
+
+    /// Show a toast that auto-dismisses after a few seconds.
+    pub fn show_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some(msg.into());
+        self.toast_until = Some(Instant::now() + TOAST_DURATION);
+    }
+
+    /// True while the OS attach-image dialog is open (or a chosen file is decoding).
+    pub fn file_pick_busy(&self) -> bool {
+        self.file_pick_rx.is_some()
+    }
+
+    /// Launch the OS image file picker (no-op if one is already open).
+    pub fn start_file_pick(&mut self) {
+        if self.file_pick_rx.is_some() {
             return;
+        }
+        self.file_pick_rx = Some(crate::clipboard::start_pick_image_file());
+    }
+
+    /// Apply a finished OS file-dialog result. Call once per frame from the app loop.
+    ///
+    /// Returns `true` if a pick is still in progress (caller should repaint).
+    pub fn poll_file_pick(&mut self) -> bool {
+        let Some(rx) = self.file_pick_rx.as_ref() else {
+            return false;
         };
-        // Never poison storage with a Guest temp nick while DID-authenticated
-        // (freeq-android AuthRecoveryTest).
-        let nick = if self.did.is_some() && self.nick.starts_with("Guest") {
-            self.handle.clone().unwrap_or_default()
-        } else {
-            self.nick.clone()
-        };
-        let session = crate::auth::SavedSession {
-            broker_token,
-            did: self.did.clone().unwrap_or_default(),
-            handle: self.handle.clone().unwrap_or_default(),
-            nick,
-            server: self.server.clone(),
-            last_login_unix: chrono::Utc::now().timestamp(),
-        };
-        if let Err(e) = session.save() {
-            log::warn!("failed to save session: {e}");
+        match rx.try_recv() {
+            Ok(Ok(Some(img))) => {
+                self.compose_image = Some(img);
+                self.focus_compose = true;
+                self.file_pick_rx = None;
+                false
+            }
+            Ok(Ok(None)) => {
+                // User cancelled.
+                self.file_pick_rx = None;
+                false
+            }
+            Ok(Err(e)) => {
+                self.show_toast(e);
+                self.file_pick_rx = None;
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.show_toast("File picker exited unexpectedly".to_string());
+                self.file_pick_rx = None;
+                false
+            }
         }
     }
 
+    pub fn clear_toast(&mut self) {
+        self.toast = None;
+        self.toast_until = None;
+    }
+
+    /// Drop the toast if its timer has elapsed. Returns `true` if still visible.
+    pub fn tick_toast(&mut self) -> bool {
+        if self.toast.is_none() {
+            return false;
+        }
+        if self
+            .toast_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.clear_toast();
+            return false;
+        }
+        true
+    }
+
+    pub fn persist_session(&self) {
+        let now = chrono::Utc::now().timestamp();
+        if let Some(broker_token) = self.broker_token.clone() {
+            // Never poison storage with a Guest temp nick while DID-authenticated
+            // (freeq-android AuthRecoveryTest).
+            let nick = if self.did.is_some() && self.nick.starts_with("Guest") {
+                self.handle.clone().unwrap_or_default()
+            } else {
+                self.nick.clone()
+            };
+            let session = crate::auth::SavedSession {
+                broker_token,
+                did: self.did.clone().unwrap_or_default(),
+                handle: self.handle.clone().unwrap_or_default(),
+                nick,
+                server: self.server.clone(),
+                last_login_unix: now,
+                guest: false,
+                use_tls: self.use_tls,
+                use_websocket: self.use_websocket,
+            };
+            if let Err(e) = session.save() {
+                log::warn!("failed to save session: {e}");
+            }
+            return;
+        }
+
+        // Guest: remember nick + server so next launch reconnects automatically.
+        if self.did.is_none() && !self.nick.trim().is_empty() {
+            let session = crate::auth::SavedSession {
+                broker_token: String::new(),
+                did: String::new(),
+                handle: String::new(),
+                nick: self.nick.clone(),
+                server: self.server.clone(),
+                last_login_unix: now,
+                guest: true,
+                use_tls: self.use_tls,
+                use_websocket: self.use_websocket,
+            };
+            if let Err(e) = session.save() {
+                log::warn!("failed to save guest session: {e}");
+            }
+        }
+    }
+
+    /// Drop broker/DID identity and any remembered guest from memory and disk.
+    /// Does not touch connection buffers — use [`Self::logout`] for a full sign-out.
     pub fn clear_auth(&mut self) {
         self.broker_token = None;
         self.did = None;
         self.handle = None;
+        self.form_handle.clear();
+        self.auto_guest_connect = false;
         crate::auth::SavedSession::clear();
+    }
+
+    /// True when a previous Bluesky login is still on disk or in memory.
+    pub fn has_cached_identity(&self) -> bool {
+        self.has_saved_session()
+            || self.did.as_ref().is_some_and(|d| !d.is_empty())
+            || self.handle.as_ref().is_some_and(|h| !h.is_empty())
     }
 
     pub fn is_connected(&self) -> bool {
@@ -384,21 +936,167 @@ impl AppState {
     }
 
     pub fn ensure_buffer(&mut self, name: &str) -> &mut Buffer {
-        let key = name.to_string();
-        if !self.channels.contains_key(&key) {
-            self.channels.insert(key.clone(), Buffer::new(&key));
-            if !self.channel_order.iter().any(|n| n.eq_ignore_ascii_case(&key)) {
-                self.channel_order.push(key.clone());
-            }
+        // Prefer an existing case-insensitive match so "Alice" / "alice" share one row.
+        if let Some(existing) = self.find_buffer_key(name) {
+            return self.channels.get_mut(&existing).expect("key from find");
         }
+        let key = name.to_string();
+        self.channels.insert(key.clone(), Buffer::new(&key));
+        self.channel_order.push(key.clone());
         self.channels.get_mut(&key).expect("just inserted")
     }
 
+    /// Case-insensitive lookup of an existing buffer key.
+    pub fn find_buffer_key(&self, name: &str) -> Option<String> {
+        if self.channels.contains_key(name) {
+            return Some(name.to_string());
+        }
+        self.channels
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
+    /// Canonical DM buffer key: peer DID when known, else the nick (or DID input).
+    /// Channels pass through unchanged.
+    pub fn dm_buffer_key(&self, peer: &str) -> String {
+        if peer.starts_with('#') || peer.starts_with('&') || peer == "*status" {
+            return peer.to_string();
+        }
+        freeq_sdk::address::dm_peer_key(peer, |n| {
+            self.nick_to_did.get(&n.to_lowercase()).cloned()
+        })
+    }
+
+    /// Human label for a buffer key (DID → nick when known, else shortened DID).
+    pub fn display_name_for(&self, key: &str) -> String {
+        if !freeq_sdk::address::is_did(key) {
+            return key.to_string();
+        }
+        if let Some(nick) = self.did_to_nick.get(key) {
+            return nick.clone();
+        }
+        if let Some((nick, _)) = self
+            .nick_to_did
+            .iter()
+            .find(|(_, did)| did.as_str() == key)
+        {
+            // Prefer original casing if a buffer still carries it.
+            if let Some(buf_key) = self.find_buffer_key(nick) {
+                if !freeq_sdk::address::is_did(&buf_key) {
+                    return buf_key;
+                }
+            }
+            return nick.clone();
+        }
+        shorten_did(key)
+    }
+
+    /// Record nick↔DID and fold any nick-keyed DM thread into the DID-keyed one.
+    /// Returns true when a buffer merge happened (caller may need to refresh UI route).
+    pub fn adopt_dm_binding(&mut self, nick: &str, did: &str) -> bool {
+        if !freeq_sdk::address::is_did(did) || nick.eq_ignore_ascii_case(did) {
+            return false;
+        }
+        if nick.starts_with('#') || nick.starts_with('&') {
+            return false;
+        }
+        self.nick_to_did
+            .insert(nick.to_lowercase(), did.to_string());
+        self.did_to_nick.insert(did.to_string(), nick.to_string());
+        self.merge_dm_buffers(nick, did)
+    }
+
+    /// Fold nick-keyed DM buffer into DID-keyed one (freeq-android DidDisplay.mergeDmBuffers).
+    fn merge_dm_buffers(&mut self, nick: &str, did: &str) -> bool {
+        let Some(nick_key) = self.find_buffer_key(nick) else {
+            return false;
+        };
+        if freeq_sdk::address::is_did(&nick_key) {
+            return false;
+        }
+        if nick_key == did {
+            return false;
+        }
+
+        let Some(nick_buf) = self.channels.remove(&nick_key) else {
+            return false;
+        };
+        self.channel_order
+            .retain(|n| !n.eq_ignore_ascii_case(&nick_key));
+
+        if let Some(did_buf) = self.channels.get_mut(did) {
+            did_buf.absorb(nick_buf);
+        } else {
+            let mut rekeyed = Buffer::new(did);
+            rekeyed.absorb(nick_buf);
+            rekeyed.name = did.to_string();
+            self.channels.insert(did.to_string(), rekeyed);
+            if !self.channel_order.iter().any(|n| n == did) {
+                self.channel_order.push(did.to_string());
+            }
+        }
+
+        // Repoint active chat / route if the user was on the nick thread.
+        if self
+            .active_channel
+            .as_ref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(&nick_key))
+        {
+            self.active_channel = Some(did.to_string());
+        }
+        if let Route::Chat(ref open) = self.route {
+            if open.eq_ignore_ascii_case(&nick_key) {
+                self.route = Route::Chat(did.to_string());
+            }
+        }
+        true
+    }
+
+    /// Own-echo binding: server echo of our DM carries target=nick, dm_key=DID.
+    /// Adopt before routing so the local-echo nick thread folds into the DID thread.
+    pub fn adopt_echo_binding(
+        &mut self,
+        is_self: bool,
+        target: &str,
+        dm_key: Option<&str>,
+    ) -> bool {
+        if !is_self {
+            return false;
+        }
+        let Some(did) = dm_key else {
+            return false;
+        };
+        if !freeq_sdk::address::is_did(did) {
+            return false;
+        }
+        if target.starts_with('#') || target.starts_with('&') {
+            return false;
+        }
+        if freeq_sdk::address::is_did(target) {
+            return false;
+        }
+        if target.eq_ignore_ascii_case(did) {
+            return false;
+        }
+        self.adopt_dm_binding(target, did)
+    }
+
     pub fn open_chat(&mut self, name: &str) {
-        self.ensure_buffer(name);
-        self.active_channel = Some(name.to_string());
-        self.route = Route::Chat(name.to_string());
-        if let Some(buf) = self.channels.get_mut(name) {
+        // Resolve DM peers to their DID key when known so we open the same
+        // thread incoming messages land in.
+        let key = self.dm_buffer_key(name);
+        // Switching buffers: drop pending compose so we don't send into the wrong room.
+        if self.active_channel.as_deref() != Some(key.as_str()) {
+            self.compose.clear();
+            self.compose_image = None;
+            self.compose_uploading = false;
+        }
+        self.ensure_buffer(&key);
+        self.active_channel = Some(key.clone());
+        self.route = Route::Chat(key.clone());
+        self.show_members = false;
+        if let Some(buf) = self.channels.get_mut(&key) {
             buf.mark_read();
         }
     }
@@ -407,6 +1105,10 @@ impl AppState {
         self.active_channel = None;
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
+        self.show_members = false;
+        self.compose.clear();
+        self.compose_image = None;
+        self.compose_uploading = false;
     }
 
     pub fn sorted_conversations(&self) -> Vec<&Buffer> {
@@ -414,12 +1116,16 @@ impl AppState {
             .channel_order
             .iter()
             .filter_map(|k| self.channels.get(k))
+            .filter(|b| b.name != "*status")
             .collect();
         if self.search.is_empty() {
             // keep all
         } else {
             let q = self.search.to_lowercase();
-            list.retain(|b| b.name.to_lowercase().contains(&q));
+            list.retain(|b| {
+                b.name.to_lowercase().contains(&q)
+                    || self.display_name_for(&b.name).to_lowercase().contains(&q)
+            });
         }
         list.sort_by(|a, b| b.last_activity.cmp(&a.last_activity).then(a.name.cmp(&b.name)));
         list
@@ -431,17 +1137,34 @@ impl AppState {
         // Keep did / broker_token so reconnect can re-auth; use clear_auth for logout.
         self.channels.clear();
         self.channel_order.clear();
+        self.nick_to_did.clear();
+        self.did_to_nick.clear();
         self.active_channel = None;
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
+        self.show_members = false;
         self.compose.clear();
+        self.compose_image = None;
+        self.compose_uploading = false;
+        self.local_call = None;
+        self.av_video = None;
+        self.av_video_textures.clear();
         self.status_line = "Disconnected".into();
     }
 
+    /// Full sign-out: disconnect buffers + wipe cached account / guest so the
+    /// next connect is a fresh guest (no DID / broker_token / remembered nick).
     pub fn logout(&mut self) {
         self.clear_session();
         self.clear_auth();
-        self.status_line = "Signed out".into();
+        // Don't leave form_nick as the old handle (e.g. nandi.uk) after clear.
+        let nick = default_nick();
+        self.nick = nick.clone();
+        self.form_nick = nick;
+        self.connect_mode = ConnectMode::Guest;
+        self.auto_guest_connect = false;
+        self.status_line = "Signed out — connect as guest or sign in again".into();
+        self.show_toast("Cleared saved account");
     }
 
     pub fn normalize_channel(input: &str) -> String {
@@ -454,5 +1177,32 @@ impl AppState {
         } else {
             format!("#{t}")
         }
+    }
+}
+
+/// Compact a DID for display: `did:plc:k2n3e2vsihf3farequ44t5j7` → `plc:k2n3…t5j7`.
+fn shorten_did(s: &str) -> String {
+    if !freeq_sdk::address::is_did(s) {
+        return s.to_string();
+    }
+    let rest = &s[4..]; // after "did:"
+    let Some(colon) = rest.find(':') else {
+        return s.to_string();
+    };
+    let method = &rest[..colon];
+    let id = &rest[colon + 1..];
+    if id.len() <= 12 {
+        format!("{method}:{id}")
+    } else {
+        let head: String = id.chars().take(4).collect();
+        let tail: String = id
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("{method}:{head}…{tail}")
     }
 }

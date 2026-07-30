@@ -1,8 +1,9 @@
 //! Connect screen — Bluesky OAuth (auth broker) + guest, freeq-android inspired.
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, RichText};
 use vidya::{
-    body, button, checkbox, dim_label, primary_button, text_field_singleline, title, title_2, Theme,
+    body, button, checkbox, destructive_button, dim_label, primary_button, text_field_singleline,
+    title_2, Theme,
 };
 
 use crate::state::{AppState, ConnectMode, ConnectionState};
@@ -13,40 +14,17 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
     let sp = &th.spacing;
     let p = &th.palette;
     let loading = state.connection == ConnectionState::Connecting || state.awaiting_oauth;
-
-    ui.vertical_centered(|ui| {
-        ui.add_space(sp.xl + sp.lg);
-
-        // Logo mark
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
-        ui.painter()
-            .circle_filled(rect.center(), 36.0, p.accent.gamma_multiply(0.35));
-        ui.painter()
-            .circle_filled(rect.center(), 28.0, p.accent);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "S",
-            egui::FontId::proportional(28.0),
-            p.accent_fg,
-        );
-
-        ui.add_space(sp.md);
-        title(ui, th, "Sleek");
-        ui.add_space(sp.xs);
-        dim_label(ui, th, "freeq · mobile client");
-        ui.add_space(sp.xl);
-    });
+    let cached = state.has_cached_identity();
 
     card(ui, th, |ui| {
         match state.connect_mode {
             ConnectMode::Bluesky => {
                 title_2(ui, th, "Sign in with Bluesky");
                 ui.add_space(sp.sm);
-                body(
+                dim_label(
                     ui,
                     th,
-                    "AT Protocol identity via the freeq auth broker. Your handle is verified with SASL on IRC.",
+                    "AT Protocol identity via freeq. Handle verified with SASL on IRC.",
                 );
                 ui.add_space(sp.lg);
 
@@ -82,13 +60,15 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                     }
                 });
 
-                ui.add_space(sp.md);
+                ui.add_space(sp.sm);
                 dim_label(
                     ui,
                     th,
-                    "A browser window opens. After you approve, return here — or paste a freeq://auth link below.",
+                    "Browser opens to approve — or paste a freeq://auth link below.",
                 );
-                ui.add_space(sp.sm);
+
+                // Advanced: callback paste + session restore, only when needed.
+                ui.add_space(sp.md);
                 body(ui, th, "Paste callback (optional)");
                 ui.add_space(sp.xs);
                 let _ = text_field_singleline(ui, th, &mut state.form_callback);
@@ -103,20 +83,29 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                         action = ConnectAction::ReconnectSession;
                     }
                 }
+
+                if cached {
+                    ui.add_space(sp.sm);
+                    cached_account_row(ui, th, state, loading, &mut action);
+                }
             }
             ConnectMode::Guest => {
                 title_2(ui, th, "Guest connect");
                 ui.add_space(sp.sm);
-                body(
+                dim_label(
                     ui,
                     th,
-                    "Join freeq as a guest. Your nick is a display alias — no DID until you sign in with Bluesky.",
+                    "Display nick only — no DID until you sign in with Bluesky.",
                 );
                 ui.add_space(sp.lg);
 
                 body(ui, th, "Nickname");
                 ui.add_space(sp.xs);
                 let _ = text_field_singleline(ui, th, &mut state.form_nick);
+                if state.has_saved_guest() {
+                    ui.add_space(sp.xs);
+                    dim_label(ui, th, "Saved guest — reconnects on next launch.");
+                }
                 ui.add_space(sp.md);
 
                 body(ui, th, "Server");
@@ -124,14 +113,9 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 let _ = text_field_singleline(ui, th, &mut state.form_server);
                 ui.add_space(sp.md);
 
-                checkbox(ui, th, &mut state.form_tls, "Use TLS (recommended)");
+                checkbox(ui, th, &mut state.form_tls, "Use TLS");
                 ui.add_space(sp.sm);
-                checkbox(
-                    ui,
-                    th,
-                    &mut state.form_websocket,
-                    "WebSocket transport (good on mobile)",
-                );
+                checkbox(ui, th, &mut state.form_websocket, "WebSocket transport");
 
                 if let Some(err) = &state.error {
                     ui.add_space(sp.md);
@@ -147,10 +131,19 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                     dim_label(ui, th, &state.status_line);
                 }
 
+                if cached {
+                    ui.add_space(sp.md);
+                    cached_account_row(ui, th, state, loading, &mut action);
+                }
+
                 ui.add_space(sp.lg);
                 ui.horizontal(|ui| {
                     ui.set_width(ui.available_width());
-                    let label = if loading { "Connecting…" } else { "Connect as guest" };
+                    let label = if loading {
+                        "Connecting…"
+                    } else {
+                        "Connect as guest"
+                    };
                     let resp = primary_button(ui, th, label);
                     if resp.clicked() && !loading {
                         action = ConnectAction::ConnectGuest;
@@ -180,29 +173,36 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
         }
     });
 
-    ui.add_space(sp.md);
-
-    card(ui, th, |ui| {
-        title_2(ui, th, "About freeq");
-        ui.add_space(sp.sm);
-        body(
-            ui,
-            th,
-            "IRC with AT Protocol identity. Messages can be signed; DMs can be end-to-end encrypted. Any IRC client works as a guest.",
-        );
-        ui.add_space(sp.md);
-        ui.horizontal(|ui| {
-            if button(ui, th, "irc.freeq.at").clicked() {
-                state.form_server = "irc.freeq.at:6697".into();
-                state.form_tls = true;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                dim_label(ui, th, "powered by vidya");
-            });
-        });
-    });
-
     action
+}
+
+/// Banner + destructive clear when a previous Bluesky login is still cached.
+fn cached_account_row(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &AppState,
+    loading: bool,
+    action: &mut ConnectAction,
+) {
+    let sp = &th.spacing;
+    let who = state
+        .handle
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            let n = state.nick.as_str();
+            if n.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
+        })
+        .unwrap_or("saved account");
+    dim_label(ui, th, &format!("Saved account: {who}"));
+    ui.add_space(sp.xs);
+    if destructive_button(ui, th, "Clear saved account").clicked() && !loading {
+        *action = ConnectAction::ClearAccount;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,4 +212,6 @@ pub enum ConnectAction {
     BlueskyLogin,
     ApplyCallback,
     ReconnectSession,
+    /// Wipe disk + in-memory broker session so the next guest connect is clean.
+    ClearAccount,
 }

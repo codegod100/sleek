@@ -24,6 +24,14 @@ host *args:
     if [[ -n "${SLEEK_LD_LIBRARY_PATH:-}" ]]; then
       export LD_LIBRARY_PATH="${SLEEK_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
+    # v4l2r bindgen must use nix libclang, never Android NDK (missing libz.so.1).
+    if [[ -n "${SLEEK_LIBCLANG_PATH:-}" ]]; then
+      export LIBCLANG_PATH="${SLEEK_LIBCLANG_PATH}"
+    elif [[ -z "${LIBCLANG_PATH:-}" || "${LIBCLANG_PATH}" == *android-ndk* ]]; then
+      echo "sleek: LIBCLANG_PATH missing or points at Android NDK." >&2
+      echo "  Enter the flake shell first:  nix develop   or   just enter" >&2
+      exit 1
+    fi
     # Codespace / desktop-lite: GUI opens on the VNC X display.
     if [[ -n "${SLEEK_CODESPACE:-}" ]]; then
       export DISPLAY="${DISPLAY:-:1}"
