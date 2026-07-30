@@ -1,44 +1,15 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{
-    self, Align, Color32, CursorIcon, FontId, Layout, Rect, RichText, ScrollArea, Sense, Stroke,
-    Vec2,
+    self, Align, Color32, CursorIcon, Layout, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
-use vidya::{dim_label, title_2, Theme};
+use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
 
 use crate::preview::{self, Embed};
 use crate::state::{
     display_emoji, emoji_matches_search, Buffer, ChatMessage, EmojiPickerGroup, ImageState,
     LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT, QUICK_REACT_EMOJIS,
 };
-
-/// Small drawn/text icon set used by reaction chrome (kept local so we do not
-/// depend on unreleased `vidya` icon helpers).
-#[derive(Clone, Copy)]
-enum Icon {
-    Plus,
-}
-
-fn icon_colored(ui: &mut egui::Ui, color: Color32, icon: Icon, size: f32) {
-    let glyph = match icon {
-        Icon::Plus => "+",
-    };
-    ui.label(RichText::new(glyph).size(size).color(color).strong());
-}
-
-/// Paint an emoji glyph centered in `rect`. System color emoji often ignore
-/// `color`; it still tints monochrome fallbacks.
-fn paint_emoji_in(ui: &mut egui::Ui, rect: Rect, emoji: &str, color: Color32) {
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    let size = rect.height().min(rect.width()).max(1.0);
-    let galley = ui.fonts(|f| {
-        f.layout_no_wrap(emoji.to_owned(), FontId::proportional(size * 0.9), color)
-    });
-    let pos = rect.center() - galley.size() * 0.5;
-    ui.painter().galley(pos, galley, color);
-}
 
 /// Interaction from a chat message bubble.
 #[derive(Debug, Clone, Default)]
