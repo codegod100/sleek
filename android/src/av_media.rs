@@ -21,7 +21,9 @@ use iroh_live::media::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::av::{broadcast_path, path_key, should_tap, MicLevel, VideoFrameStore};
+use crate::av::{
+    broadcast_path, path_key, should_tap, MicLevel, VideoFrameStore, LOCAL_PREVIEW_KEY,
+};
 
 #[cfg(not(target_os = "android"))]
 use iroh_live::media::{
@@ -741,67 +743,7 @@ async fn run_media(
     // Second preview handle → dedicated pump into VideoFrameStore.
     #[cfg(not(target_os = "android"))]
     let mut preview_pump: Option<std::thread::JoinHandle<()>> = if has_camera {
-        match broadcast.preview() {
-            Some(mut track) => {
-                let store = video_store.clone();
-                let enabled = camera_enabled.clone();
-                match std::thread::Builder::new()
-                    .name("local-preview-pump".into())
-                    .spawn(move || {
-                        let mut logged = false;
-                        loop {
-                            if !enabled.load(Ordering::Relaxed) {
-                                store.remove("__local__");
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                continue;
-                            }
-                            // Non-blocking: try_recv drains latest frame from the
-                            // SharedVideoSource watch fan-out.
-                            if let Some(frame) = track.try_recv() {
-                                let (w, h) = (frame.width(), frame.height());
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let rgba = frame.rgba_image();
-                                    let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
-                                    (w, h, bytes)
-                                })) {
-                                    Ok((w, h, bytes)) => {
-                                        store.set("__local__", w, h, bytes);
-                                        if !logged {
-                                            logged = true;
-                                            log::info!(
-                                                "av-media: local preview pump first frame {w}x{h}"
-                                            );
-                                        }
-                                    }
-                                    Err(_) => {
-                                        log::warn!(
-                                            "av-media: local preview pump rgba_image panicked {w}x{h}"
-                                        );
-                                    }
-                                }
-                            } else if track.is_closed() {
-                                log::info!("av-media: local preview pump track closed");
-                                break;
-                            } else {
-                                std::thread::sleep(std::time::Duration::from_millis(10));
-                            }
-                        }
-                    }) {
-                    Ok(h) => {
-                        log::info!("av-media: local preview pump thread started");
-                        Some(h)
-                    }
-                    Err(e) => {
-                        log::warn!("av-media: local preview pump spawn failed: {e}");
-                        None
-                    }
-                }
-            }
-            None => {
-                log::warn!("av-media: second preview() for pump returned None");
-                None
-            }
-        }
+        spawn_local_preview_pump(&broadcast, video_store.clone(), camera_enabled.clone())
     } else {
         None
     };
@@ -914,7 +856,7 @@ async fn run_media(
                     MediaControl::SetCameraEnabled(en) => {
                         camera_enabled.store(en, Ordering::Relaxed);
                         if !en {
-                            video_store.remove("__local__");
+                            video_store.remove(LOCAL_PREVIEW_KEY);
                         }
                     }
                     MediaControl::SetMicDevice(name) => {
@@ -948,12 +890,17 @@ async fn run_media(
                     MediaControl::SetCameraDevice(id) => {
                         #[cfg(not(target_os = "android"))]
                         {
-                            // Drop old preview keepalive before replacing source.
+                            // Drop old preview keepalive + pump before replacing source.
                             preview_keepalive = None;
-                            video_store.remove("__local__");
+                            if let Some(h) = preview_pump.take() {
+                                // Track drop closes the pump; don't wait forever.
+                                let _ = h;
+                            }
+                            video_store.remove(LOCAL_PREVIEW_KEY);
                             local_frame_count.store(0, Ordering::Relaxed);
                             match open_camera(id.as_deref()) {
                                 Ok(cam) => {
+                                    let name = cam.name().to_string();
                                     let gated = GatedCameraSource {
                                         inner: cam,
                                         enabled: camera_enabled.clone(),
@@ -967,8 +914,21 @@ async fn run_media(
                                     ) {
                                         Ok(()) => {
                                             preview_keepalive = _broadcast.preview();
+                                            preview_pump = spawn_local_preview_pump(
+                                                &_broadcast,
+                                                video_store.clone(),
+                                                camera_enabled.clone(),
+                                            );
+                                            if is_virtual_camera(&name, id.as_deref().unwrap_or(""))
+                                            {
+                                                log::info!(
+                                                    "av-media: using virtual camera {name} — \
+                                                     in OBS: Controls → Start Virtual Camera \
+                                                     (otherwise self-view is blank)"
+                                                );
+                                            }
                                             log::info!(
-                                                "av-media: camera device switched to {id:?}"
+                                                "av-media: camera device switched to {id:?} ({name})"
                                             );
                                             on_status(AvMediaUpdate::Live {
                                                 video: video_store.clone(),
@@ -1271,10 +1231,14 @@ fn camera_config() -> CameraConfig {
 /// behavior was `CameraCapturer::open` only; SharedVideoSource starts streaming
 /// when the first preview/encoder subscriber arrives.
 ///
-/// Virtual nodes (OBS / v4l2loopback) are skipped unless no hardware camera
-/// opens successfully.
+/// Open preferred camera, then fall back through hardware. Virtual (OBS) is
+/// only used when the user **explicitly** preferred that id — never as a silent
+/// fallback when the USB cam is busy (OBS often holds `/dev/video0` while
+/// exposing `/dev/video10`).
 #[cfg(not(target_os = "android"))]
-fn open_camera_with_fallback(preferred: Option<&str>) -> Result<(CameraCapturer, Option<String>)> {
+fn open_camera_with_fallback(
+    preferred: Option<&str>,
+) -> Result<(Box<dyn VideoSource>, Option<String>)> {
     let config = camera_config();
     let preferred = preferred.filter(|s| !s.is_empty());
 
@@ -1313,54 +1277,40 @@ fn open_camera_with_fallback(preferred: Option<&str>) -> Result<(CameraCapturer,
             .unwrap_or_else(|| is_virtual_camera(id, id))
     };
 
-    // Hardware candidates first (preferred real cam at front).
-    let mut hardware: Vec<Option<String>> = Vec::new();
-    let mut virtuals: Vec<Option<String>> = Vec::new();
+    let mut candidates: Vec<Option<String>> = Vec::new();
 
+    // Explicit preference first (including virtual if the user picked OBS).
     if let Some(id) = preferred {
+        candidates.push(Some(id.to_string()));
         if is_virt(id) {
             log::info!(
-                "av-media: ignoring virtual preferred camera {id} until hardware fails"
+                "av-media: preferred {id} is virtual (OBS) — opening it first. \
+                 USB cam may be busy because OBS is using it as a source."
             );
-            virtuals.push(Some(id.to_string()));
-        } else {
-            hardware.push(Some(id.to_string()));
         }
     }
 
-    let mut cams = listed;
+    // Then non-virtual hardware (skip virtuals for auto-pick).
+    let mut cams = listed.clone();
     cams.sort_by(|a, b| {
-        let av = is_virtual_camera(&a.name, &a.id);
-        let bv = is_virtual_camera(&b.name, &b.id);
-        av.cmp(&bv)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
     });
     for c in cams {
-        let id = c.id.clone();
-        let already = |list: &[Option<String>]| {
-            list.iter()
-                .any(|x| x.as_deref() == Some(id.as_str()) || x.as_deref() == Some(c.name.as_str()))
-        };
-        if c.supported_formats.is_empty() {
-            log::debug!(
-                "av-media: skip camera {} ({}): no supported formats",
-                c.name,
-                c.id
-            );
+        if is_virtual_camera(&c.name, &c.id) {
             continue;
         }
-        if is_virtual_camera(&c.name, &c.id) {
-            if !already(&virtuals) && !already(&hardware) {
-                virtuals.push(Some(id));
-            }
-        } else if !already(&hardware) {
-            hardware.push(Some(id));
+        if c.supported_formats.is_empty() {
+            continue;
         }
+        if candidates.iter().any(|x| {
+            x.as_deref() == Some(c.id.as_str()) || x.as_deref() == Some(c.name.as_str())
+        }) {
+            continue;
+        }
+        candidates.push(Some(c.id));
     }
-
-    // Try hardware, then virtual, then system default.
-    let mut candidates = hardware;
-    candidates.extend(virtuals);
     if !candidates.iter().any(|c| c.is_none()) {
         candidates.push(None);
     }
@@ -1368,21 +1318,38 @@ fn open_camera_with_fallback(preferred: Option<&str>) -> Result<(CameraCapturer,
     let mut errors: Vec<String> = Vec::new();
     for cand in &candidates {
         let label = cand.as_deref().unwrap_or("(default)");
-        match CameraCapturer::open(None, cand.as_deref(), &config) {
+        match open_camera_with_busy_retry(cand.as_deref(), &config) {
             Ok(cam) => {
-                log::info!(
-                    "av-media: opened camera id={label:?} name={}",
-                    cam.name()
-                );
-                if preferred.is_some_and(|p| Some(p) != cand.as_deref()) {
+                let name = cam.name().to_string();
+                // Reject *accidental* virtual from default open when user did not
+                // prefer virtual.
+                let user_wants_virtual = preferred.is_some_and(|p| is_virt(p));
+                if is_virtual_camera(&name, label) && !user_wants_virtual {
                     log::warn!(
-                        "av-media: preferred camera {preferred:?} not used; using {label}"
+                        "av-media: rejecting auto-opened virtual camera {name} ({label})"
+                    );
+                    errors.push(format!("{label}: rejected virtual {name}"));
+                    continue;
+                }
+                if is_virtual_camera(&name, label) {
+                    log::info!(
+                        "av-media: opened virtual camera {name} — ensure OBS has \
+                         'Start Virtual Camera' enabled or self-view will be blank"
                     );
                 }
+                log::info!("av-media: opened camera id={label:?} name={name}");
                 return Ok((cam, cand.clone()));
             }
             Err(e) => {
-                log::warn!("av-media: open camera {label}: {e:#}");
+                let msg = format!("{e:#}");
+                if msg.contains("busy") {
+                    log::warn!(
+                        "av-media: open camera {label}: {msg} \
+                         (often OBS or another app holds the USB cam)"
+                    );
+                } else {
+                    log::warn!("av-media: open camera {label}: {msg}");
+                }
                 errors.push(format!("{label}: {e}"));
             }
         }
@@ -1393,9 +1360,173 @@ fn open_camera_with_fallback(preferred: Option<&str>) -> Result<(CameraCapturer,
     ))
 }
 
+/// Open one device; retry briefly on "busy" (race with OBS / previous session).
+///
+/// v4l2loopback nodes (OBS Virtual Camera) are routed to
+/// [`crate::v4l2cam::V4l2MmapCapture`]: rusty-capture's dqbuf leaves the
+/// `memory` field 0, which loopback drivers reject with EINVAL on the first
+/// frame (silent blank self-view). Hardware cams keep rusty-capture.
+#[cfg(not(target_os = "android"))]
+fn open_camera_with_busy_retry(
+    id: Option<&str>,
+    config: &CameraConfig,
+) -> Result<Box<dyn VideoSource>> {
+    // Loopback devices get the dqbuf-fixed capturer (no busy-retry needed —
+    // loopback nodes are multi-reader, "busy" doesn't apply the same way).
+    #[cfg(target_os = "linux")]
+    {
+        // Resolve `(default)` to the first listed device so a loopback first
+        // entry (e.g. OBS-only setups) also lands on the fixed capture path.
+        let resolved: Option<String> = match id {
+            Some(p) if p.starts_with("/dev/video") => Some(p.to_string()),
+            Some(_) => None, // name, not a device path — rusty-capture handles
+            None => CameraCapturer::list()
+                .ok()
+                .and_then(|c| c.into_iter().next())
+                .map(|c| c.id)
+                .filter(|p| p.starts_with("/dev/video")),
+        };
+        if let Some(path) = resolved {
+            if crate::v4l2cam::is_loopback_device(&path) {
+                let (w, h) = match config.selector {
+                    CameraSelector::TargetResolution(w, h) => (w, h),
+                    _ => (640, 360),
+                };
+                let cam = crate::v4l2cam::V4l2MmapCapture::open(&path, w, h)
+                    .with_context(|| format!("loopback open {path}"))?;
+                log::info!("av-media: using dqbuf-fixed capture for loopback {path}");
+                return Ok(Box::new(cam));
+            }
+        }
+    }
+
+    const ATTEMPTS: u32 = 4;
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        match CameraCapturer::open(None, id, config) {
+            Ok(cam) => return Ok(Box::new(cam)),
+            Err(e) => {
+                let busy = e.to_string().to_ascii_lowercase().contains("busy");
+                last = Some(e);
+                if busy && attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(150 * (attempt + 1) as u64));
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("open failed")))
+}
+
+/// Luma (Rec.601 approx) min/max across RGBA bytes — used by live diagnostics
+/// and tests to detect a real camera picture vs a blank/uniform buffer.
+/// Ships with the crate (not test-only) so pump/tee logs report real content.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn rgba_luma_range(rgba: &[u8]) -> (u8, u8) {
+    let mut min = 255u8;
+    let mut max = 0u8;
+    for px in rgba.chunks_exact(4) {
+        let l = ((77u32 * px[0] as u32 + 150u32 * px[1] as u32 + 29u32 * px[2] as u32) >> 8) as u8;
+        min = min.min(l);
+        max = max.max(l);
+    }
+    (min, max)
+}
+
+/// Pump `broadcast.preview()` frames into `__local__` for self-view.
+#[cfg(not(target_os = "android"))]
+fn spawn_local_preview_pump(
+    broadcast: &LocalBroadcast,
+    store: VideoFrameStore,
+    enabled: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let mut track = match broadcast.preview() {
+        Some(t) => t,
+        None => {
+            log::warn!("av-media: preview() for pump returned None");
+            return None;
+        }
+    };
+    match std::thread::Builder::new()
+        .name("local-preview-pump".into())
+        .spawn(move || {
+            let mut logged = false;
+            let mut pump_waited_ms = 0u64;
+            let mut warned_no_frames = false;
+            loop {
+                if !enabled.load(Ordering::Relaxed) {
+                    store.remove(LOCAL_PREVIEW_KEY);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                if let Some(frame) = track.try_recv() {
+                    let (w, h) = (frame.width(), frame.height());
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let rgba = frame.rgba_image();
+                        let bytes: Arc<[u8]> = rgba.as_raw().as_slice().into();
+                        (w, h, bytes)
+                    })) {
+                        Ok((w, h, bytes)) => {
+                            let (r0, g0, b0, a0) = bytes
+                                .get(0..4)
+                                .map(|p| (p[0], p[1], p[2], p[3]))
+                                .unwrap_or((0, 0, 0, 0));
+                            let (luma_min, luma_max) = rgba_luma_range(&bytes);
+                            store.set(LOCAL_PREVIEW_KEY, w, h, bytes);
+                            if !logged {
+                                logged = true;
+                                log::info!(
+                                    "av-media: local preview pump first frame {w}x{h} \
+                                     rgba0=({r0},{g0},{b0},{a0}) luma={luma_min}..{luma_max}"
+                                );
+                                if luma_max == luma_min {
+                                    log::warn!(
+                                        "av-media: local preview frame is uniform \
+                                         (blank capture?) — OBS Virtual Camera not started?"
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "av-media: local preview pump rgba_image panicked {w}x{h}"
+                            );
+                        }
+                    }
+                } else if track.is_closed() {
+                    log::info!("av-media: local preview pump track closed");
+                    break;
+                } else {
+                    // Warn once if capture is up but never yields a frame
+                    // (dead OBS virtual node, busy device, etc.).
+                    if !logged && pump_waited_ms >= 3_000 && !warned_no_frames {
+                        warned_no_frames = true;
+                        log::warn!(
+                            "av-media: no local preview frames after {}ms — camera capture \
+                             is not producing (OBS Virtual Camera not started, or device busy)",
+                            pump_waited_ms
+                        );
+                    }
+                    pump_waited_ms = pump_waited_ms.saturating_add(10);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }) {
+        Ok(h) => {
+            log::info!("av-media: local preview pump thread started");
+            Some(h)
+        }
+        Err(e) => {
+            log::warn!("av-media: local preview pump spawn failed: {e}");
+            None
+        }
+    }
+}
+
 /// Mid-call device switch uses the same fallback path.
 #[cfg(not(target_os = "android"))]
-fn open_camera(id: Option<&str>) -> Result<CameraCapturer> {
+fn open_camera(id: Option<&str>) -> Result<Box<dyn VideoSource>> {
     open_camera_with_fallback(id).map(|(c, _)| c)
 }
 
@@ -1403,9 +1534,13 @@ fn open_camera(id: Option<&str>) -> Result<CameraCapturer> {
 /// H.264 track stays in the catalog. Always tees enabled frames into
 /// `__local__` for self-view (requires a SharedVideoSource subscriber — we
 /// hold `broadcast.preview()` as keepalive).
+///
+/// `inner` is boxed so v4l2loopback devices (OBS Virtual Camera) can use the
+/// loopback-safe [`crate::v4l2cam::V4l2MmapCapture`] instead of rusty-capture's
+/// `CameraCapturer` (whose v4l2r dqbuf leaves `memory=0` → EINVAL on loopback).
 #[cfg(not(target_os = "android"))]
 struct GatedCameraSource {
-    inner: CameraCapturer,
+    inner: Box<dyn VideoSource>,
     enabled: Arc<AtomicBool>,
     preview: VideoFrameStore,
     frame_count: Arc<AtomicU64>,
@@ -1432,12 +1567,40 @@ impl VideoSource for GatedCameraSource {
     fn pop_frame(
         &mut self,
     ) -> anyhow::Result<Option<iroh_live::media::format::VideoFrame>> {
-        let frame = self.inner.pop_frame()?;
+        let frame = match self.inner.pop_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                // Surface real capture failures (e.g. OBS Virtual Camera not
+                // started → v4l2loopback dqbuf EINVAL; busy USB cam → EBUSY).
+                // Upstream SharedVideoSource stops the capture thread silently
+                // on Err — that left users staring at a blank tile with no log.
+                let msg = format!("{e:#}");
+                let already = self.frame_count.load(Ordering::Relaxed) > 0;
+                let key = if msg.contains("EINVAL") {
+                    "virtual camera not producing (start OBS Virtual Camera output?)"
+                } else if msg.contains("EBUSY") || msg.contains("busy") {
+                    "camera busy (held by OBS or another app?)"
+                } else {
+                    "capture error"
+                };
+                log::warn!(
+                    "av-media: camera {} pop_frame failed: {msg} — {key} {}",
+                    self.inner.name(),
+                    if already {
+                        "(frames had been flowing)"
+                    } else {
+                        "(no frames ever captured)"
+                    }
+                );
+                self.preview.remove(LOCAL_PREVIEW_KEY);
+                return Err(e);
+            }
+        };
         if !self.enabled.load(Ordering::Relaxed) {
             // Drain so the capture pipeline doesn't back up; hide self-view.
             // Peers still have the video track in the catalog but get no frames
             // until the camera is turned back on.
-            self.preview.remove("__local__");
+            self.preview.remove(LOCAL_PREVIEW_KEY);
             let n = self.frame_count.load(Ordering::Relaxed);
             if n > 0 && n % 300 == 0 {
                 log::debug!("av-media: camera gated off (publish idle), drained={n}");
@@ -1453,14 +1616,31 @@ impl VideoSource for GatedCameraSource {
                 (w, h, bytes)
             })) {
                 Ok((w, h, bytes)) => {
-                    self.preview.set("__local__", w, h, bytes);
+                    // Sample first pixel + luma range for blank/alpha diagnostics.
+                    let (r0, g0, b0, a0) = bytes
+                        .get(0..4)
+                        .map(|p| (p[0], p[1], p[2], p[3]))
+                        .unwrap_or((0, 0, 0, 0));
+                    let (luma_min, luma_max) = rgba_luma_range(&bytes);
+                    self.preview.set(LOCAL_PREVIEW_KEY, w, h, bytes);
                     let n = self.frame_count.fetch_add(1, Ordering::Relaxed);
                     if n == 0 {
                         log::info!(
-                            "av-media: first published/preview frame {w}x{h} (outbound video live)"
+                            "av-media: first published/preview frame {w}x{h} \
+                             rgba0=({r0},{g0},{b0},{a0}) luma={luma_min}..{luma_max} \
+                             (outbound video live)"
                         );
+                        if luma_max == luma_min {
+                            log::warn!(
+                                "av-media: published frame is uniform (blank capture?) — \
+                                 OBS Virtual Camera not started?"
+                            );
+                        }
                     } else if n == 30 || n == 300 || n == 3000 {
-                        log::info!("av-media: published frames={n} ({w}x{h})");
+                        log::info!(
+                            "av-media: published frames={n} ({w}x{h}) \
+                             rgba0=({r0},{g0},{b0},{a0}) luma={luma_min}..{luma_max}"
+                        );
                     }
                 }
                 Err(_) => {
@@ -1679,6 +1859,63 @@ mod tests {
     };
     use n0_future::boxed::BoxFuture;
     use std::time::Duration;
+
+    /// Real-device check (Linux): open a camera with the same capture crate the
+    /// app uses, pull frames, assert non-uniform content. Uses
+    /// `SLEEK_TEST_CAMERA_ID` (e.g. `/dev/video10`) when set, else default.
+    /// Skips with a printed reason when the device is busy or absent.
+    #[cfg(all(test, not(target_os = "android")))]
+    #[test]
+    fn real_camera_capture_produces_nonuniform_frames() {
+        let id = std::env::var("SLEEK_TEST_CAMERA_ID").ok();
+        let Ok(mut cam) = CameraCapturer::open(None, id.as_deref(), &camera_config()) else {
+            eprintln!("SKIP real_camera id={id:?}: open failed (busy/absent)");
+            return;
+        };
+        if let Err(e) = cam.start() {
+            eprintln!("SKIP real_camera id={id:?}: start failed: {e}");
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(2_500);
+        let mut frame = None;
+        while std::time::Instant::now() < deadline {
+            match cam.pop_frame() {
+                Ok(Some(f)) => {
+                    frame = Some(f);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => {
+                    let _ = cam.stop();
+                    eprintln!("SKIP real_camera id={id:?}: pop_frame error: {e}");
+                    return;
+                }
+            }
+        }
+        let _ = cam.stop();
+        let Some(f) = frame else {
+            eprintln!(
+                "SKIP real_camera id={id:?}: no frames (OBS Virtual Camera not started?)"
+            );
+            return;
+        };
+        let (w, h) = (f.width(), f.height());
+        let rgba = f.rgba_image();
+        let bytes = rgba.as_raw().as_slice();
+        let (min, max) = rgba_luma_range(bytes);
+        let (r0, g0, b0, a0) = bytes
+            .get(0..4)
+            .map(|p| (p[0], p[1], p[2], p[3]))
+            .unwrap_or((0, 0, 0, 0));
+        eprintln!(
+            "camera id={id:?} {w}x{h} rgba0=({r0},{g0},{b0},{a0}) luma range {min}..{max}"
+        );
+        assert!(
+            max > min,
+            "real camera frame must be non-uniform (luma range {min}..{max}); \
+             got a blank/uniform buffer"
+        );
+    }
 
     /// Source that always returns `None` — models cpal InputNotReady.
     struct AlwaysNone;

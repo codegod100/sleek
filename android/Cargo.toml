@@ -111,6 +111,9 @@ iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc53
 # Without this we only see ALSA PCMs ("pipewire", "sysdefault") and cannot pick
 # the real OS sources the browser uses (e.g. "EMEET SmartCam C960 Mono").
 cpal = { path = "../vendor/cpal", features = ["pipewire"] }
+# V4L2 diagnostics + fallback capture path (probe example, loopback workaround).
+v4l2r = "0.0.7"
+libc = "0.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = [

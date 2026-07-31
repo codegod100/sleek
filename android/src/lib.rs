@@ -10,6 +10,10 @@ mod preview;
 mod state;
 mod ui;
 
+/// V4L2 MMAP capture with spec-correct dqbuf (v4l2loopback/OBS workaround).
+#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+mod v4l2cam;
+
 #[cfg(target_os = "android")]
 mod android_media;
 

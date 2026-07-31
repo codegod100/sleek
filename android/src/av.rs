@@ -39,6 +39,9 @@ pub struct LocalCall {
     pub awaiting_start: bool,
 }
 
+/// Frame-store key for the local self-view tile (capture tee / preview pump).
+pub const LOCAL_PREVIEW_KEY: &str = "__local__";
+
 /// One decoded remote video frame (RGBA8), shared UI ↔ media task.
 #[derive(Clone)]
 pub struct RgbaVideoFrame {
@@ -88,6 +91,9 @@ impl VideoFrameStore {
         if rgba.len() != expected {
             return;
         }
+        // Camera / decoder paths sometimes leave alpha at 0 (OBS virtual cam,
+        // some MJPEG converters). egui then draws a fully transparent tile.
+        let rgba = force_opaque_rgba(rgba);
         if let Ok(mut g) = self.frames.lock() {
             g.insert(
                 nick.into(),
@@ -123,6 +129,36 @@ impl VideoFrameStore {
     pub fn is_empty(&self) -> bool {
         self.frames.lock().map(|g| g.is_empty()).unwrap_or(true)
     }
+}
+
+/// Ensure every pixel has alpha = 255 (opaque). Cheap in-place when already opaque.
+fn force_opaque_rgba(rgba: Arc<[u8]>) -> Arc<[u8]> {
+    Arc::from(opaque_rgba_bytes(rgba.as_ref()))
+}
+
+/// Force every alpha byte to 255 for egui texture upload.
+///
+/// Camera / OBS virtual paths sometimes deliver `A=0`; unpremultiplied upload
+/// then paints a fully transparent tile (looks like a blank square).
+pub fn opaque_rgba_bytes(rgba: &[u8]) -> Vec<u8> {
+    let mut v = rgba.to_vec();
+    for a in v.iter_mut().skip(3).step_by(4) {
+        *a = 255;
+    }
+    v
+}
+
+/// Pad/truncate to `width * height * 4` and force opaque alpha — used by the
+/// call tile texture path so A=0 frames cannot paint transparent.
+pub fn prepare_opaque_rgba_for_upload(width: usize, height: usize, rgba: &[u8]) -> Vec<u8> {
+    let n = width.saturating_mul(height).saturating_mul(4);
+    let mut buf = vec![0u8; n];
+    let copy = rgba.len().min(n);
+    buf[..copy].copy_from_slice(&rgba[..copy]);
+    for a in buf.iter_mut().skip(3).step_by(4) {
+        *a = 255;
+    }
+    buf
 }
 
 /// Live mic input level (0.0..=1.0) shared between the capture thread and UI.
@@ -454,9 +490,11 @@ pub fn should_tap(path: &str, session_id: &str, our_broadcast: &str, my_nick: &s
 #[cfg(test)]
 mod tests {
     use super::{
-        broadcast_path, can_dial_sfu, channel_from_collision_reason, path_key, path_nick,
-        session_id_from_collision_reason, sfu_moq_dial_url, sfu_moq_url,
+        broadcast_path, can_dial_sfu, channel_from_collision_reason, opaque_rgba_bytes, path_key,
+        path_nick, prepare_opaque_rgba_for_upload, session_id_from_collision_reason,
+        sfu_moq_dial_url, sfu_moq_url, VideoFrameStore, LOCAL_PREVIEW_KEY,
     };
+    use std::sync::Arc;
 
     #[test]
     fn path_key_keeps_instance_path_nick_strips() {
@@ -467,6 +505,116 @@ mod tests {
         assert_eq!(path_nick("01SESSION/alice~phone"), "alice");
         assert_eq!(path_key("01SESSION/bob"), "bob");
         assert_eq!(path_nick("bob~desk"), "bob");
+    }
+
+    #[test]
+    fn opaque_rgba_bytes_forces_alpha_255_on_zero_alpha_input() {
+        // Two pixels: red + blue, both fully transparent (A=0).
+        let input = [255u8, 0, 0, 0, 0, 0, 255, 0];
+        let out = opaque_rgba_bytes(&input);
+        assert_eq!(out.len(), 8);
+        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&out[4..8], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn prepare_opaque_rgba_for_upload_pads_and_forces_alpha() {
+        // 2×2 frame but only one pixel of data (undersized / partial buffer).
+        let input = [10u8, 20, 30, 0];
+        let out = prepare_opaque_rgba_for_upload(2, 2, &input);
+        assert_eq!(out.len(), 2 * 2 * 4);
+        assert_eq!(out[3], 255, "first pixel alpha forced");
+        assert_eq!(out[7], 255);
+        assert_eq!(out[11], 255);
+        assert_eq!(out[15], 255);
+        assert_eq!(&out[0..3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn video_frame_store_set_local_key_forces_opaque_alpha() {
+        let store = VideoFrameStore::new();
+        // 2×2 with A=0 on every pixel (the “alpha blank” failure mode).
+        let mut rgba = Vec::with_capacity(2 * 2 * 4);
+        for i in 0..4 {
+            rgba.extend_from_slice(&[i as u8 * 40, 80, 120, 0]);
+        }
+        store.set(LOCAL_PREVIEW_KEY, 2, 2, Arc::from(rgba));
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, LOCAL_PREVIEW_KEY);
+        let frame = &snap[0].1;
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.rgba.len(), 16);
+        for (i, a) in frame.rgba.iter().skip(3).step_by(4).enumerate() {
+            assert_eq!(*a, 255, "pixel {i} alpha must be opaque after store.set");
+        }
+        // RGB preserved from input (first pixel was 0,80,120,0 → A forced).
+        assert_eq!(&frame.rgba[0..4], &[0, 80, 120, 255]);
+    }
+
+    #[test]
+    fn prepare_opaque_upload_preserves_patterned_rgb_bytes() {
+        // 4×4 gradient, alternating alpha 0/128/255 — every RGB byte must
+        // survive, alpha must become 255, and result must be non-uniform.
+        let (w, h) = (4usize, 4usize);
+        let mut input = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let alpha = match i % 3 {
+                    0 => 0u8,
+                    1 => 128u8,
+                    _ => 255u8,
+                };
+                input.extend_from_slice(&[
+                    (x * 32) as u8,
+                    (y * 32) as u8,
+                    ((x + y) * 16) as u8,
+                    alpha, // varying alpha incl 0
+                ]);
+            }
+        }
+        let out = prepare_opaque_rgba_for_upload(w, h, &input);
+        assert_eq!(out.len(), w * h * 4);
+        for (i, in_px) in input.chunks_exact(4).enumerate() {
+            let o = i * 4;
+            assert_eq!(out[o], in_px[0], "pixel {i} R changed");
+            assert_eq!(out[o + 1], in_px[1], "pixel {i} G changed");
+            assert_eq!(out[o + 2], in_px[2], "pixel {i} B changed");
+            assert_eq!(out[o + 3], 255, "pixel {i} alpha not opaque");
+        }
+        // Non-uniform: a patterned camera-like frame must stay patterned.
+        let first = &out[0..4];
+        assert!(
+            out.chunks_exact(4).any(|p| p != first),
+            "patterned input must not collapse to a uniform tile"
+        );
+    }
+
+    #[test]
+    fn video_frame_store_preserves_rgb_variance_for_patterned_frame() {
+        // Simulated camera-ish frame: horizontal gradient, real content.
+        let store = VideoFrameStore::new();
+        let (w, h) = (16u32, 2u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[(x * 16) as u8, (y * 120) as u8, 200u8, 0u8]);
+            }
+        }
+        store.set(LOCAL_PREVIEW_KEY, w, h, Arc::from(rgba));
+        let frame = store.snapshot().pop().unwrap().1;
+        // Alpha opaque, RGB unchanged, non-uniform (variance > 0).
+        let r_vals: Vec<u8> = frame.rgba.iter().step_by(4).copied().collect();
+        let min = *r_vals.iter().min().unwrap();
+        let max = *r_vals.iter().max().unwrap();
+        assert!(max > min, "real camera-like content must have pixel variance");
+        for a in frame.rgba.iter().skip(3).step_by(4) {
+            assert_eq!(*a, 255);
+        }
+        assert_eq!(frame.rgba[0], 0);
+        assert_eq!(frame.rgba[4], 16);
     }
 
     #[test]

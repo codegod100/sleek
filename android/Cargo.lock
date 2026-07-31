@@ -6905,6 +6905,7 @@ dependencies = [
  "image",
  "iroh-live",
  "jni 0.22.4",
+ "libc",
  "log",
  "moq-lite",
  "moq-native",
@@ -6918,6 +6919,7 @@ dependencies = [
  "tokio",
  "url",
  "urlencoding",
+ "v4l2r",
  "vidya",
  "winit",
 ]

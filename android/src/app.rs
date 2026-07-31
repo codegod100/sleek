@@ -1084,28 +1084,6 @@ impl SleekApp {
                 }
             }
         }
-        // Scrub virtual camera prefs before dial (OBS /dev/video10 etc.). The
-        // media plane also prefers hardware, but a sticky virtual id confuses
-        // the Devices UI and keeps getting re-persisted on leave.
-        if let Some(id) = self.state.av_pref_camera_id.as_deref() {
-            let cams = crate::av_media::list_cameras();
-            let is_virt = cams
-                .iter()
-                .find(|c| c.id == id || c.name == id)
-                .map(|c| {
-                    let s = format!("{} {}", c.name, c.id).to_ascii_lowercase();
-                    s.contains("virtual")
-                        || s.contains("obs")
-                        || s.contains("loopback")
-                        || s.contains("v4l2loopback")
-                })
-                .unwrap_or(false);
-            if is_virt {
-                log::info!("av-media: clearing virtual camera pref {id:?} before dial");
-                self.state.av_pref_camera_id = None;
-                self.state.persist_av_prefs();
-            }
-        }
         log::info!(
             "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?}",
             self.state.av_pref_camera_id,

@@ -1771,7 +1771,9 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
         .local_call
         .as_ref()
         .is_some_and(|lc| lc.has_camera && lc.camera);
-    let has_local = frames.iter().any(|(k, _)| k == "__local__");
+    let has_local = frames
+        .iter()
+        .any(|(k, _)| k == crate::av::LOCAL_PREVIEW_KEY);
     if want_local && !has_local {
         // Distinct warm-up pattern (not solid black) so users can tell
         // "waiting for first frame" from a dead tile.
@@ -1784,7 +1786,7 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             }
         }
         frames.push((
-            "__local__".into(),
+            crate::av::LOCAL_PREVIEW_KEY.into(),
             crate::av::RgbaVideoFrame {
                 width: 8,
                 height: 8,
@@ -1797,8 +1799,8 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     }
     // Local preview first, then remotes alphabetically (key = nick or nick~instance).
     frames.sort_by(|a, b| {
-        let a_local = a.0 == "__local__";
-        let b_local = b.0 == "__local__";
+        let a_local = a.0 == crate::av::LOCAL_PREVIEW_KEY;
+        let b_local = b.0 == crate::av::LOCAL_PREVIEW_KEY;
         b_local
             .cmp(&a_local)
             .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
@@ -1821,8 +1823,12 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     // Upload / refresh GPU textures first so paint helpers only need ids + dims.
     let mut tiles: Vec<(String, egui::TextureId, u32, u32)> = Vec::with_capacity(frames.len());
     for (key, frame) in &frames {
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [frame.width as usize, frame.height as usize],
+        // Build an *opaque* ColorImage from RGB only. Camera/OBS paths sometimes
+        // deliver A=0 (or weird alpha); from_rgba_unmultiplied then draws a
+        // fully transparent tile that looks like an empty square.
+        let color = color_image_opaque_rgb(
+            frame.width as usize,
+            frame.height as usize,
             frame.rgba.as_ref(),
         );
         let tex_id = match state.av_video_textures.entry(key.clone()) {
@@ -1968,6 +1974,12 @@ fn paint_av_video_grid(
         });
 }
 
+/// Build a fully opaque `ColorImage` via the shipped [`crate::av::prepare_opaque_rgba_for_upload`].
+fn color_image_opaque_rgb(width: usize, height: usize, rgba: &[u8]) -> egui::ColorImage {
+    let buf = crate::av::prepare_opaque_rgba_for_upload(width, height, rgba);
+    egui::ColorImage::from_rgba_unmultiplied([width, height], &buf)
+}
+
 /// One clickable video tile. Allocates an exact cell so neighbours cannot share space.
 fn paint_av_video_tile(
     ui: &mut egui::Ui,
@@ -1982,7 +1994,7 @@ fn paint_av_video_tile(
     let sp = &th.spacing;
     let p = &th.palette;
     // Store keys are `nick`, `nick~instance`, or `__local__`.
-    let label = if key == "__local__" {
+    let label = if key == crate::av::LOCAL_PREVIEW_KEY {
         "You".to_string()
     } else {
         crate::av::path_nick(key).to_string()
