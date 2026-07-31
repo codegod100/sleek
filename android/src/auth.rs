@@ -59,6 +59,9 @@ pub struct SavedPrefs {
     /// Join / start next call with mic muted.
     #[serde(default)]
     pub av_pref_muted: bool,
+    /// Join / start next call with speaker (remote audio) muted.
+    #[serde(default)]
+    pub av_pref_speaker_muted: bool,
     /// Publish camera when hardware is available (desktop MoQ).
     #[serde(default = "default_true")]
     pub av_pref_camera: bool,
@@ -81,6 +84,7 @@ impl Default for SavedPrefs {
     fn default() -> Self {
         Self {
             av_pref_muted: false,
+            av_pref_speaker_muted: false,
             av_pref_camera: true,
             av_pref_camera_id: None,
             av_pref_mic_id: None,
@@ -666,15 +670,18 @@ mod tests {
     fn prefs_defaults_and_roundtrip() {
         let d = SavedPrefs::default();
         assert!(!d.av_pref_muted);
+        assert!(!d.av_pref_speaker_muted);
         assert!(d.av_pref_camera);
         assert_eq!(d.recent_channels, vec!["#general".to_string()]);
         // Missing camera field should default to true (join with camera ready).
         let partial: SavedPrefs = serde_json::from_str(r#"{"av_pref_muted":true}"#).unwrap();
         assert!(partial.av_pref_muted);
+        assert!(!partial.av_pref_speaker_muted);
         assert!(partial.av_pref_camera);
         assert_eq!(partial.recent_channels, vec!["#general".to_string()]);
         let empty: SavedPrefs = serde_json::from_str("{}").unwrap();
         assert!(!empty.av_pref_muted);
+        assert!(!empty.av_pref_speaker_muted);
         assert!(empty.av_pref_camera);
         assert_eq!(empty.recent_channels, vec!["#general".to_string()]);
         // Explicit list round-trips (escape JSON so `#` is not inside a raw string).

@@ -880,6 +880,9 @@ pub struct AppState {
     /// Preferred mic mute for the next call (and mirrored while in-call).
     /// Toggleable before start/join so you can join muted. Persisted in prefs.json.
     pub av_pref_muted: bool,
+    /// Preferred speaker mute (remote audio off) for the next call / in-call.
+    /// Toggleable before start/join. Persisted in prefs.json.
+    pub av_pref_speaker_muted: bool,
     /// Preferred camera publish for the next call (desktop MoQ).
     /// Toggleable before start/join; applied when hardware is available.
     /// Persisted in prefs.json (survives logout).
@@ -908,6 +911,9 @@ pub struct AppState {
     /// In-call / pre-call: show Cam/Mic/Out pickers (collapsed by default mid-call
     /// so mute/leave stay uncluttered; expanded when the user opens Devices).
     pub av_show_devices: bool,
+    /// In-call theater mode: video fills the app viewport (hides chat/tabs chrome).
+    /// Not OS window fullscreen — just the call UI taking the full window.
+    pub av_fullscreen: bool,
 
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
@@ -992,6 +998,7 @@ impl AppState {
             auto_guest_connect: false,
             local_call: None,
             av_pref_muted: prefs.av_pref_muted,
+            av_pref_speaker_muted: prefs.av_pref_speaker_muted,
             av_pref_camera: prefs.av_pref_camera,
             av_pref_camera_id: prefs.av_pref_camera_id.filter(|s| !s.is_empty()),
             // Clear ALSA virtual PCMs (sysdefault/dmix/…) — they break under
@@ -1008,6 +1015,7 @@ impl AppState {
             av_device_mics: Vec::new(),
             av_device_speakers: Vec::new(),
             av_show_devices: false,
+            av_fullscreen: false,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
@@ -1164,6 +1172,7 @@ impl AppState {
     pub fn persist_prefs(&self) {
         let prefs = crate::auth::SavedPrefs {
             av_pref_muted: self.av_pref_muted,
+            av_pref_speaker_muted: self.av_pref_speaker_muted,
             av_pref_camera: self.av_pref_camera,
             av_pref_camera_id: self.av_pref_camera_id.clone(),
             av_pref_mic_id: self.av_pref_mic_id.clone(),
@@ -1550,6 +1559,7 @@ impl AppState {
         self.av_focused_video = None;
         // Next call starts with a clean control strip (Devices collapsed).
         self.av_show_devices = false;
+        self.av_fullscreen = false;
     }
 
     /// Full sign-out: disconnect buffers + wipe cached account / guest so the

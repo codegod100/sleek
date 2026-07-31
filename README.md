@@ -31,11 +31,17 @@ just waydroid      # APK → install → launch on Waydroid (x86_64)
 
 # Or via the flake (builds desktop host into ./result):
 nix build          # → ./result/bin/sleek
-nix run            # build + run desktop host
+nix run            # pure Nix store binary (hermetic)
+nix run .#host     # in-tree cargo run (iterative; needs sibling vidya/freeq)
 
 # Phone APK (aarch64) + adb install:
+# Fast iterate (in-tree cargo-apk + deploy — needs sibling vidya/freeq path deps):
+nix run .#deploy-android              # cargo apk + adb install -r
+nix run .#deploy-android -- --launch  # …and start the activity
+nix run .#deploy-android -- --release --launch
+# Pure Nix store build (reproducible / Cachix):
 just android                   # nix build .#android — auto-pushes to Cachix when auth is set
-nix run .#install-android      # adb install -r that APK
+nix run .#install-android      # adb install -r that store APK
 nix run .#install-android -- --launch
 
 # Manual push of an existing out-link:

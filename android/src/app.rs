@@ -113,7 +113,10 @@ pub fn run_android(android_app: winit::platform::android::activity::AndroidApp) 
     eframe::run_native(
         "Sleek",
         options,
-        Box::new(|cc| Ok(Box::new(SleekApp::new(cc, false)))),
+        // Always fill the real display — portrait *and* landscape. The desktop
+        // path uses fill=false for a 480px phone column; that must not apply
+        // when the device is rotated wide.
+        Box::new(|cc| Ok(Box::new(SleekApp::new(cc, true)))),
     )
 }
 
@@ -348,6 +351,7 @@ impl SleekApp {
                         instance: instance.clone(),
                         token: None,
                         muted: self.state.av_pref_muted,
+                        speaker_muted: self.state.av_pref_speaker_muted,
                         camera: self.state.av_pref_camera,
                         has_camera: false,
                         has_mic: false,
@@ -1068,6 +1072,12 @@ impl SleekApp {
             .as_ref()
             .map(|lc| lc.muted)
             .unwrap_or(self.state.av_pref_muted);
+        let speaker_muted = self
+            .state
+            .local_call
+            .as_ref()
+            .map(|lc| lc.speaker_muted)
+            .unwrap_or(self.state.av_pref_speaker_muted);
         // In-call intent if set; otherwise persisted pref.
         let camera = self
             .state
@@ -1085,7 +1095,7 @@ impl SleekApp {
             }
         }
         log::info!(
-            "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?}",
+            "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?} speaker_muted={speaker_muted}",
             self.state.av_pref_camera_id,
             self.state.av_pref_mic_id,
             self.state.av_pref_speaker_id
@@ -1096,6 +1106,7 @@ impl SleekApp {
             nick: self.state.nick.clone(),
             instance: instance.to_string(),
             muted,
+            speaker_muted,
             camera,
             camera_id: self.state.av_pref_camera_id.clone(),
             mic_id: self.state.av_pref_mic_id.clone(),
@@ -1115,6 +1126,7 @@ impl SleekApp {
             instance: String::new(),
             token: None,
             muted: self.state.av_pref_muted,
+            speaker_muted: self.state.av_pref_speaker_muted,
             camera: self.state.av_pref_camera,
             has_camera: false,
             has_mic: false,
@@ -1135,6 +1147,7 @@ impl SleekApp {
             instance: String::new(),
             token: None,
             muted: self.state.av_pref_muted,
+            speaker_muted: self.state.av_pref_speaker_muted,
             camera: self.state.av_pref_camera,
             has_camera: false,
             has_mic: false,
@@ -1153,6 +1166,7 @@ impl SleekApp {
         };
         // Remember last in-call choices for the next start/join (and next launch).
         self.state.av_pref_muted = lc.muted;
+        self.state.av_pref_speaker_muted = lc.speaker_muted;
         // Only sync camera pref when hardware was present (otherwise Live
         // forced `camera = false` and would wipe a deliberate "camera on").
         if lc.has_camera {
@@ -1179,6 +1193,19 @@ impl SleekApp {
         self.state.av_pref_muted = muted;
         self.state.persist_av_prefs();
         self.net.send(NetCmd::AvMute { muted });
+    }
+
+    fn do_av_toggle_speaker_mute(&mut self) {
+        let muted = {
+            let Some(lc) = self.state.local_call.as_mut() else {
+                return;
+            };
+            lc.speaker_muted = !lc.speaker_muted;
+            lc.speaker_muted
+        };
+        self.state.av_pref_speaker_muted = muted;
+        self.state.persist_av_prefs();
+        self.net.send(NetCmd::AvSpeakerMute { muted });
     }
 
     fn do_av_toggle_camera(&mut self) {
@@ -1222,6 +1249,42 @@ impl SleekApp {
         if self.state.local_call.is_some() {
             self.net.send(NetCmd::AvSpeakerDevice { id });
         }
+    }
+
+    /// Dispatch in-call chrome actions from the global call panel (compact or fullscreen).
+    fn handle_av_call_action(&mut self, ctx: &egui::Context, act: ChatAction) {
+        match act {
+            ChatAction::AvLeave => self.do_av_leave(),
+            ChatAction::AvToggleMute => self.do_av_toggle_mute(),
+            ChatAction::AvToggleSpeakerMute => self.do_av_toggle_speaker_mute(),
+            ChatAction::AvToggleCamera => self.do_av_toggle_camera(),
+            ChatAction::AvSelectCamera(id) => self.do_av_select_camera(id),
+            ChatAction::AvSelectMic(id) => self.do_av_select_mic(id),
+            ChatAction::AvSelectSpeaker(id) => self.do_av_select_speaker(id),
+            ChatAction::AvRotateWindow => self.do_rotate_window(ctx),
+            ChatAction::OpenCallChannel(ch) => {
+                self.state.open_chat(&ch);
+            }
+            _ => {}
+        }
+    }
+
+    /// Desktop: swap window width/height so the whole app flips landscape ↔ portrait.
+    fn do_rotate_window(&self, ctx: &egui::Context) {
+        let size = ctx.input(|i| {
+            i.viewport()
+                .inner_rect
+                .map(|r| r.size())
+                .filter(|s| s.x > 1.0 && s.y > 1.0)
+                .unwrap_or_else(|| i.screen_rect().size())
+        });
+        let w = size.x.max(320.0);
+        let h = size.y.max(320.0);
+        // Leave maximized/fullscreen so InnerSize is applied.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(h, w)));
+        ctx.request_repaint();
     }
 
     fn do_connect(&mut self) {
@@ -1645,9 +1708,19 @@ impl eframe::App for SleekApp {
         let p = &th.palette;
         let sp = &th.spacing;
         let screen = ctx.screen_rect();
-        let phone = screen.height() >= screen.width() || screen.width() < 640.0;
-        // Codespace/noVNC: use the full window, not a centered 480px phone column.
-        let fill = phone || self.fill_viewport;
+        let landscape = screen.width() > screen.height();
+        // Short viewport (phone landscape, small windows): tighten chrome so
+        // chat/compose keep usable height under tabs + call bar.
+        let short = screen.height() < 520.0;
+        // Fill full width on:
+        // - Android (always — landscape used to fall through to the desktop
+        //   480px column because width ≥ 640)
+        // - Codespace / SLEEK_FIT_VIEWPORT
+        // - Portrait-ish or narrow windows (phone shell on desktop)
+        let fill = cfg!(target_os = "android")
+            || self.fill_viewport
+            || screen.height() >= screen.width()
+            || screen.width() < 640.0;
 
         // vidya::reserve_system_chrome already grows the bottom inset while a
         // text field has focus (IME clearance). Do not add a second IME band
@@ -1686,8 +1759,13 @@ impl eframe::App for SleekApp {
             }
         }
 
+        // Theater mode: call UI owns the whole window (no top strip / tabs / chat).
+        let av_fullscreen =
+            self.state.local_call.is_some() && self.state.av_fullscreen;
+
         // ── Active MoQ call (always visible while open; one at a time) ─
-        if self.state.local_call.is_some() {
+        // Compact bar when not fullscreen; fullscreen paints in CentralPanel.
+        if self.state.local_call.is_some() && !av_fullscreen {
             egui::TopBottomPanel::top("av_moq_global")
                 .frame(
                     egui::Frame::new()
@@ -1706,18 +1784,7 @@ impl eframe::App for SleekApp {
                     ui.set_max_width(max_w);
                     ui.set_min_width(max_w.min(avail));
                     if let Some(act) = ui::active_call_panel(ui, &th, &mut self.state) {
-                        match act {
-                            ChatAction::AvLeave => self.do_av_leave(),
-                            ChatAction::AvToggleMute => self.do_av_toggle_mute(),
-                            ChatAction::AvToggleCamera => self.do_av_toggle_camera(),
-                            ChatAction::AvSelectCamera(id) => self.do_av_select_camera(id),
-                            ChatAction::AvSelectMic(id) => self.do_av_select_mic(id),
-                            ChatAction::AvSelectSpeaker(id) => self.do_av_select_speaker(id),
-                            ChatAction::OpenCallChannel(ch) => {
-                                self.state.open_chat(&ch);
-                            }
-                            _ => {}
-                        }
+                        self.handle_av_call_action(ctx, act);
                     }
                 });
         }
@@ -1725,27 +1792,44 @@ impl eframe::App for SleekApp {
         // ── Bottom tabs (connected, not in chat detail) ────────────
         // Hide while the soft keyboard is up so the compose / focused field
         // has room above the IME (tabs would otherwise sit under the keys).
+        // Also hide in AV fullscreen theater mode.
         let show_tabs = connected
             && matches!(self.state.route, Route::Tabs)
             && self.state.connection == ConnectionState::Registered
-            && !ctx.wants_keyboard_input();
+            && !ctx.wants_keyboard_input()
+            && !av_fullscreen;
 
         if show_tabs {
+            let tab_vpad = if short { sp.xs } else { sp.sm };
+            let tab_h = if short {
+                (sp.control_height * 0.85).max(36.0)
+            } else {
+                sp.control_height
+            };
             egui::TopBottomPanel::bottom("nav_bottom")
                 .frame(
                     egui::Frame::new()
                         .fill(p.headerbar_bg)
-                        .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8))
+                        .inner_margin(egui::Margin::symmetric(sp.md as i8, tab_vpad as i8))
                         .stroke(Stroke::new(1.0_f32, p.border_soft)),
                 )
                 .show_separator_line(false)
                 .show(ctx, |ui| {
+                    // Landscape: stretch tabs across the full width for easy taps.
+                    let n_tabs = Tab::ALL.len().max(1) as f32;
+                    let gap = sp.sm;
+                    let row_w = ui.available_width();
+                    let tab_w = if landscape && fill {
+                        ((row_w - gap * (n_tabs - 1.0)) / n_tabs).max(56.0)
+                    } else {
+                        72.0
+                    };
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = sp.sm;
+                        ui.spacing_mut().item_spacing.x = gap;
                         let total_unread = self.state.total_unread();
                         for tab in Tab::ALL {
                             let selected = self.state.tab == tab;
-                            let fill = if selected { p.accent } else { p.button_bg };
+                            let tab_fill = if selected { p.accent } else { p.button_bg };
                             let fg = if selected {
                                 p.accent_fg
                             } else {
@@ -1759,14 +1843,14 @@ impl eframe::App for SleekApp {
                                 .size(th.type_scale.caption)
                                 .color(fg);
                             let btn = egui::Button::new(text)
-                                .fill(fill)
+                                .fill(tab_fill)
                                 .stroke(if selected {
                                     Stroke::NONE
                                 } else {
                                     Stroke::new(1.0_f32, p.border_soft)
                                 })
                                 .corner_radius(sp.radius_md)
-                                .min_size(Vec2::new(72.0, sp.control_height));
+                                .min_size(Vec2::new(tab_w, tab_h));
                             if ui.add(btn).clicked() {
                                 self.state.tab = tab;
                             }
@@ -1775,25 +1859,29 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Header (compact when in chat) ──────────────────────────
-        if !matches!(self.state.route, Route::Chat(_)) {
+        // ── Header (compact when in chat; hidden in AV fullscreen) ─
+        if !av_fullscreen && !matches!(self.state.route, Route::Chat(_)) {
+            // Landscape / short: one row (title · status) instead of stacked block.
+            let (head_top, head_bot) = if short {
+                (sp.xs + 2.0, sp.xs)
+            } else {
+                (sp.md + 4.0, sp.md + 2.0)
+            };
             let header_frame = th.header_frame().inner_margin(egui::Margin {
                 left: sp.page as i8,
                 right: sp.page as i8,
-                top: (sp.md + 4.0) as i8,
-                bottom: (sp.md + 2.0) as i8,
+                top: head_top as i8,
+                bottom: head_bot as i8,
             });
             egui::TopBottomPanel::top("header")
                 .frame(header_frame)
                 .show_separator_line(false)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
+                    if landscape && short {
+                        ui.horizontal(|ui| {
                             title(ui, &th, "Sleek");
-                            // Subtitle only when connected or mid-connect — idle connect
-                            // already has its own form; avoid stacking the same chrome.
                             if connected || self.state.connection == ConnectionState::Connecting {
-                                ui.add_space(sp.xs + 2.0);
+                                ui.add_space(sp.sm);
                                 let blurb = if self.state.connection == ConnectionState::Registered
                                 {
                                     format!("{} · {}", self.state.nick, self.state.server)
@@ -1803,20 +1891,53 @@ impl eframe::App for SleekApp {
                                 dim_label(ui, &th, &blurb);
                             }
                         });
-                    });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                title(ui, &th, "Sleek");
+                                // Subtitle only when connected or mid-connect — idle connect
+                                // already has its own form; avoid stacking the same chrome.
+                                if connected || self.state.connection == ConnectionState::Connecting {
+                                    ui.add_space(sp.xs + 2.0);
+                                    let blurb =
+                                        if self.state.connection == ConnectionState::Registered {
+                                            format!("{} · {}", self.state.nick, self.state.server)
+                                        } else {
+                                            "Connecting…".into()
+                                        };
+                                    dim_label(ui, &th, &blurb);
+                                }
+                            });
+                        });
+                    }
                 });
         }
 
         // ── Main content ───────────────────────────────────────────
-        let page = if fill {
+        // Theater mode: zero margin so video claims the whole window.
+        // Landscape short: smaller page padding so chat keeps height.
+        let page = if av_fullscreen {
+            egui::Frame::new().fill(p.window_bg).inner_margin(egui::Margin::ZERO)
+        } else if fill {
+            let h_pad = if short { 8_i8 } else { 10_i8 };
+            let v_pad = if short { (sp.sm) as i8 } else { sp.page as i8 };
             egui::Frame::new()
                 .fill(p.window_bg)
-                .inner_margin(egui::Margin::symmetric(10_i8, sp.page as i8))
+                .inner_margin(egui::Margin::symmetric(h_pad, v_pad))
         } else {
             th.page_frame()
         };
 
         egui::CentralPanel::default().frame(page).show(ctx, |ui| {
+            // AV theater mode: only the call UI — no chat/tabs underneath.
+            if av_fullscreen {
+                ui.set_min_size(ui.available_size());
+                if let Some(act) = ui::active_call_panel(ui, &th, &mut self.state) {
+                    self.handle_av_call_action(ctx, act);
+                }
+                return;
+            }
+
             // Local desktop: narrow phone-like column. Codespace: full window.
             let col_w = if fill {
                 ui.available_width()
@@ -1891,6 +2012,9 @@ impl eframe::App for SleekApp {
                     ChatAction::AvToggleMute => {
                         self.do_av_toggle_mute();
                     }
+                    ChatAction::AvToggleSpeakerMute => {
+                        self.do_av_toggle_speaker_mute();
+                    }
                     ChatAction::AvToggleCamera => {
                         self.do_av_toggle_camera();
                     }
@@ -1902,6 +2026,9 @@ impl eframe::App for SleekApp {
                     }
                     ChatAction::AvSelectSpeaker(id) => {
                         self.do_av_select_speaker(id);
+                    }
+                    ChatAction::AvRotateWindow => {
+                        self.do_rotate_window(ctx);
                     }
                     ChatAction::OpenCallChannel(ch) => {
                         self.state.open_chat(&ch);

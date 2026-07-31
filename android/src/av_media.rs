@@ -19,7 +19,7 @@ use iroh_live::media::{
     publish::LocalBroadcast,
     subscribe::RemoteBroadcast,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::av::{
     broadcast_path, path_key, should_tap, MicLevel, VideoFrameStore, LOCAL_PREVIEW_KEY,
@@ -308,6 +308,8 @@ pub struct AvMediaConfig {
     pub instance: String,
     /// Initial mic mute (pre-call preference).
     pub muted: bool,
+    /// Initial speaker mute — remote playback volume 0 (pre-call preference).
+    pub speaker_muted: bool,
     /// Initial camera publish when hardware is available.
     pub camera_enabled: bool,
     /// Preferred camera id (`CameraInfo.id` / name). `None` = first available.
@@ -322,6 +324,8 @@ pub struct AvMediaConfig {
 #[derive(Debug, Clone)]
 pub enum MediaControl {
     SetMuted(bool),
+    /// Mute / unmute remote audio playback (speaker).
+    SetSpeakerMuted(bool),
     SetCameraEnabled(bool),
     /// Re-open camera by id (`None` = default / first).
     SetCameraDevice(Option<String>),
@@ -356,6 +360,7 @@ pub struct AvMediaSession {
     stop: Option<oneshot::Sender<()>>,
     control: Option<mpsc::UnboundedSender<MediaControl>>,
     pub muted: Arc<AtomicBool>,
+    pub speaker_muted: Arc<AtomicBool>,
     pub camera_enabled: Arc<AtomicBool>,
     pub video: VideoFrameStore,
     pub mic_level: MicLevel,
@@ -369,6 +374,7 @@ impl AvMediaSession {
         F: Fn(AvMediaUpdate) + Send + Sync + 'static,
     {
         let muted = Arc::new(AtomicBool::new(config.muted));
+        let speaker_muted = Arc::new(AtomicBool::new(config.speaker_muted));
         // Respect pre-call camera pref; has_camera is reported after open.
         let camera_enabled = Arc::new(AtomicBool::new(config.camera_enabled));
         let video = VideoFrameStore::new();
@@ -402,6 +408,7 @@ impl AvMediaSession {
             stop: Some(stop_tx),
             control: Some(ctrl_tx),
             muted,
+            speaker_muted,
             camera_enabled,
             video,
             mic_level,
@@ -414,6 +421,13 @@ impl AvMediaSession {
         self.muted.store(muted, Ordering::Relaxed);
         if let Some(tx) = &self.control {
             let _ = tx.send(MediaControl::SetMuted(muted));
+        }
+    }
+
+    pub fn set_speaker_muted(&self, muted: bool) {
+        self.speaker_muted.store(muted, Ordering::Relaxed);
+        if let Some(tx) = &self.control {
+            let _ = tx.send(MediaControl::SetSpeakerMuted(muted));
         }
     }
 
@@ -508,6 +522,8 @@ async fn run_media(
     mut control: mpsc::UnboundedReceiver<MediaControl>,
     on_status: Arc<dyn Fn(AvMediaUpdate) + Send + Sync>,
 ) -> Result<()> {
+    // Watch so each remote audio track can react instantly to speaker mute.
+    let (speaker_mute_tx, speaker_mute_rx) = watch::channel(config.speaker_muted);
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let our_broadcast = broadcast_path(&config.session_id, &config.nick, &config.instance);
@@ -592,8 +608,10 @@ async fn run_media(
     // falling back to the system default when a preferred device fails —
     // never leave the broadcast without audio (that looks like "not sending").
     log::info!(
-        "av-media: outbound muted={} (peers hear silence while muted even if the meter moves)",
-        muted.load(Ordering::Relaxed)
+        "av-media: outbound muted={} speaker_muted={} (peers hear silence while mic-muted; \
+         we hear silence while speaker-muted)",
+        muted.load(Ordering::Relaxed),
+        *speaker_mute_rx.borrow()
     );
     let has_mic = match open_microphone(&audio_backend).await {
         Ok(mut mic) => {
@@ -822,8 +840,9 @@ async fn run_media(
                         let ps = path_str.clone();
                         let store = store_for_subs.clone();
                         let key = path_key(&path_str).to_string();
+                        let spk_mute = speaker_mute_rx.clone();
                         let handle = taps.spawn(async move {
-                            tap_remote(ps, key, broadcast_consumer, ab, store).await;
+                            tap_remote(ps, key, broadcast_consumer, ab, store, spk_mute).await;
                         });
                         tap_keys.insert(path_str, handle);
                     }
@@ -852,6 +871,11 @@ async fn run_media(
                     MediaControl::SetMuted(m) => {
                         muted.store(m, Ordering::Relaxed);
                         log::info!("av-media: muted={m}");
+                    }
+                    MediaControl::SetSpeakerMuted(m) => {
+                        if speaker_mute_tx.send(m).is_ok() {
+                            log::info!("av-media: speaker_muted={m}");
+                        }
                     }
                     MediaControl::SetCameraEnabled(en) => {
                         camera_enabled.store(en, Ordering::Relaxed);
@@ -996,12 +1020,15 @@ async fn run_media(
 /// Audio and video are independent: a catalog race that delays the audio
 /// rendition must not tear down video (and vice versa). We wait with
 /// `audio_ready` / `video_ready` and retry so late-advertised tracks still play.
+///
+/// `speaker_mute` drives remote playback volume (`0.0` when muted, `1.0` otherwise).
 async fn tap_remote(
     path: String,
     key: String,
     broadcast_consumer: moq_lite::BroadcastConsumer,
     audio_backend: AudioBackend,
     video_store: VideoFrameStore,
+    speaker_mute: watch::Receiver<bool>,
 ) {
     // Match freeq-sdk-ffi: tighter latency than the 150ms streaming default.
     let policy = iroh_live::media::playout::PlaybackPolicy::default()
@@ -1024,6 +1051,7 @@ async fn tap_remote(
         let remote = remote.clone();
         let ab = audio_backend;
         let ps = path.clone();
+        let mut speaker_mute = speaker_mute;
         tokio::spawn(async move {
             let mut consecutive_errs = 0u32;
             loop {
@@ -1031,11 +1059,25 @@ async fn tap_remote(
                     Ok(track) => {
                         consecutive_errs = 0;
                         log::info!("av-media: receiving audio from {ps}");
-                        // Hold the track until the decoder stops, then re-wait
-                        // in case the peer re-advertises audio (e.g. after mute
-                        // track flip — rare, but cheap to handle).
-                        track.stopped().await;
-                        log::info!("av-media: audio track ended for {ps}");
+                        // Apply current speaker mute, then hold until the track
+                        // ends or mute toggles (volume 0 = silence, keeps decode).
+                        apply_speaker_volume(&track, *speaker_mute.borrow());
+                        loop {
+                            tokio::select! {
+                                _ = track.stopped() => {
+                                    log::info!("av-media: audio track ended for {ps}");
+                                    break;
+                                }
+                                changed = speaker_mute.changed() => {
+                                    if changed.is_err() {
+                                        // Session tearing down — keep track until stop.
+                                        track.stopped().await;
+                                        break;
+                                    }
+                                    apply_speaker_volume(&track, *speaker_mute.borrow());
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         let msg = e.to_string();
@@ -1115,6 +1157,11 @@ async fn tap_remote(
         }
     }
     video_store.remove(&key);
+}
+
+/// Set remote track volume from speaker-mute (`0.0` silence, `1.0` full).
+fn apply_speaker_volume(track: &iroh_live::media::subscribe::AudioTrack, muted: bool) {
+    track.set_volume(if muted { 0.0 } else { 1.0 });
 }
 
 /// Open the default mic input, retrying after clearing preferred devices if

@@ -28,6 +28,8 @@ pub struct LocalCall {
     /// SFU JWT from `+freeq.at/av-token` (if the server minted one).
     pub token: Option<String>,
     pub muted: bool,
+    /// Local speaker / remote-audio mute (deafen). Peers still hear you if mic is open.
+    pub speaker_muted: bool,
     /// Camera publish enabled (desktop MoQ). False when no camera / toggled off.
     pub camera: bool,
     /// True when the media plane opened a capture device (desktop).

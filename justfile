@@ -77,6 +77,13 @@ android:
 install-android *args:
     nix run .#install-android -- {{args}}
 
+# In-tree cargo-apk (aarch64) + adb install (iterative phone deploy)
+#   just deploy-android
+#   just deploy-android -- --launch
+#   just deploy-android -- --release --launch
+deploy-android *args:
+    nix run .#deploy-android -- {{args}}
+
 # Push store paths to codegod100.cachix.org (needs CACHIX_AUTH_TOKEN)
 # Usage: just push            # push ./result
 #        just push ./result   # explicit path

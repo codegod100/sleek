@@ -22,6 +22,8 @@ pub enum ChatAction {
     AvLeave,
     /// Toggle mic mute.
     AvToggleMute,
+    /// Toggle speaker (remote audio) mute.
+    AvToggleSpeakerMute,
     /// Toggle camera publish (desktop MoQ).
     AvToggleCamera,
     /// Select camera device (`None` = system first / default).
@@ -32,6 +34,8 @@ pub enum ChatAction {
     AvSelectSpeaker(Option<String>),
     /// Jump to the channel that holds our active call.
     OpenCallChannel(String),
+    /// Desktop: swap window width/height (landscape ↔ portrait) for the whole app.
+    AvRotateWindow,
     /// Toggle our reaction on a message (`+react` / `+freeq.at/unreact`).
     React {
         target: String,
@@ -206,6 +210,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // was redundant.
     if is_channel && joined && state.local_call.is_none() {
         let prev_muted = state.av_pref_muted;
+        let prev_speaker_muted = state.av_pref_speaker_muted;
         let prev_camera = state.av_pref_camera;
         let prev_cam_id = state.av_pref_camera_id.clone();
         let prev_mic = state.av_pref_mic_id.clone();
@@ -221,6 +226,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
             action = act;
         }
         if state.av_pref_muted != prev_muted
+            || state.av_pref_speaker_muted != prev_speaker_muted
             || state.av_pref_camera != prev_camera
             || state.av_pref_camera_id != prev_cam_id
             || state.av_pref_mic_id != prev_mic
@@ -1075,39 +1081,30 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
     let Some(lc) = state.local_call.clone() else {
         return None;
     };
+
+    // Esc exits theater mode from anywhere in the call UI.
+    if state.av_fullscreen && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.av_fullscreen = false;
+    }
+
+    if state.av_fullscreen {
+        return active_call_panel_fullscreen(ui, th, state, &lc);
+    }
+    active_call_panel_compact(ui, th, state, &lc)
+}
+
+/// Compact call strip (top panel while chat/tabs stay visible).
+fn active_call_panel_compact(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    lc: &crate::av::LocalCall,
+) -> Option<ChatAction> {
     let sp = &th.spacing;
     let p = &th.palette;
     let mut action = None;
 
-    let channel_call = state
-        .channels
-        .get(&lc.channel)
-        .and_then(|b| b.call.clone());
-    let n = channel_call
-        .as_ref()
-        .map(|c| c.participants.max(1))
-        .unwrap_or(1);
-    let call_title = channel_call
-        .as_ref()
-        .and_then(|c| c.title.as_ref())
-        .map(|t| t.as_str())
-        .filter(|t| !t.is_empty());
-    // Prefer a real call title; otherwise the channel (often long for stream.place).
-    let headline = call_title.unwrap_or(lc.channel.as_str());
-    let on_call_channel = matches!(
-        &state.route,
-        crate::state::Route::Chat(ch) if ch.eq_ignore_ascii_case(&lc.channel)
-    );
-
-    // One status line: count + media. Avoids "1 in call" next to a long title
-    // (overlap) and a second "In call" row under it (redundant).
-    let status_line = match &lc.media {
-        crate::av::MediaStatus::Live => format!("{n} in call"),
-        crate::av::MediaStatus::Idle => format!("{n} in call"),
-        crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
-        crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
-        crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
-    };
+    let (headline, status_line, on_call_channel) = av_call_chrome_meta(state, lc);
 
     let frame = egui::Frame::new()
         .fill(p.accent.gamma_multiply(0.14))
@@ -1158,73 +1155,13 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
             lc.media,
             crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
         ) {
-            paint_av_video_tiles(ui, th, state);
+            paint_av_video_tiles(ui, th, state, /*fill_height=*/ None);
         }
 
         ui.add_space(sp.xs);
-        // Primary chrome only: mute / camera / leave. Device pickers live under
-        // a Devices toggle so long Cam/Mic/Out combos don't wrap over chat.
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = sp.sm;
-            if av_icon_toggle(
-                ui,
-                th,
-                "🎤",
-                lc.muted || !lc.has_mic,
-                if !lc.has_mic {
-                    "No microphone (listen-only)"
-                } else if lc.muted {
-                    "Unmute"
-                } else {
-                    "Mute"
-                },
-            )
-            .clicked()
-            {
-                // Listen-only: toggling mute is a no-op (nothing to send).
-                if lc.has_mic {
-                    action = Some(ChatAction::AvToggleMute);
-                }
-            }
-            // Live mic volume meter (updates while media is Live).
-            if matches!(lc.media, crate::av::MediaStatus::Live) {
-                let level = state
-                    .av_mic_level
-                    .as_ref()
-                    .map(|m| m.get())
-                    .unwrap_or(0.0);
-                paint_mic_level_meter(ui, th, level, lc.muted || !lc.has_mic);
-                // Capture thread writes levels continuously — keep the bar moving.
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(33));
-            }
-            if lc.has_camera {
-                if av_icon_toggle(
-                    ui,
-                    th,
-                    "📷",
-                    !lc.camera,
-                    if lc.camera {
-                        "Turn camera off"
-                    } else {
-                        "Turn camera on"
-                    },
-                )
-                .clicked()
-                {
-                    action = Some(ChatAction::AvToggleCamera);
-                }
-            }
-            if button(ui, th, "Leave").clicked() {
-                action = Some(ChatAction::AvLeave);
-            }
-            if !on_call_channel {
-                if button(ui, th, "Open chat").clicked() {
-                    action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
-                }
-            }
-            av_devices_toggle_button(ui, th, state);
-        });
+        if let Some(act) = av_call_controls_row(ui, th, state, lc, on_call_channel) {
+            action = Some(act);
+        }
 
         if state.av_show_devices {
             if state.av_device_cameras.is_empty()
@@ -1238,6 +1175,259 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
                 action = Some(act);
             }
         }
+    });
+
+    action
+}
+
+/// Full-window theater mode: video fills the viewport; chrome sits above/below.
+fn active_call_panel_fullscreen(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    lc: &crate::av::LocalCall,
+) -> Option<ChatAction> {
+    let sp = &th.spacing;
+    let p = &th.palette;
+    let mut action = None;
+
+    let (headline, status_line, on_call_channel) = av_call_chrome_meta(state, lc);
+
+    // Claim the entire central area — do not size-to-content (that kept video tiny).
+    let full = ui.available_rect_before_wrap();
+    ui.allocate_rect(full, Sense::hover());
+    ui.painter()
+        .rect_filled(full, 0.0, p.window_bg);
+
+    // Fixed chrome heights so the video rect is deterministic.
+    let header_h = th.type_scale.body * 1.35 + th.type_scale.caption + sp.sm * 2.0 + sp.md;
+    let devices_h = if state.av_show_devices {
+        // Cam/Mic/Out rows + padding (generous so we never clip the strip).
+        sp.control_height * 3.5 + sp.md * 2.0
+    } else {
+        0.0
+    };
+    let footer_h = sp.control_height + sp.md * 2.0 + devices_h;
+    let video_h = (full.height() - header_h - footer_h).max(120.0);
+    let content_w = full.width().max(1.0);
+
+    // Layout inside the allocated full rect.
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(full).layout(Layout::top_down(Align::Min)),
+        |ui| {
+            ui.set_min_size(full.size());
+            ui.set_max_size(full.size());
+            ui.spacing_mut().item_spacing.y = sp.xs;
+
+            // ── Header ────────────────────────────────────────────
+            ui.add_space(sp.sm);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("📞 {headline}"))
+                        .size(th.type_scale.body)
+                        .color(p.text)
+                        .strong(),
+                )
+                .truncate()
+                .sense(Sense::hover()),
+            )
+            .on_hover_text(format!("{headline}\n{}", lc.channel));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&status_line)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
+                )
+                .truncate(),
+            );
+            ui.add_space(sp.xs);
+
+            // ── Video (exact remaining height) ────────────────────
+            let video_size = Vec2::new(content_w, video_h);
+            ui.allocate_ui_with_layout(video_size, Layout::top_down(Align::Center), |ui| {
+                ui.set_min_size(video_size);
+                ui.set_max_size(video_size);
+                // Dark stage behind tiles.
+                let stage = ui.max_rect();
+                ui.painter()
+                    .rect_filled(stage, sp.radius_sm, p.card_bg.gamma_multiply(0.85));
+                if matches!(
+                    lc.media,
+                    crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
+                ) {
+                    paint_av_video_tiles(ui, th, state, Some(video_size));
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        dim_label(ui, th, "Waiting for media…");
+                    });
+                }
+            });
+
+            ui.add_space(sp.sm);
+
+            // ── Controls ──────────────────────────────────────────
+            if let Some(act) = av_call_controls_row(ui, th, state, lc, on_call_channel) {
+                action = Some(act);
+            }
+            if state.av_show_devices {
+                if state.av_device_cameras.is_empty()
+                    && state.av_device_mics.is_empty()
+                    && state.av_device_speakers.is_empty()
+                {
+                    state.refresh_av_devices();
+                }
+                ui.add_space(sp.xs);
+                if let Some(act) = av_device_selectors(ui, th, state, /*in_call=*/ true) {
+                    action = Some(act);
+                }
+            }
+        },
+    );
+
+    action
+}
+
+fn av_call_chrome_meta(
+    state: &AppState,
+    lc: &crate::av::LocalCall,
+) -> (String, String, bool) {
+    let channel_call = state
+        .channels
+        .get(&lc.channel)
+        .and_then(|b| b.call.clone());
+    let n = channel_call
+        .as_ref()
+        .map(|c| c.participants.max(1))
+        .unwrap_or(1);
+    let call_title = channel_call
+        .as_ref()
+        .and_then(|c| c.title.as_ref())
+        .map(|t| t.as_str())
+        .filter(|t| !t.is_empty());
+    let headline = call_title.unwrap_or(lc.channel.as_str()).to_string();
+    let on_call_channel = matches!(
+        &state.route,
+        crate::state::Route::Chat(ch) if ch.eq_ignore_ascii_case(&lc.channel)
+    );
+    let status_line = match &lc.media {
+        crate::av::MediaStatus::Live => format!("{n} in call"),
+        crate::av::MediaStatus::Idle => format!("{n} in call"),
+        crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
+        crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
+        crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+    };
+    (headline, status_line, on_call_channel)
+}
+
+/// Mic / speaker / camera / leave / Full / Devices strip shared by compact + fullscreen.
+fn av_call_controls_row(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    lc: &crate::av::LocalCall,
+    on_call_channel: bool,
+) -> Option<ChatAction> {
+    let sp = &th.spacing;
+    let mut action = None;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = sp.sm;
+        if av_icon_toggle(
+            ui,
+            th,
+            "🎤",
+            lc.muted || !lc.has_mic,
+            if !lc.has_mic {
+                "No microphone (listen-only)"
+            } else if lc.muted {
+                "Unmute mic"
+            } else {
+                "Mute mic"
+            },
+        )
+        .clicked()
+        {
+            if lc.has_mic {
+                action = Some(ChatAction::AvToggleMute);
+            }
+        }
+        if matches!(lc.media, crate::av::MediaStatus::Live) {
+            let level = state
+                .av_mic_level
+                .as_ref()
+                .map(|m| m.get())
+                .unwrap_or(0.0);
+            paint_mic_level_meter(ui, th, level, lc.muted || !lc.has_mic);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        if av_icon_toggle(
+            ui,
+            th,
+            "🔊",
+            lc.speaker_muted,
+            if lc.speaker_muted {
+                "Unmute speaker"
+            } else {
+                "Mute speaker"
+            },
+        )
+        .clicked()
+        {
+            action = Some(ChatAction::AvToggleSpeakerMute);
+        }
+        if lc.has_camera {
+            if av_icon_toggle(
+                ui,
+                th,
+                "📷",
+                !lc.camera,
+                if lc.camera {
+                    "Turn camera off"
+                } else {
+                    "Turn camera on"
+                },
+            )
+            .clicked()
+            {
+                action = Some(ChatAction::AvToggleCamera);
+            }
+        }
+        if button(ui, th, "Leave").clicked() {
+            action = Some(ChatAction::AvLeave);
+        }
+        // Theater mode: fill the app window with video (not OS borderless fullscreen).
+        let fs_label = if state.av_fullscreen {
+            "Exit full"
+        } else {
+            "Full"
+        };
+        if button(ui, th, fs_label)
+            .on_hover_text(if state.av_fullscreen {
+                "Exit fullscreen (Esc)"
+            } else {
+                "Fullscreen call view"
+            })
+            .clicked()
+        {
+            state.av_fullscreen = !state.av_fullscreen;
+            ui.ctx().request_repaint();
+        }
+        // Desktop: swap the whole app window landscape ↔ portrait.
+        if cfg!(not(target_os = "android")) {
+            if button(ui, th, "Rotate")
+                .on_hover_text("Rotate app window (swap width/height)")
+                .clicked()
+            {
+                action = Some(ChatAction::AvRotateWindow);
+            }
+        }
+        if !on_call_channel && !state.av_fullscreen {
+            if button(ui, th, "Open chat").clicked() {
+                action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
+            }
+        }
+        av_devices_toggle_button(ui, th, state);
     });
 
     action
@@ -1372,7 +1562,7 @@ fn av_icon_toggle(
     response.on_hover_text(tooltip)
 }
 
-/// Pre-call mic/camera toggles (icons match in-call controls).
+/// Pre-call mic/speaker/camera toggles (icons match in-call controls).
 fn av_media_prefs_row(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     let sp = &th.spacing;
     ui.horizontal(|ui| {
@@ -1382,14 +1572,30 @@ fn av_media_prefs_row(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             "🎤",
             state.av_pref_muted,
             if state.av_pref_muted {
-                "Unmute"
+                "Unmute mic"
             } else {
-                "Mute"
+                "Mute mic"
             },
         )
         .clicked()
         {
             state.av_pref_muted = !state.av_pref_muted;
+        }
+        ui.add_space(sp.sm);
+        if av_icon_toggle(
+            ui,
+            th,
+            "🔊",
+            state.av_pref_speaker_muted,
+            if state.av_pref_speaker_muted {
+                "Unmute speaker"
+            } else {
+                "Mute speaker"
+            },
+        )
+        .clicked()
+        {
+            state.av_pref_speaker_muted = !state.av_pref_speaker_muted;
         }
         ui.add_space(sp.sm);
         if av_icon_toggle(
@@ -1751,12 +1957,36 @@ fn av_grid_cols(n: usize) -> usize {
     }
 }
 
+/// Compact call-bar video height budget — scale down on short (phone landscape)
+/// viewports so the strip doesn't push chat/compose off-screen.
+fn av_compact_video_caps(ui: &egui::Ui) -> (f32, f32, f32) {
+    // (single max_h, multi max_h, grid max_h)
+    let h = ui.ctx().screen_rect().height();
+    if h < 420.0 {
+        let single = (h * 0.28).clamp(88.0, 140.0);
+        (single, (single * 0.75).max(72.0), (h * 0.36).clamp(100.0, 160.0))
+    } else if h < 520.0 {
+        let single = (h * 0.34).clamp(120.0, 200.0);
+        (single, (single * 0.8).max(80.0), (h * 0.42).clamp(140.0, 220.0))
+    } else {
+        (360.0, 280.0, 420.0)
+    }
+}
+
 /// Paint remote (+ local preview) video tiles from the MoQ frame store.
 ///
 /// Streams are laid out in a fixed multi-column grid (or focus + filmstrip)
 /// so frames never share the same rect. Click a tile to enlarge/focus it;
 /// click the focused tile again to restore the grid.
-fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
+///
+/// `fill_size`: when `Some`, tiles expand to fill that exact stage (theater
+/// mode). When `None`, compact call-bar caps keep chat usable.
+fn paint_av_video_tiles(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    fill_size: Option<Vec2>,
+) {
     use std::sync::Arc;
 
     let store = state.av_video.clone();
@@ -1807,7 +2037,9 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
     });
 
     let sp = &th.spacing;
-    ui.add_space(sp.sm);
+    if fill_size.is_none() {
+        ui.add_space(sp.sm);
+    }
 
     let live: std::collections::HashSet<String> = frames.iter().map(|(n, _)| n.clone()).collect();
     state.av_video_textures.retain(|k, _| live.contains(k));
@@ -1850,14 +2082,40 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
         tiles.push((key.clone(), tex_id, frame.width, frame.height));
     }
 
+    // Theater stage size is explicit; compact mode uses call-bar caps.
+    let (compact_single_max, compact_multi_max, compact_grid_max) = av_compact_video_caps(ui);
+    let (stage_w, height_budget, fill) = if let Some(sz) = fill_size {
+        (sz.x.max(1.0), sz.y.max(1.0), true)
+    } else {
+        (ui.available_width().max(1.0), compact_grid_max, false)
+    };
+
     let focused = state.av_focused_video.clone();
     let mut clicked: Option<String> = None;
 
     if let Some(focus_key) = focused.as_ref() {
         // Enlarged primary + filmstrip of the rest.
-        let avail = ui.available_width().max(1.0);
+        let avail = stage_w;
+        let n_others = tiles.iter().filter(|(n, _, _, _)| n != focus_key).count();
+        let strip_h = if n_others > 0 {
+            let thumb_cols = n_others.min(4).max(1);
+            let gaps = sp.sm * (thumb_cols.saturating_sub(1) as f32);
+            let thumb_cap = if fill { 220.0 } else { 160.0 };
+            let thumb_w = ((avail - gaps) / thumb_cols as f32).clamp(64.0, thumb_cap);
+            // On short viewports keep thumbs squat so primary still fits.
+            let thumb_aspect = if fill { 9.0 / 16.0 } else {
+                (compact_multi_max / thumb_w.max(1.0)).min(9.0 / 16.0)
+            };
+            thumb_w * thumb_aspect + sp.xs
+        } else {
+            0.0
+        };
         let primary_w = avail;
-        let primary_h = (primary_w * 9.0 / 16.0).clamp(140.0, 360.0);
+        let primary_h = if fill {
+            (height_budget - strip_h).max(120.0)
+        } else {
+            (primary_w * 9.0 / 16.0).clamp(96.0, compact_single_max)
+        };
 
         if let Some((key, tex_id, w, h)) = tiles.iter().find(|(n, _, _, _)| n == focus_key) {
             if paint_av_video_tile(
@@ -1886,8 +2144,13 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             let n_thumbs = others.len();
             let thumb_cols = n_thumbs.min(4).max(1);
             let gaps = sp.sm * (thumb_cols.saturating_sub(1) as f32);
-            let thumb_w = ((avail - gaps) / thumb_cols as f32).clamp(64.0, 160.0);
-            let thumb_h = thumb_w * 9.0 / 16.0;
+            let thumb_cap = if fill { 220.0 } else { 160.0 };
+            let thumb_w = ((avail - gaps) / thumb_cols as f32).clamp(64.0, thumb_cap);
+            let thumb_h = if fill {
+                thumb_w * 9.0 / 16.0
+            } else {
+                (thumb_w * 9.0 / 16.0).min(compact_multi_max * 0.55)
+            };
             paint_av_video_grid(
                 ui,
                 th,
@@ -1898,32 +2161,46 @@ fn paint_av_video_tiles(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) {
             );
         }
     } else {
-        // Equal grid: columns from stream count, cell size from full panel width
-        // so tiles sit side-by-side instead of stacking/overlapping.
-        let avail = ui.available_width().max(1.0);
+        // Equal grid: columns from stream count, cell size from stage width.
+        let avail = stage_w;
         let n = tiles.len().max(1);
         let cols = av_grid_cols(n);
         let gaps = sp.sm * (cols.saturating_sub(1) as f32);
-        let tile_w = if n == 1 {
-            avail
+        let rows = n.div_ceil(cols);
+        let row_gaps = (rows.saturating_sub(1) as f32) * sp.sm;
+
+        let (tile_w, tile_h) = if fill {
+            // Fill the stage: each cell uses the full cell rect; frames
+            // letterbox inside paint_av_video_tile.
+            let cell_w = if n == 1 {
+                avail
+            } else {
+                ((avail - gaps) / cols as f32).max(72.0)
+            };
+            let cell_h = ((height_budget - row_gaps) / rows as f32).max(72.0);
+            (cell_w, cell_h)
         } else {
-            ((avail - gaps) / cols as f32).max(72.0)
-        };
-        let tile_h = if n == 1 {
-            (tile_w * 9.0 / 16.0).clamp(140.0, 360.0)
-        } else {
-            (tile_w * 9.0 / 16.0).clamp(72.0, 280.0)
+            let tile_w = if n == 1 {
+                avail
+            } else {
+                ((avail - gaps) / cols as f32).max(72.0)
+            };
+            let tile_h = if n == 1 {
+                (tile_w * 9.0 / 16.0).clamp(96.0, compact_single_max)
+            } else {
+                (tile_w * 9.0 / 16.0).clamp(72.0, compact_multi_max)
+            };
+            (tile_w, tile_h)
         };
         let size = Vec2::new(tile_w, tile_h);
 
         // Cap height when many streams so the call bar doesn't eat the chat.
-        let rows = n.div_ceil(cols);
-        let grid_h = rows as f32 * tile_h + (rows.saturating_sub(1) as f32) * sp.sm;
-        const MAX_GRID_H: f32 = 420.0;
-        if grid_h > MAX_GRID_H {
+        let grid_h = rows as f32 * tile_h + row_gaps;
+        let max_grid_h = if fill { height_budget } else { compact_grid_max };
+        if !fill && grid_h > max_grid_h {
             ScrollArea::vertical()
                 .id_salt("av_video_grid_scroll")
-                .max_height(MAX_GRID_H)
+                .max_height(max_grid_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     paint_av_video_grid(ui, th, &tiles, cols, size, &mut clicked);

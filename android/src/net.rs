@@ -87,6 +87,8 @@ pub enum NetCmd {
         instance: String,
         /// Initial mic mute from pre-call prefs.
         muted: bool,
+        /// Initial speaker / remote-audio mute from pre-call prefs.
+        speaker_muted: bool,
         /// Initial camera publish from pre-call prefs.
         camera: bool,
         /// Preferred camera id (`None` = first available).
@@ -100,6 +102,8 @@ pub enum NetCmd {
     AvMediaStop,
     /// Mute / unmute local mic (media plane only).
     AvMute { muted: bool },
+    /// Mute / unmute speaker (remote playback volume).
+    AvSpeakerMute { muted: bool },
     /// Enable / disable camera publish (media plane only; desktop).
     AvCamera { enabled: bool },
     /// Switch camera device mid-call (desktop).
@@ -322,6 +326,7 @@ async fn network_loop(
 struct NetMedia {
     session: Option<AvMediaSession>,
     muted: Arc<AtomicBool>,
+    speaker_muted: Arc<AtomicBool>,
 }
 
 impl NetMedia {
@@ -338,6 +343,13 @@ impl NetMedia {
             s.set_muted(muted);
         }
         self.muted = Arc::new(AtomicBool::new(muted));
+    }
+
+    fn set_speaker_muted(&mut self, muted: bool) {
+        if let Some(s) = self.session.as_ref() {
+            s.set_speaker_muted(muted);
+        }
+        self.speaker_muted = Arc::new(AtomicBool::new(muted));
     }
 
     fn set_camera(&mut self, enabled: bool) {
@@ -677,6 +689,7 @@ async fn apply_cmd(
             nick,
             instance,
             muted,
+            speaker_muted,
             camera,
             camera_id,
             mic_id,
@@ -697,6 +710,7 @@ async fn apply_cmd(
                 }
             };
             media.muted = Arc::new(AtomicBool::new(muted));
+            media.speaker_muted = Arc::new(AtomicBool::new(speaker_muted));
             let tx = event_tx.clone();
             let session = AvMediaSession::start(
                 AvMediaConfig {
@@ -705,6 +719,7 @@ async fn apply_cmd(
                     nick,
                     instance,
                     muted,
+                    speaker_muted,
                     camera_enabled: camera,
                     camera_id,
                     mic_id,
@@ -765,6 +780,9 @@ async fn apply_cmd(
         }
         NetCmd::AvMute { muted } => {
             media.set_muted(muted);
+        }
+        NetCmd::AvSpeakerMute { muted } => {
+            media.set_speaker_muted(muted);
         }
         NetCmd::AvCamera { enabled } => {
             media.set_camera(enabled);

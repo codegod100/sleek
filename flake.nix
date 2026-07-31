@@ -385,12 +385,35 @@ EOF
               fi
 
               echo "waiting for adb device…" >&2
-              if ! adb get-state >/dev/null 2>&1; then
+              # adb get-state fails with "more than one device/emulator" when several
+              # are attached (phone + Waydroid). Pick USB phone unless ANDROID_SERIAL set.
+              mapfile -t _serials < <(adb devices 2>/dev/null | tr -d '\r' | awk 'NR>1 && $2=="device"{print $1}')
+              if [[ ''${#_serials[@]} -eq 0 ]]; then
                 echo "No adb device in 'device' state." >&2
                 echo "Enable USB debugging and authorize this computer, then re-run." >&2
                 adb devices -l >&2 || true
                 exit 1
               fi
+              if [[ -n "''${ANDROID_SERIAL:-}" ]]; then
+                :
+              elif [[ ''${#_serials[@]} -eq 1 ]]; then
+                export ANDROID_SERIAL="''${_serials[0]}"
+              else
+                _usb=()
+                for s in "''${_serials[@]}"; do
+                  [[ "$s" == *:* ]] || _usb+=("$s")
+                done
+                if [[ ''${#_usb[@]} -eq 1 ]]; then
+                  export ANDROID_SERIAL="''${_usb[0]}"
+                  echo "multiple adb devices; using USB $ANDROID_SERIAL (set ANDROID_SERIAL to override)" >&2
+                else
+                  echo "multiple adb devices — set ANDROID_SERIAL to one of:" >&2
+                  printf '  %s\n' "''${_serials[@]}" >&2
+                  adb devices -l >&2 || true
+                  exit 1
+                fi
+              fi
+              echo "adb device: $ANDROID_SERIAL" >&2
 
               echo "install -r $APK" >&2
               adb install -r "$APK"
@@ -403,6 +426,145 @@ EOF
               echo "ok: installed $PKG" >&2
             '';
           };
+
+          # Iterative phone deploy: flake toolchain + in-tree cargo-apk + adb.
+          # Unlike .#android / .#install-android (pure Nix store APK), this builds
+          # against the working tree so incremental cargo caches apply.
+          # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
+          deploy-android = pkgs.writeShellApplication {
+            name = "deploy-android";
+            runtimeInputs = [
+              rustAndroid
+              pkgs.cargo-apk
+              pkgs.android-tools
+              pkgs.jdk17_headless
+              pkgs.python3
+              pkgs.findutils
+              pkgs.gawk
+              pkgs.gnugrep
+              pkgs.gnused
+              pkgs.coreutils
+              pkgs.bash
+            ];
+            text = ''
+              set -euo pipefail
+
+              # Hermetic SDK/NDK from the flake (override with env if you prefer host tools).
+              export ANDROID_HOME="''${ANDROID_HOME:-${androidSdkRoot}}"
+              export ANDROID_SDK_ROOT="''${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+              export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-${androidSdkRoot}/ndk-bundle}"
+              export ANDROID_NDK_ROOT="''${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+              if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
+                # Fallback: first versioned NDK under sdk/ndk/
+                ndk="$(echo "$ANDROID_HOME"/ndk/* | awk '{print $1}')"
+                if [[ -n "''${ndk:-}" && -d "$ndk" ]]; then
+                  export ANDROID_NDK_HOME="$ndk"
+                  export ANDROID_NDK_ROOT="$ndk"
+                fi
+              fi
+
+              # Prefer live working-tree script (edits without re-eval); else store copy.
+              script=""
+              if [[ -f ./scripts/deploy-android.sh ]]; then
+                script=./scripts/deploy-android.sh
+              elif [[ -f ./android/Cargo.toml && -f ./scripts/deploy-android.sh ]]; then
+                script=./scripts/deploy-android.sh
+              else
+                # Walk up a few levels from CWD looking for the sleek root.
+                d="$PWD"
+                for _ in 1 2 3 4 5; do
+                  if [[ -f "$d/android/Cargo.toml" && -f "$d/scripts/deploy-android.sh" ]]; then
+                    script="$d/scripts/deploy-android.sh"
+                    break
+                  fi
+                  d="$(dirname "$d")"
+                done
+              fi
+              if [[ -z "''${script:-}" ]]; then
+                script="${./scripts/deploy-android.sh}"
+                if [[ ! -f ./android/Cargo.toml ]]; then
+                  echo "error: run from the sleek repo root (need android/Cargo.toml + path deps)" >&2
+                  echo "  cd /path/to/sleek && nix run .#deploy-android" >&2
+                  exit 1
+                fi
+              fi
+
+              exec bash "$script" "$@"
+            '';
+          };
+
+          # Iterative desktop host: flake toolchain + in-tree `cargo run`.
+          # Unlike .#default / `nix run` (pure Nix store binary), this builds and
+          # runs against the working tree so incremental cargo caches apply.
+          # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
+          run-host =
+            let
+              sleekLibPath = pkgs.lib.makeLibraryPath libs;
+              # pkg-config needs .dev outputs for headers + .pc files.
+              pkgConfigPath = pkgs.lib.makeSearchPath "lib/pkgconfig" (
+                map (p: p.dev or p) (
+                  libs
+                  ++ [
+                    pkgs.openssl
+                  ]
+                )
+              );
+              bindgen = v4l2BindgenEnv pkgs;
+            in
+            pkgs.writeShellApplication {
+              name = "run-host";
+              runtimeInputs = [
+                rust
+                pkgs.pkg-config
+                pkgs.llvmPackages.libclang
+              ];
+              text = ''
+                set -euo pipefail
+
+                export OPENSSL_NO_VENDOR=1
+                export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                export LD_LIBRARY_PATH="${sleekLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                export LIBCLANG_PATH="${bindgen.LIBCLANG_PATH}"
+                export SLEEK_LIBCLANG_PATH="${bindgen.SLEEK_LIBCLANG_PATH}"
+                export BINDGEN_EXTRA_CLANG_ARGS="${bindgen.BINDGEN_EXTRA_CLANG_ARGS}"
+                export V4L2R_VIDEODEV2_H_PATH="${bindgen.V4L2R_VIDEODEV2_H_PATH}"
+
+                # Codespace / desktop-lite: GUI opens on the VNC X display.
+                if [[ -n "''${SLEEK_CODESPACE:-}" ]]; then
+                  export DISPLAY="''${DISPLAY:-:1}"
+                  export LIBGL_ALWAYS_SOFTWARE="''${LIBGL_ALWAYS_SOFTWARE:-1}"
+                elif [[ -z "''${DISPLAY:-}" && -z "''${WAYLAND_DISPLAY:-}" ]]; then
+                  if [[ -S /tmp/.X11-unix/X1 ]]; then
+                    export DISPLAY=:1
+                  elif [[ -S /tmp/.X11-unix/X0 ]]; then
+                    export DISPLAY=:0
+                  fi
+                fi
+
+                # Find sleek repo root (host/Cargo.toml + android path dep).
+                root=""
+                if [[ -f ./host/Cargo.toml && -f ./android/Cargo.toml ]]; then
+                  root="$PWD"
+                else
+                  d="$PWD"
+                  for _ in 1 2 3 4 5; do
+                    if [[ -f "$d/host/Cargo.toml" && -f "$d/android/Cargo.toml" ]]; then
+                      root="$d"
+                      break
+                    fi
+                    d="$(dirname "$d")"
+                  done
+                fi
+                if [[ -z "''${root:-}" ]]; then
+                  echo "error: run from the sleek repo root (need host/Cargo.toml + path deps)" >&2
+                  echo "  cd /path/to/sleek && nix run .#host" >&2
+                  exit 1
+                fi
+                cd "$root"
+
+                exec cargo run --manifest-path host/Cargo.toml "$@"
+              '';
+            };
         in
         {
           default = sleek-host;
@@ -411,6 +573,8 @@ EOF
           android = sleek-android;
           inherit sleek-android;
           inherit install-android;
+          inherit deploy-android;
+          inherit run-host;
         }
       );
 
@@ -419,9 +583,18 @@ EOF
           type = "app";
           program = "${self.packages.${system}.default}/bin/sleek";
         };
+        # In-tree cargo run (iterative). Store binary remains `nix run` / .#default.
+        host = {
+          type = "app";
+          program = "${self.packages.${system}.run-host}/bin/run-host";
+        };
         install-android = {
           type = "app";
           program = "${self.packages.${system}.install-android}/bin/install-android";
+        };
+        deploy-android = {
+          type = "app";
+          program = "${self.packages.${system}.deploy-android}/bin/deploy-android";
         };
       });
 
@@ -506,7 +679,7 @@ EOF
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — just host | just waydroid | nix build .#android | nix run .#install-android"
+                  echo "sleek — nix run .#host | just host | just waydroid | nix run .#deploy-android | nix build .#android"
                 fi
               '';
             }

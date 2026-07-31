@@ -70,6 +70,11 @@ build_apk() {
   }
 
   echo "cargo apk (in-tree) → $APP" >&2
+  # cargo-apk stages NDK libs as mode 0555; rebuilds fail with Permission denied otherwise.
+  if [[ -d "$APP/target/debug/apk" ]]; then
+    chmod -R u+w "$APP/target/debug/apk" 2>/dev/null || true
+  fi
+  rm -f "$APP/target/debug/apk/"*-unaligned.apk 2>/dev/null || true
   (
     cd "$APP"
     cargo clean -p sleek --target x86_64-linux-android >&2 2>/dev/null || true
@@ -77,9 +82,14 @@ build_apk() {
   )
 
   local apk
-  apk="$(find "$APP/target" -name 'sleek.apk' -o -name '*-debug.apk' 2>/dev/null | head -1)"
+  # Prefer final sleek.apk; never install *-unaligned stubs.
+  if [[ -f "$APP/target/debug/apk/sleek.apk" ]]; then
+    apk="$APP/target/debug/apk/sleek.apk"
+  else
+    apk="$(find "$APP/target" -type f \( -name 'sleek.apk' -o -name '*-debug.apk' \) ! -name '*-unaligned.apk' 2>/dev/null | head -1)"
+  fi
   if [[ -z "${apk:-}" ]]; then
-    apk="$(find "$APP/target" -name '*.apk' 2>/dev/null | head -1)"
+    apk="$(find "$APP/target" -type f -name '*.apk' ! -name '*-unaligned.apk' 2>/dev/null | head -1)"
   fi
   [[ -n "${apk:-}" && -f "$apk" ]] || {
     echo "APK not found under $APP/target" >&2
