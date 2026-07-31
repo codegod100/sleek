@@ -56,17 +56,25 @@ host *args:
 lib:
     cargo build --manifest-path android/Cargo.toml --lib
 
-# APK in android/ → Waydroid (x86_64)
-waydroid:
-    ./scripts/waydroid.sh run
+# APK in android/ → Waydroid (x86_64) via flake (Rust + NDK + adb)
+#   just waydroid              # debug
+#   just waydroid build
+#   just waydroid launch
+#   just waydroid-release      # release (optimized + signed)
+#   just waydroid-release build
+waydroid *args:
+    nix run .#waydroid -- {{args}}
+
+waydroid-release *args:
+    nix run .#waydroid-release -- {{args}}
 
 run: waydroid
 
 install:
-    ./scripts/waydroid.sh install
+    nix run .#waydroid -- install
 
 launch:
-    ./scripts/waydroid.sh launch
+    nix run .#waydroid -- launch
 
 # Phone APK (aarch64) via flake — auto-pushes to Cachix when auth is present
 # Opt out: SLEEK_CACHIX_PUSH=0 just android

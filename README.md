@@ -27,12 +27,19 @@ nix develop        # or: direnv allow  (after .envrc)
 # or: ./scripts/enter
 just host          # desktop window (cargo run)
 just lib           # build android package as rlib (desktop target)
-just waydroid      # APK → install → launch on Waydroid (x86_64)
+just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
 
 # Or via the flake (builds desktop host into ./result):
 nix build          # → ./result/bin/sleek
 nix run            # pure Nix store binary (hermetic)
 nix run .#host     # in-tree cargo run (iterative; needs sibling vidya/freeq)
+
+# Waydroid (x86_64 cargo-apk + install/launch + full UI window):
+nix run .#waydroid                 # debug: build + install + launch + show-full-ui
+nix run .#waydroid-release         # release (optimized + local signing keystore)
+nix run .#waydroid -- build        # cargo-apk only
+nix run .#waydroid -- launch       # start activity + show-full-ui
+# Defaults: 1080×2400 @ density 420 (override with SLEEK_WAYDROID_WIDTH/HEIGHT/LCD_DENSITY)
 
 # Phone APK (aarch64) + adb install:
 # Fast iterate (in-tree cargo-apk + deploy — needs sibling vidya/freeq path deps):

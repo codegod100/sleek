@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use winit::platform::android::activity::AndroidApp;
+use eframe::egui::Context;
+use winit::platform::android::activity::{AndroidApp, WindowManagerFlags};
 
 use crate::clipboard::PickImageResult;
 
@@ -24,12 +25,552 @@ const PICK_IMAGE_REQ: i32 = 0x51_EE_61;
 const PICK_FRAGMENT_REQ: i32 = 0x1_EE_6;
 
 /// Stash the `AndroidApp` from `android_main` so path/permission helpers can use it.
+///
+/// Also enables edge-to-edge layout flags so the GL surface fills the physical
+/// display and `content_rect` reports real status/nav insets.
 pub fn set_android_app(app: AndroidApp) {
+    // LAYOUT_IN_SCREEN: draw under system bars.
+    // LAYOUT_INSET_DECOR: content_rect reports the safe area under those bars.
+    app.set_window_flags(
+        WindowManagerFlags::LAYOUT_IN_SCREEN | WindowManagerFlags::LAYOUT_INSET_DECOR,
+        WindowManagerFlags::empty(),
+    );
     let _ = ANDROID_APP.set(app);
 }
 
 fn android_app() -> Option<&'static AndroidApp> {
     ANDROID_APP.get()
+}
+
+/// System navigation interaction mode (3-button vs gestures).
+///
+/// Matches Android's internal `config_navBarInteractionMode` / Secure
+/// `navigation_mode` encoding. Used to refine chrome fallbacks when
+/// `content_rect` under- or over-reports the bottom inset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavMode {
+    /// Back / Home / Recents bar.
+    ThreeButton,
+    /// Home pill + Back (older Android).
+    TwoButton,
+    /// Edge-swipe gestures + thin home indicator.
+    Gestures,
+    /// Detection failed — treat measured insets as authoritative.
+    Unknown,
+}
+
+impl NavMode {
+    pub fn is_button_nav(self) -> bool {
+        matches!(self, Self::ThreeButton | Self::TwoButton)
+    }
+
+    pub fn is_gesture_nav(self) -> bool {
+        matches!(self, Self::Gestures)
+    }
+
+    fn from_android(code: i32) -> Self {
+        match code {
+            0 => Self::ThreeButton,
+            1 => Self::TwoButton,
+            2 => Self::Gestures,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ThreeButton => "three_button",
+            Self::TwoButton => "two_button",
+            Self::Gestures => "gestures",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Cache for JNI nav-mode probes (avoid attach every frame).
+struct NavModeCache {
+    mode: NavMode,
+    /// `Instant` of last successful JNI probe.
+    at: Instant,
+}
+
+static NAV_MODE_CACHE: Mutex<Option<NavModeCache>> = Mutex::new(None);
+
+/// Re-probe interval — mode only changes in Settings.
+const NAV_MODE_TTL: Duration = Duration::from_secs(2);
+
+/// Detect 3-button vs gesture navigation via `SleekActivity.navigationMode()`.
+///
+/// Results are cached for [`NAV_MODE_TTL`]. Returns [`NavMode::Unknown`] when
+/// JNI is unavailable (cold start, missing dex).
+pub fn navigation_mode() -> NavMode {
+    if let Ok(guard) = NAV_MODE_CACHE.lock() {
+        if let Some(c) = guard.as_ref() {
+            if c.at.elapsed() < NAV_MODE_TTL {
+                return c.mode;
+            }
+        }
+    }
+
+    let mode = query_navigation_mode_jni().unwrap_or(NavMode::Unknown);
+
+    if let Ok(mut guard) = NAV_MODE_CACHE.lock() {
+        let prev = guard.as_ref().map(|c| c.mode);
+        *guard = Some(NavModeCache {
+            mode,
+            at: Instant::now(),
+        });
+        if prev != Some(mode) {
+            log::info!("android nav mode: {}", mode.as_str());
+        }
+    }
+
+    mode
+}
+
+fn query_navigation_mode_jni() -> Option<NavMode> {
+    let app = android_app()?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return None;
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return None;
+    }
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    // SAFETY: vm from live AndroidApp.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+
+    let result = vm.attach_current_thread(|env| -> jni::errors::Result<i32> {
+        // SAFETY: activity global ref owned by the runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+
+        // 1) SleekActivity helper (full heuristics: Secure + config + insets).
+        if let Ok(cls) = env.find_class(jni_str!("uk/nandi/sleek/SleekActivity")) {
+            if let Ok(v) = env.call_static_method(
+                &cls,
+                jni_str!("navigationModeOf"),
+                jni_sig!((android.app.Activity) -> jint),
+                &[JValue::Object(&activity)],
+            ) {
+                if let Ok(code) = v.i() {
+                    if code >= 0 {
+                        return Ok(code);
+                    }
+                }
+            }
+            // Instance method fallback (subclass dex injected).
+            if let Ok(v) = env.call_method(
+                &activity,
+                jni_str!("navigationMode"),
+                jni_sig!(() -> jint),
+                &[],
+            ) {
+                if let Ok(code) = v.i() {
+                    if code >= 0 {
+                        return Ok(code);
+                    }
+                }
+            }
+        }
+
+        // 2) Direct Settings.Secure.navigation_mode — works even when the
+        // injected SleekActivity dex is stale/missing the helper methods
+        // (that was returning Unknown on Waydroid while `adb shell settings
+        // get secure navigation_mode` already showed 0 = three-button).
+        if let Ok(resolver) = env
+            .call_method(
+                &activity,
+                jni_str!("getContentResolver"),
+                jni_sig!(() -> android.content.ContentResolver),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            if !resolver.is_null() {
+                if let Ok(settings_secure) =
+                    env.find_class(jni_str!("android/provider/Settings$Secure"))
+                {
+                    if let Ok(name) = env.new_string("navigation_mode") {
+                        if let Ok(v) = env.call_static_method(
+                            &settings_secure,
+                            jni_str!("getInt"),
+                            jni_sig!(
+                                (android.content.ContentResolver, java.lang.String, jint) -> jint
+                            ),
+                            &[
+                                JValue::Object(&resolver),
+                                JValue::Object(name.as_ref()),
+                                JValue::Int(-1),
+                            ],
+                        ) {
+                            if let Ok(code) = v.i() {
+                                if code >= 0 {
+                                    return Ok(code);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(-1)
+    });
+
+    match result {
+        Ok(code) => Some(NavMode::from_android(code)),
+        Err(e) => {
+            log::debug!("android nav mode JNI: {e}");
+            None
+        }
+    }
+}
+
+/// Measured status/nav insets in **egui points**.
+///
+/// **Primary source:** JNI WindowInsets (`statusBars` + cutout +
+/// `navigationBars`). NativeActivity `content_rect` is secondary — it often
+/// reports `top=0` under edge-to-edge.
+///
+/// **Rules (hard-won):**
+/// 1. **Measured bottom is never shrunk** by a nav-mode guess. Clamping a real
+///    48 dp 3-button bar down to a “gesture” pad was the regression that drew
+///    app chrome over Back/Home/Recents when the detector lied.
+/// 2. **Bottom height classifies the bar** when mode is wrong/unknown:
+///    ≥40 pt ⇒ button nav, 12–32 pt ⇒ gesture handle.
+/// 3. Nav mode only **floors** missing measurements (never caps good ones).
+/// 4. **Top is never zero** while edge-to-edge — floor so the clock clears.
+pub fn measured_system_chrome(ctx: &Context) -> Option<vidya::SystemChrome> {
+    let ppp = ctx.pixels_per_point().max(0.01);
+    let screen = ctx.screen_rect();
+    if screen.height() <= 0.0 {
+        return None;
+    }
+    let max_inset = screen.height() * 0.25;
+
+    // 1) WindowInsets via JNI (authoritative under edge-to-edge).
+    let (jni_top_px, jni_bottom_px) = system_bar_insets_px().unwrap_or((0, 0));
+
+    // 2) content_rect as secondary (sometimes has nav when WindowInsets lag).
+    let (cr_top_px, cr_bottom_px) = content_rect_insets_px(ctx);
+
+    // Top: take the larger clearance so the clock always wins.
+    let top_px = jni_top_px.max(cr_top_px).max(0);
+    // Bottom: prefer WindowInsets when present. content_rect can over-report
+    // (IME/layout glitches) and used to force a 3-button-sized pad under
+    // gesture nav when we took max(jni, cr).
+    let bottom_px = if jni_bottom_px > 0 {
+        jni_bottom_px
+    } else {
+        cr_bottom_px.max(0)
+    };
+
+    let mut top = (top_px as f32 / ppp).clamp(0.0, max_inset);
+    let mut bottom = (bottom_px as f32 / ppp).clamp(0.0, max_inset);
+
+    // Edge-to-edge surface: never allow a zero top inset. content_rect and even
+    // early-frame WindowInsets can report 0 while the GL surface still draws
+    // under the status bar — floor so the title / header clear the clock.
+    const STATUS_TOP_MIN: f32 = 32.0;
+    if top < STATUS_TOP_MIN {
+        top = STATUS_TOP_MIN.min(max_inset);
+    }
+
+    // Bottom: **trust measured WindowInsets when present** (in points).
+    // Never shrink a real inset because a nav-mode guess said "gestures" —
+    // that was the regression that painted over Back/Home/Recents.
+    // Floors apply only when measurement is missing (0 px).
+    const GESTURE_BOTTOM_MIN: f32 = 16.0;
+    const BUTTON_BOTTOM_MIN: f32 = 48.0;
+    let nav = navigation_mode();
+    if bottom_px <= 0 {
+        if nav.is_button_nav() {
+            bottom = BUTTON_BOTTOM_MIN.min(max_inset);
+        } else if nav.is_gesture_nav() {
+            bottom = GESTURE_BOTTOM_MIN.min(max_inset);
+        } else {
+            // Unknown + no measurement: prefer button pad (covering system
+            // buttons is worse than a few empty points under gestures).
+            bottom = BUTTON_BOTTOM_MIN.min(max_inset);
+        }
+    }
+    // else: keep measured `bottom` from WindowInsets / content_rect as-is.
+
+    // One-shot-ish log when values/mode change (cache key via static).
+    {
+        static LAST: Mutex<Option<(u32, u32, NavMode)>> = Mutex::new(None);
+        let key = (
+            (top * 10.0) as u32,
+            (bottom * 10.0) as u32,
+            nav,
+        );
+        if let Ok(mut g) = LAST.lock() {
+            if g.as_ref() != Some(&key) {
+                log::info!(
+                    "android chrome: top={top:.1} bottom={bottom:.1} nav={} \
+                     jni_px=({jni_top_px},{jni_bottom_px}) cr_px=({cr_top_px},{cr_bottom_px})",
+                    nav.as_str()
+                );
+                *g = Some(key);
+            }
+        }
+    }
+
+    Some(vidya::SystemChrome { top, bottom })
+}
+
+/// Physical-pixel insets from `AndroidApp::content_rect` (may be zero/wrong).
+fn content_rect_insets_px(ctx: &Context) -> (i32, i32) {
+    let Some(app) = android_app() else {
+        return (0, 0);
+    };
+    let cr = app.content_rect();
+    if cr.right <= cr.left || cr.bottom <= cr.top {
+        return (0, 0);
+    }
+    let ppp = ctx.pixels_per_point().max(0.01);
+    let surface_h = (ctx.screen_rect().height() * ppp).round() as i32;
+    if surface_h <= 0 {
+        return (0, 0);
+    }
+    let content_h = cr.bottom - cr.top;
+    if content_h < surface_h / 3 {
+        return (0, 0);
+    }
+    let top = cr.top.max(0);
+    let bottom = (surface_h - cr.bottom).max(0);
+    (top, bottom)
+}
+
+/// JNI: status + nav bar insets in physical pixels.
+///
+/// Tries `SleekActivity` helpers first, then reads `WindowInsets` directly from
+/// the decor view (does not depend on injected-dex methods — those were
+/// returning 0/`Unknown` on device while `VRI` already had real insets).
+fn system_bar_insets_px() -> Option<(i32, i32)> {
+    let app = android_app()?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return None;
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return None;
+    }
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    // SAFETY: vm from live AndroidApp.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+
+    let result = vm.attach_current_thread(|env| -> jni::errors::Result<(i32, i32)> {
+        // SAFETY: activity global ref owned by the runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+
+        // 1) SleekActivity helpers (dimen fallbacks + cutout max).
+        if let Ok(cls) = env.find_class(jni_str!("uk/nandi/sleek/SleekActivity")) {
+            let top = env
+                .call_static_method(
+                    &cls,
+                    jni_str!("statusBarInsetPx"),
+                    jni_sig!((android.app.Activity) -> jint),
+                    &[JValue::Object(&activity)],
+                )
+                .ok()
+                .and_then(|v| v.i().ok())
+                .unwrap_or(0)
+                .max(0);
+            let bottom = env
+                .call_static_method(
+                    &cls,
+                    jni_str!("navigationBarInsetPx"),
+                    jni_sig!((android.app.Activity) -> jint),
+                    &[JValue::Object(&activity)],
+                )
+                .ok()
+                .and_then(|v| v.i().ok())
+                .unwrap_or(0)
+                .max(0);
+            if top > 0 || bottom > 0 {
+                return Ok((top, bottom));
+            }
+        }
+
+        // 2) Direct WindowInsets from decor (framework API — no custom dex).
+        let window = env
+            .call_method(
+                &activity,
+                jni_str!("getWindow"),
+                jni_sig!(() -> android.view.Window),
+                &[],
+            )?
+            .l()?;
+        if !window.is_null() {
+            let decor = env
+                .call_method(
+                    &window,
+                    jni_str!("getDecorView"),
+                    jni_sig!(() -> android.view.View),
+                    &[],
+                )?
+                .l()?;
+            if !decor.is_null() {
+                let root = env
+                    .call_method(
+                        &decor,
+                        jni_str!("getRootWindowInsets"),
+                        jni_sig!(() -> android.view.WindowInsets),
+                        &[],
+                    )?
+                    .l()?;
+                if !root.is_null() {
+                    let mut top = 0i32;
+                    let mut bottom = 0i32;
+
+                    // Typed insets (API 30+): WindowInsets.Type.statusBars() etc.
+                    if let Ok(type_cls) =
+                        env.find_class(jni_str!("android/view/WindowInsets$Type"))
+                    {
+                        let status_t = env
+                            .call_static_method(
+                                &type_cls,
+                                jni_str!("statusBars"),
+                                jni_sig!(() -> jint),
+                                &[],
+                            )
+                            .ok()
+                            .and_then(|v| v.i().ok());
+                        let nav_t = env
+                            .call_static_method(
+                                &type_cls,
+                                jni_str!("navigationBars"),
+                                jni_sig!(() -> jint),
+                                &[],
+                            )
+                            .ok()
+                            .and_then(|v| v.i().ok());
+                        let cutout_t = env
+                            .call_static_method(
+                                &type_cls,
+                                jni_str!("displayCutout"),
+                                jni_sig!(() -> jint),
+                                &[],
+                            )
+                            .ok()
+                            .and_then(|v| v.i().ok());
+                        if let (Some(st), Some(nt), Some(ct)) = (status_t, nav_t, cutout_t) {
+                            let status_top = window_insets_top(env, &root, st);
+                            let cutout_top = window_insets_top(env, &root, ct);
+                            let nav_bottom = window_insets_bottom(env, &root, nt);
+                            top = status_top.max(cutout_top);
+                            bottom = nav_bottom;
+                        }
+                    }
+
+                    if top <= 0 {
+                        top = env
+                            .call_method(
+                                &root,
+                                jni_str!("getSystemWindowInsetTop"),
+                                jni_sig!(() -> jint),
+                                &[],
+                            )
+                            .ok()
+                            .and_then(|v| v.i().ok())
+                            .unwrap_or(0)
+                            .max(0);
+                    }
+                    if bottom <= 0 {
+                        bottom = env
+                            .call_method(
+                                &root,
+                                jni_str!("getSystemWindowInsetBottom"),
+                                jni_sig!(() -> jint),
+                                &[],
+                            )
+                            .ok()
+                            .and_then(|v| v.i().ok())
+                            .unwrap_or(0)
+                            .max(0);
+                    }
+
+                    if top > 0 || bottom > 0 {
+                        return Ok((top, bottom));
+                    }
+                }
+            }
+        }
+
+        Ok((0, 0))
+    });
+
+    match result {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            log::debug!("android system bar insets JNI: {e}");
+            None
+        }
+    }
+}
+
+fn window_insets_top(env: &mut jni::Env<'_>, root: &jni::objects::JObject<'_>, type_mask: i32) -> i32 {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+    let Ok(insets) = env
+        .call_method(
+            root,
+            jni_str!("getInsets"),
+            jni_sig!((jint) -> android.graphics.Insets),
+            &[JValue::Int(type_mask)],
+        )
+        .and_then(|v| v.l())
+    else {
+        return 0;
+    };
+    if insets.is_null() {
+        return 0;
+    }
+    env.get_field(&insets, jni_str!("top"), jni_sig!(jint))
+        .ok()
+        .and_then(|v| v.i().ok())
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn window_insets_bottom(
+    env: &mut jni::Env<'_>,
+    root: &jni::objects::JObject<'_>,
+    type_mask: i32,
+) -> i32 {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+    let Ok(insets) = env
+        .call_method(
+            root,
+            jni_str!("getInsets"),
+            jni_sig!((jint) -> android.graphics.Insets),
+            &[JValue::Int(type_mask)],
+        )
+        .and_then(|v| v.l())
+    else {
+        return 0;
+    };
+    if insets.is_null() {
+        return 0;
+    }
+    env.get_field(&insets, jni_str!("bottom"), jni_sig!(jint))
+        .ok()
+        .and_then(|v| v.i().ok())
+        .unwrap_or(0)
+        .max(0)
 }
 
 /// Shared media directories (used only as fallback path hints / logging).

@@ -303,8 +303,16 @@ build_apk() {
     if [[ "$CLEAN" -eq 1 ]]; then
       cargo clean -p sleek --target "$TARGET" >&2 2>/dev/null || true
     fi
-    cargo apk "${apk_args[@]}" >&2
-  )
+    # Explicit status check: some shells/contexts with command-substitution
+    # callers have been observed to continue after a failed cargo-apk.
+    cargo apk "${apk_args[@]}" >&2 || {
+      echo "error: cargo apk failed" >&2
+      exit 1
+    }
+  ) || {
+    echo "error: APK build failed — not installing a stale package" >&2
+    exit 1
+  }
 
   local apk
   apk="$(find_apk "$profile")" || {

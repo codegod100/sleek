@@ -140,13 +140,17 @@
               "clippy"
             ];
           };
+          # aarch64 for phone APK; x86_64 for Waydroid (host container).
           rustAndroid = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
               "rustfmt"
               "clippy"
             ];
-            targets = [ androidTarget ];
+            targets = [
+              androidTarget
+              "x86_64-linux-android"
+            ];
           };
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rust;
@@ -493,6 +497,104 @@ EOF
             '';
           };
 
+          # Iterative Waydroid deploy: flake toolchain + in-tree cargo-apk (x86_64)
+          # + adb install/launch. Opens full Android UI by default (portrait phone).
+          # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
+          # Host `waydroid` CLI must be on PATH (system/NixOS package).
+          #
+          # Display defaults match a tall phone window; override via env when
+          # calling `nix run .#waydroid -- …`.
+          # `.#waydroid` = debug; `.#waydroid-release` = cargo apk --release.
+          waydroidDisplay = {
+            width = "1080";
+            height = "2400";
+            lcdDensity = "420";
+          };
+          mkWaydroidApp =
+            {
+              name,
+              release ? false,
+            }:
+            pkgs.writeShellApplication {
+              inherit name;
+              runtimeInputs = [
+                rustAndroid
+                pkgs.cargo-apk
+                pkgs.android-tools
+                pkgs.jdk17_headless
+                pkgs.python3
+                pkgs.findutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.coreutils
+                pkgs.bash
+                pkgs.procps
+              ];
+              text = ''
+                set -euo pipefail
+
+                # Hermetic SDK/NDK from the flake (override with env if you prefer host tools).
+                export ANDROID_HOME="''${ANDROID_HOME:-${androidSdkRoot}}"
+                export ANDROID_SDK_ROOT="''${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+                export ANDROID_NDK_HOME="''${ANDROID_NDK_HOME:-${androidSdkRoot}/ndk-bundle}"
+                export ANDROID_NDK_ROOT="''${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+                if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
+                  ndk="$(echo "$ANDROID_HOME"/ndk/* | awk '{print $1}')"
+                  if [[ -n "''${ndk:-}" && -d "$ndk" ]]; then
+                    export ANDROID_NDK_HOME="$ndk"
+                    export ANDROID_NDK_ROOT="$ndk"
+                  fi
+                fi
+
+                # Waydroid window / density (portrait phone). Env overrides win.
+                export SLEEK_WAYDROID_WIDTH="''${SLEEK_WAYDROID_WIDTH:-${waydroidDisplay.width}}"
+                export SLEEK_WAYDROID_HEIGHT="''${SLEEK_WAYDROID_HEIGHT:-${waydroidDisplay.height}}"
+                export SLEEK_WAYDROID_LCD_DENSITY="''${SLEEK_WAYDROID_LCD_DENSITY:-${waydroidDisplay.lcdDensity}}"
+                # 1 = open `waydroid show-full-ui` before launch (needed to see the app).
+                export SLEEK_WAYDROID_SHOW_UI="''${SLEEK_WAYDROID_SHOW_UI:-1}"
+                # 1 = try `waydroid session start` if session is stopped.
+                export SLEEK_WAYDROID_START_SESSION="''${SLEEK_WAYDROID_START_SESSION:-1}"
+                # Release profile (optimized + signed). Env can still force either way.
+                export SLEEK_WAYDROID_RELEASE="''${SLEEK_WAYDROID_RELEASE:-${if release then "1" else "0"}}"
+
+                # Prefer live working-tree script (edits without re-eval); else store copy.
+                script=""
+                if [[ -f ./scripts/waydroid.sh ]]; then
+                  script=./scripts/waydroid.sh
+                elif [[ -f ./android/Cargo.toml && -f ./scripts/waydroid.sh ]]; then
+                  script=./scripts/waydroid.sh
+                else
+                  d="$PWD"
+                  for _ in 1 2 3 4 5; do
+                    if [[ -f "$d/android/Cargo.toml" && -f "$d/scripts/waydroid.sh" ]]; then
+                      script="$d/scripts/waydroid.sh"
+                      break
+                    fi
+                    d="$(dirname "$d")"
+                  done
+                fi
+                if [[ -z "''${script:-}" ]]; then
+                  script="${./scripts/waydroid.sh}"
+                  if [[ ! -f ./android/Cargo.toml ]]; then
+                    echo "error: run from the sleek repo root (need android/Cargo.toml + path deps)" >&2
+                    echo "  cd /path/to/sleek && nix run .#${name}" >&2
+                    exit 1
+                  fi
+                fi
+
+                exec bash "$script" "$@"
+              '';
+            };
+          run-waydroid = mkWaydroidApp {
+            name = "waydroid";
+            release = false;
+          };
+          run-waydroid-release = mkWaydroidApp {
+            name = "waydroid-release";
+            release = true;
+          };
+
           # Iterative desktop host: flake toolchain + in-tree `cargo run`.
           # Unlike .#default / `nix run` (pure Nix store binary), this builds and
           # runs against the working tree so incremental cargo caches apply.
@@ -574,6 +676,10 @@ EOF
           inherit sleek-android;
           inherit install-android;
           inherit deploy-android;
+          waydroid = run-waydroid;
+          inherit run-waydroid;
+          waydroid-release = run-waydroid-release;
+          inherit run-waydroid-release;
           inherit run-host;
         }
       );
@@ -595,6 +701,16 @@ EOF
         deploy-android = {
           type = "app";
           program = "${self.packages.${system}.deploy-android}/bin/deploy-android";
+        };
+        # In-tree cargo-apk (x86_64) → Waydroid adb install + launch (debug).
+        waydroid = {
+          type = "app";
+          program = "${self.packages.${system}.waydroid}/bin/waydroid";
+        };
+        # Same as .#waydroid but cargo apk --release (signed local keystore).
+        waydroid-release = {
+          type = "app";
+          program = "${self.packages.${system}.waydroid-release}/bin/waydroid-release";
         };
       });
 
@@ -679,7 +795,7 @@ EOF
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — nix run .#host | just host | just waydroid | nix run .#deploy-android | nix build .#android"
+                  echo "sleek — nix run .#host | nix run .#waydroid | nix run .#waydroid-release | nix run .#deploy-android | nix build .#android"
                 fi
               '';
             }

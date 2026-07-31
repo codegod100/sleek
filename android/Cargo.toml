@@ -172,6 +172,9 @@ label = "Sleek"
 # defaults hasCode=false for pure-native apps.
 has_code = true
 orientations = ["Portrait", "Landscape"]
+# No action bar; SleekActivity still draws edge-to-edge under transparent
+# system bars (not Theme.*.Fullscreen, which would hide the status bar).
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
 
 # Subclass of NativeActivity (classes.dex injected post cargo-apk) so
 # onNewIntent can capture freeq:// OAuth callbacks while the app is warm.

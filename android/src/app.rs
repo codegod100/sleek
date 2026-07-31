@@ -3,6 +3,8 @@
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Vec2};
 use freeq_sdk::event::Event;
 use vidya::{apply, body, button, dim_label, reserve_system_chrome, title, Mode, Theme};
+#[cfg(target_os = "android")]
+use vidya::set_system_chrome;
 
 use crate::auth::{self, AuthTokens};
 use crate::av::{self, LocalCall, MediaStatus};
@@ -1327,7 +1329,7 @@ impl SleekApp {
         self.state.status_line = "Connecting…".into();
 
         // Client-side room memory (prefs) — freeq does not reliably restore
-        // channel membership across reconnects. Default lobby is #general.
+        // channel membership across reconnects. Defaults: #general, #test.
         let auto_join = self.state.auto_join_channels();
 
         self.net.send(NetCmd::Connect {
@@ -1722,9 +1724,15 @@ impl eframe::App for SleekApp {
             || screen.height() >= screen.width()
             || screen.width() < 640.0;
 
-        // vidya::reserve_system_chrome already grows the bottom inset while a
-        // text field has focus (IME clearance). Do not add a second IME band
-        // here — that double-padded ~80% of the screen gray on join/search.
+        // System status / nav safe areas (edge-to-edge). Measured via
+        // WindowInsets JNI + content_rect; top is floored so the status bar
+        // is always respected (content_rect alone often reports top=0).
+        // Bottom refined for 3-button vs gesture (android_media::navigation_mode).
+        // IME clearance still lives in vidya::system_chrome when focused.
+        #[cfg(target_os = "android")]
+        if let Some(chrome) = crate::android_media::measured_system_chrome(ctx) {
+            set_system_chrome(ctx, chrome);
+        }
         reserve_system_chrome(ctx, &th);
 
         let connected = self.state.connection == ConnectionState::Registered
@@ -1915,12 +1923,26 @@ impl eframe::App for SleekApp {
 
         // ── Main content ───────────────────────────────────────────
         // Theater mode: zero margin so video claims the whole window.
-        // Landscape short: smaller page padding so chat keeps height.
+        // Android / fill: tight side padding so content uses the full width;
+        // vertical pad is minimal (system chrome + header/tabs already own
+        // the safe edges — large page padding looked letterboxed).
         let page = if av_fullscreen {
             egui::Frame::new().fill(p.window_bg).inner_margin(egui::Margin::ZERO)
         } else if fill {
-            let h_pad = if short { 8_i8 } else { 10_i8 };
-            let v_pad = if short { (sp.sm) as i8 } else { sp.page as i8 };
+            let h_pad = if cfg!(target_os = "android") {
+                if short { 6_i8 } else { 8_i8 }
+            } else if short {
+                8_i8
+            } else {
+                10_i8
+            };
+            let v_pad = if cfg!(target_os = "android") {
+                if short { sp.xs as i8 } else { sp.sm as i8 }
+            } else if short {
+                sp.sm as i8
+            } else {
+                sp.page as i8
+            };
             egui::Frame::new()
                 .fill(p.window_bg)
                 .inner_margin(egui::Margin::symmetric(h_pad, v_pad))
