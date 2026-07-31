@@ -4,6 +4,14 @@ Mobile **freeq** client built with **[Vidya](../vidya)** (GNOME/HIG-inspired egu
 
 Layout and flows take cues from the freeq Android app: connect (guest), chats list, chat detail, discover, and settings — with a portrait bottom-tab shell.
 
+## Screenshot
+
+Sleek on Waydroid (chat + in-call video):
+
+<p align="center">
+  <img src="docs/waydroid.png" alt="Sleek on Waydroid — chat with live call overlay" width="320" />
+</p>
+
 ## Screens
 
 | Screen | Role |
