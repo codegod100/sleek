@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Sleek
+GenericName=Chat
+Comment=Freeq chat client — channels, DMs, and calls
+Exec=sleek
+Icon=uk.nandi.sleek
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=freeq;irc;chat;call;video;
+StartupNotify=true
+# Must match ViewportBuilder::with_app_id / eframe run_native name (Wayland app_id).
+StartupWMClass=uk.nandi.sleek

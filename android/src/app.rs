@@ -16,7 +16,8 @@ use crate::state::{
     LinkMeta, MediaFetch, Route, Tab,
 };
 use crate::ui::{
-    self, ChatAction, ChatsAction, ConnectAction, DiscoverAction, SettingsAction,
+    self, image_lightbox_overlay, ChatAction, ChatsAction, ConnectAction, DiscoverAction,
+    SettingsAction,
 };
 
 /// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
@@ -61,6 +62,25 @@ fn detect_screen_size() -> Option<egui::Vec2> {
     None
 }
 
+/// Freedesktop / Wayland app id — must match `StartupWMClass` in the .desktop file.
+const APP_ID: &str = "uk.nandi.sleek";
+
+/// Window / taskbar icon (RGBA). Path relative to the `sleek` crate root (`android/`).
+fn load_app_icon() -> Option<egui::IconData> {
+    // Built into the binary so the dock/titlebar works without icon-theme lookup.
+    let bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../assets/icons/uk.nandi.sleek-256.png"
+    ));
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
+}
+
 /// Desktop / host entry.
 pub fn run_desktop() -> eframe::Result {
     #[cfg(not(target_os = "android"))]
@@ -74,7 +94,14 @@ pub fn run_desktop() -> eframe::Result {
         .try_init();
     }
     let fit_viewport = fit_viewport_enabled();
-    let mut viewport = egui::ViewportBuilder::default().with_title("Sleek");
+    // app_id: niri/Noctalia match the window to uk.nandi.sleek.desktop.
+    // with_icon: taskbar/titlebar even when the theme lookup fails.
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Sleek")
+        .with_app_id(APP_ID);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     if fit_viewport {
         // Fluxbox on desktop-lite often ignores `maximized`; size to the X
         // screen (or fullscreen) so noVNC shows a full-viewport app.
@@ -98,7 +125,7 @@ pub fn run_desktop() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Sleek",
+        APP_ID,
         options,
         Box::new(move |cc| Ok(Box::new(SleekApp::new(cc, fit_viewport)))),
     )
@@ -686,11 +713,39 @@ impl SleekApp {
                     .get("+freeq.at/reactions")
                     .map(|raw| parse_reactions_tag(raw))
                     .unwrap_or_default();
-                // Server may mark history/live edits via draft/edit or freeq edit tags.
-                let is_edited = tags.contains_key("+draft/edit")
-                    || tags.contains_key("draft/edit")
+                // Live / history edit: rewrite the original in place when present.
+                let edit_of = tags
+                    .get("+draft/edit")
+                    .or_else(|| tags.get("draft/edit"))
+                    .filter(|id| !id.is_empty())
+                    .cloned();
+                let is_edited = edit_of.is_some()
                     || tags.contains_key("+freeq.at/edited")
                     || tags.get("edited").is_some_and(|v| !v.is_empty());
+
+                let viewing = self
+                    .state
+                    .active_channel
+                    .as_ref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(&buffer_name));
+
+                if let Some(original_id) = edit_of.as_deref() {
+                    let applied = {
+                        let buf = self.state.ensure_buffer(&buffer_name);
+                        buf.apply_edit(
+                            &from,
+                            original_id,
+                            Some(msgid.as_str()),
+                            &body,
+                            embed.clone(),
+                            link_meta.clone(),
+                        )
+                    };
+                    if applied {
+                        // Rewrote in place — skip appending a second row.
+                        return;
+                    }
+                }
 
                 let msg = ChatMessage {
                     id: msgid,
@@ -702,17 +757,12 @@ impl SleekApp {
                     is_deleted: false,
                     timestamp,
                     reply_to,
+                    edit_of,
                     is_signed,
                     embed,
                     link_meta,
                     reactions,
                 };
-
-                let viewing = self
-                    .state
-                    .active_channel
-                    .as_ref()
-                    .is_some_and(|a| a.eq_ignore_ascii_case(&buffer_name));
 
                 let buf = self.state.ensure_buffer(&buffer_name);
                 buf.append(msg);
@@ -855,6 +905,7 @@ impl SleekApp {
                     self.state.dm_buffer_key(&target)
                 };
                 self.handle_reaction_tags(&key, &from, &tags);
+                self.handle_delete_tags(&key, &from, &tags);
                 self.handle_av_tags(&key, &tags);
             }
             // batches, history, etc. — not yet rendered
@@ -1253,8 +1304,8 @@ impl SleekApp {
         }
     }
 
-    /// Dispatch in-call chrome actions from the global call panel (compact or fullscreen).
-    fn handle_av_call_action(&mut self, ctx: &egui::Context, act: ChatAction) {
+    /// Dispatch in-call chrome actions from the global call panel.
+    fn handle_av_call_action(&mut self, _ctx: &egui::Context, act: ChatAction) {
         match act {
             ChatAction::AvLeave => self.do_av_leave(),
             ChatAction::AvToggleMute => self.do_av_toggle_mute(),
@@ -1263,30 +1314,11 @@ impl SleekApp {
             ChatAction::AvSelectCamera(id) => self.do_av_select_camera(id),
             ChatAction::AvSelectMic(id) => self.do_av_select_mic(id),
             ChatAction::AvSelectSpeaker(id) => self.do_av_select_speaker(id),
-            ChatAction::AvRotateWindow => self.do_rotate_window(ctx),
             ChatAction::OpenCallChannel(ch) => {
                 self.state.open_chat(&ch);
             }
             _ => {}
         }
-    }
-
-    /// Desktop: swap window width/height so the whole app flips landscape ↔ portrait.
-    fn do_rotate_window(&self, ctx: &egui::Context) {
-        let size = ctx.input(|i| {
-            i.viewport()
-                .inner_rect
-                .map(|r| r.size())
-                .filter(|s| s.x > 1.0 && s.y > 1.0)
-                .unwrap_or_else(|| i.screen_rect().size())
-        });
-        let w = size.x.max(320.0);
-        let h = size.y.max(320.0);
-        // Leave maximized/fullscreen so InnerSize is applied.
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(h, w)));
-        ctx.request_repaint();
     }
 
     fn do_connect(&mut self) {
@@ -1517,6 +1549,7 @@ impl SleekApp {
 
     fn do_send(&mut self, target: String, text: String) {
         // Image attached: upload then PRIVMSG the freeq media URL.
+        // Slash commands don't apply when attaching media (caption is plain text).
         if self.state.compose_image.is_some() {
             self.do_send_with_image(target, text);
             return;
@@ -1528,8 +1561,67 @@ impl SleekApp {
         }
         self.state.compose.clear();
         self.state.compose_nick_tab.clear();
+
+        if text.starts_with('/') {
+            self.handle_slash_command(&target, &text);
+            return;
+        }
+
         self.do_send_local_echo(&target, text.clone());
         self.net.send(NetCmd::Privmsg { target, text });
+    }
+
+    /// Dispatch `/join`, `/me`, `/msg`, … — mirrors freeq-android ComposeBar.
+    fn handle_slash_command(&mut self, active_target: &str, input: &str) {
+        match crate::slash::parse(input) {
+            crate::slash::SlashCommand::Join(channel) => {
+                self.do_join(channel);
+            }
+            crate::slash::SlashCommand::PartActive => {
+                self.do_part(active_target.to_string());
+            }
+            crate::slash::SlashCommand::Nick(new_nick) => {
+                self.net.send(NetCmd::Raw(format!("NICK {new_nick}")));
+            }
+            crate::slash::SlashCommand::Me(action) => {
+                let wire = format!("\u{1}ACTION {action}\u{1}");
+                self.do_send_local_echo_action(active_target, action);
+                self.net.send(NetCmd::Privmsg {
+                    target: active_target.to_string(),
+                    text: wire,
+                });
+            }
+            crate::slash::SlashCommand::Msg { target, text } => {
+                self.do_send_local_echo(&target, text.clone());
+                self.net.send(NetCmd::Privmsg { target, text });
+            }
+            crate::slash::SlashCommand::Topic(topic) => {
+                self.net
+                    .send(NetCmd::Raw(format!("TOPIC {active_target} :{topic}")));
+            }
+            crate::slash::SlashCommand::Raw(line) => {
+                self.net.send(NetCmd::Raw(line));
+            }
+            crate::slash::SlashCommand::Empty => {}
+        }
+    }
+
+    fn do_part(&mut self, channel: String) {
+        // Only PART the server if we actually joined; denied joins are local-only.
+        let need_part = self
+            .state
+            .channels
+            .get(&channel)
+            .is_some_and(|b| b.is_joined());
+        if need_part {
+            self.net.send(NetCmd::Part(channel.clone()));
+        }
+        self.state.channels.remove(&channel);
+        self.state.channel_order.retain(|n| n != &channel);
+        self.state.forget_channel(&channel);
+        if self.state.active_channel.as_deref() == Some(channel.as_str()) {
+            self.state.close_chat();
+        }
     }
 
     fn do_send_with_image(&mut self, target: String, caption: String) {
@@ -1572,6 +1664,14 @@ impl SleekApp {
     }
 
     fn do_send_local_echo(&mut self, target: &str, text: String) {
+        self.do_send_local_echo_inner(target, text, false);
+    }
+
+    fn do_send_local_echo_action(&mut self, target: &str, text: String) {
+        self.do_send_local_echo_inner(target, text, true);
+    }
+
+    fn do_send_local_echo_inner(&mut self, target: &str, text: String, is_action: bool) {
         // Optimistic local echo for snappy UI. When the server echoes the
         // PRIVMSG back (echo-message), Buffer::append drops this local-* row
         // and keeps the real msgid / signed copy — so the user never sees
@@ -1580,7 +1680,11 @@ impl SleekApp {
         // File under the canonical DM key (DID when known) so the echo lands
         // in the same thread as the server echo and peer replies.
         let buffer_key = self.state.dm_buffer_key(target);
-        let embed = preview::embed_from_text(&text);
+        let embed = if is_action {
+            None
+        } else {
+            preview::embed_from_text(&text)
+        };
         if let Some(preview::Embed::Image { ref url }) = embed {
             self.state.media.touch_image(url);
         } else if let Some(preview::Embed::Link { ref url }) = embed {
@@ -1591,11 +1695,12 @@ impl SleekApp {
             from: self.state.nick.clone(),
             text,
             is_system: false,
-            is_action: false,
+            is_action,
             is_edited: false,
             is_deleted: false,
             timestamp: chrono::Local::now(),
             reply_to: None,
+            edit_of: None,
             is_signed: false,
             embed,
             link_meta: None,
@@ -1687,6 +1792,70 @@ impl SleekApp {
             });
         }
     }
+
+    /// Apply inbound `+draft/delete` TAGMSG (soft-delete tombstone).
+    fn handle_delete_tags(
+        &mut self,
+        buffer: &str,
+        from: &str,
+        tags: &std::collections::HashMap<String, String>,
+    ) {
+        let delete_id = tags
+            .get("+draft/delete")
+            .or_else(|| tags.get("draft/delete"))
+            .filter(|id| !id.is_empty())
+            .cloned();
+        let Some(msgid) = delete_id else {
+            return;
+        };
+        if let Some(buf) = self.state.channels.get_mut(buffer) {
+            let _ = buf.apply_delete(from, &msgid);
+        }
+    }
+
+    /// Send a `+draft/edit` and clear compose edit mode.
+    fn do_edit(&mut self, target: String, msgid: String, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() || msgid.is_empty() || msgid.starts_with("local-") {
+            return;
+        }
+        // Optimistic local rewrite — echo-message will re-apply with the new msgid.
+        let nick = self.state.nick.clone();
+        let buffer_key = self.state.dm_buffer_key(&target);
+        let embed = preview::embed_from_text(&text);
+        if let Some(preview::Embed::Image { ref url }) = embed {
+            self.state.media.touch_image(url);
+        } else if let Some(preview::Embed::Link { ref url }) = embed {
+            self.state.media.touch_link(url);
+        }
+        if let Some(buf) = self.state.channels.get_mut(&buffer_key) {
+            let _ = buf.apply_edit(&nick, &msgid, None, &text, embed, None);
+        }
+        self.state.compose.clear();
+        self.state.compose_nick_tab.clear();
+        self.state.editing_msgid = None;
+        self.net.send(NetCmd::EditMessage {
+            target,
+            msgid,
+            text,
+        });
+    }
+
+    /// Soft-delete a message. Optimistic tombstone — TAGMSG is not echoed to us.
+    fn do_delete(&mut self, target: String, msgid: String) {
+        if msgid.is_empty() || msgid.starts_with("local-") {
+            return;
+        }
+        let nick = self.state.nick.clone();
+        let buffer_key = self.state.dm_buffer_key(&target);
+        if let Some(buf) = self.state.channels.get_mut(&buffer_key) {
+            let _ = buf.apply_delete(&nick, &msgid);
+        }
+        if self.state.editing_msgid.as_deref() == Some(msgid.as_str()) {
+            self.state.cancel_edit();
+        }
+        self.net.send(NetCmd::DeleteMessage { target, msgid });
+    }
 }
 
 /// Parse IRCv3 `time` / `server-time` tag into local wall-clock.
@@ -1767,13 +1936,8 @@ impl eframe::App for SleekApp {
             }
         }
 
-        // Theater mode: call UI owns the whole window (no top strip / tabs / chat).
-        let av_fullscreen =
-            self.state.local_call.is_some() && self.state.av_fullscreen;
-
         // ── Active MoQ call (always visible while open; one at a time) ─
-        // Compact bar when not fullscreen; fullscreen paints in CentralPanel.
-        if self.state.local_call.is_some() && !av_fullscreen {
+        if self.state.local_call.is_some() {
             egui::TopBottomPanel::top("av_moq_global")
                 .frame(
                     egui::Frame::new()
@@ -1800,12 +1964,10 @@ impl eframe::App for SleekApp {
         // ── Bottom tabs (connected, not in chat detail) ────────────
         // Hide while the soft keyboard is up so the compose / focused field
         // has room above the IME (tabs would otherwise sit under the keys).
-        // Also hide in AV fullscreen theater mode.
         let show_tabs = connected
             && matches!(self.state.route, Route::Tabs)
             && self.state.connection == ConnectionState::Registered
-            && !ctx.wants_keyboard_input()
-            && !av_fullscreen;
+            && !ctx.wants_keyboard_input();
 
         if show_tabs {
             let tab_vpad = if short { sp.xs } else { sp.sm };
@@ -1867,8 +2029,8 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Header (compact when in chat; hidden in AV fullscreen) ─
-        if !av_fullscreen && !matches!(self.state.route, Route::Chat(_)) {
+        // ── Header (compact when in chat) ─
+        if !matches!(self.state.route, Route::Chat(_)) {
             // Landscape / short: one row (title · status) instead of stacked block.
             let (head_top, head_bot) = if short {
                 (sp.xs + 2.0, sp.xs)
@@ -1922,13 +2084,10 @@ impl eframe::App for SleekApp {
         }
 
         // ── Main content ───────────────────────────────────────────
-        // Theater mode: zero margin so video claims the whole window.
         // Android / fill: tight side padding so content uses the full width;
         // vertical pad is minimal (system chrome + header/tabs already own
         // the safe edges — large page padding looked letterboxed).
-        let page = if av_fullscreen {
-            egui::Frame::new().fill(p.window_bg).inner_margin(egui::Margin::ZERO)
-        } else if fill {
+        let page = if fill {
             let h_pad = if cfg!(target_os = "android") {
                 if short { 6_i8 } else { 8_i8 }
             } else if short {
@@ -1951,15 +2110,6 @@ impl eframe::App for SleekApp {
         };
 
         egui::CentralPanel::default().frame(page).show(ctx, |ui| {
-            // AV theater mode: only the call UI — no chat/tabs underneath.
-            if av_fullscreen {
-                ui.set_min_size(ui.available_size());
-                if let Some(act) = ui::active_call_panel(ui, &th, &mut self.state) {
-                    self.handle_av_call_action(ctx, act);
-                }
-                return;
-            }
-
             // Local desktop: narrow phone-like column. Codespace: full window.
             let col_w = if fill {
                 ui.available_width()
@@ -1987,21 +2137,18 @@ impl eframe::App for SleekApp {
                     } => {
                         self.do_toggle_react(target, msgid, emoji);
                     }
+                    ChatAction::Edit {
+                        target,
+                        msgid,
+                        text,
+                    } => {
+                        self.do_edit(target, msgid, text);
+                    }
+                    ChatAction::Delete { target, msgid } => {
+                        self.do_delete(target, msgid);
+                    }
                     ChatAction::Part(channel) => {
-                        // Only PART the server if we actually joined; denied
-                        // joins (guest on #policytest, etc.) are local-only.
-                        let need_part = self
-                            .state
-                            .channels
-                            .get(&channel)
-                            .is_some_and(|b| b.is_joined());
-                        if need_part {
-                            self.net.send(NetCmd::Part(channel.clone()));
-                        }
-                        self.state.channels.remove(&channel);
-                        self.state.channel_order.retain(|n| n != &channel);
-                        self.state.forget_channel(&channel);
-                        self.state.close_chat();
+                        self.do_part(channel);
                     }
                     ChatAction::OpenDm(nick) => {
                         let key = self.state.dm_buffer_key(&nick);
@@ -2048,9 +2195,6 @@ impl eframe::App for SleekApp {
                     }
                     ChatAction::AvSelectSpeaker(id) => {
                         self.do_av_select_speaker(id);
-                    }
-                    ChatAction::AvRotateWindow => {
-                        self.do_rotate_window(ctx);
                     }
                     ChatAction::OpenCallChannel(ch) => {
                         self.state.open_chat(&ch);
@@ -2153,6 +2297,8 @@ impl eframe::App for SleekApp {
                 });
         });
 
+        // Full-screen image lightbox (above chat / tabs).
+        image_lightbox_overlay(ctx, &th, &mut self.state);
     }
 }
 

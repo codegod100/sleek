@@ -138,6 +138,8 @@ package = "uk.nandi.sleek"
 apk_name = "sleek"
 # aarch64 = physical phones; x86_64 = Waydroid / emulators
 build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+# mipmap/ic_launcher.png densities — without this, Waydroid gets a blank stub icon.
+resources = "res"
 
 # Without INTERNET, DNS fails as "no address associated with hostname"
 # and WebSocket/TLS IRC cannot connect on device.
@@ -175,6 +177,7 @@ orientations = ["Portrait", "Landscape"]
 # No action bar; SleekActivity still draws edge-to-edge under transparent
 # system bars (not Theme.*.Fullscreen, which would hide the status bar).
 theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+icon = "@mipmap/ic_launcher"
 
 # Subclass of NativeActivity (classes.dex injected post cargo-apk) so
 # onNewIntent can capture freeq:// OAuth callbacks while the app is warm.

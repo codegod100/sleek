@@ -49,12 +49,26 @@ pub fn embed_from_text(text: &str) -> Option<Embed> {
     first_link.map(|url| Embed::Link { url })
 }
 
+/// A http(s) URL found in free-form text, with its byte range in the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlSpan {
+    /// Inclusive start byte index in the source text.
+    pub start: usize,
+    /// Exclusive end byte index (cleaned URL; trailing punct excluded).
+    pub end: usize,
+    pub url: String,
+}
+
 /// Pull http(s) URLs from free-form text (stops at whitespace / common trailers).
 pub fn extract_urls(text: &str) -> Vec<String> {
+    extract_url_spans(text).into_iter().map(|s| s.url).collect()
+}
+
+/// Like [`extract_urls`], but also returns byte ranges for linkifying UI text.
+pub fn extract_url_spans(text: &str) -> Vec<UrlSpan> {
     let mut out = Vec::new();
-    let bytes = text.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < text.len() {
         let rest = &text[i..];
         let lower = rest.to_ascii_lowercase();
         let rel = if let Some(p) = lower.find("https://") {
@@ -79,7 +93,12 @@ pub fn extract_urls(text: &str) -> Vec<String> {
             url.pop();
         }
         if url.starts_with("http://") || url.starts_with("https://") {
-            out.push(url);
+            let end = start + url.len();
+            out.push(UrlSpan {
+                start,
+                end,
+                url,
+            });
         }
         i = start + end_rel.max(1);
     }
@@ -176,6 +195,15 @@ mod tests {
         assert_eq!(u.len(), 2);
         assert_eq!(u[0], "https://example.com/a.png");
         assert_eq!(u[1], "http://x.test/y");
+    }
+
+    #[test]
+    fn extract_url_spans_ranges_match_source() {
+        let text = "see https://example.com/a.png, please";
+        let spans = extract_url_spans(text);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&text[spans[0].start..spans[0].end], spans[0].url);
+        assert_eq!(spans[0].url, "https://example.com/a.png");
     }
 
     #[test]

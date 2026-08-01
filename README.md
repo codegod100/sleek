@@ -1,6 +1,6 @@
 # Sleek
 
-Mobile **freeq** client built with **[Vidya](../vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](../freeq/freeq-sdk)**.
+Mobile **freeq** client built with **[Vidya](https://tangled.org/nandi.uk/vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](../freeq/freeq-sdk)**.
 
 Layout and flows take cues from the freeq Android app: connect (guest), chats list, chat detail, discover, and settings — with a portrait bottom-tab shell.
 
@@ -18,13 +18,13 @@ Sleek on Waydroid (chat + in-call video):
 |--------|------|
 | **Connect** | Nick + server, guest connect (TLS default `irc.freeq.at:6697`) |
 | **Chats** | Channel/DM list with last preview, unread badges, search, join |
-| **Chat** | Message stream + compose bar; back to list |
+| **Chat** | Message stream + compose bar; Search finds messages across chats |
 | **Discover** | Popular channels + custom join |
 | **Settings** | Account, connection status, dark/light shell, disconnect |
 
 ## Stack
 
-- **UI**: [egui](https://github.com/emilk/egui) + [vidya](../vidya) theme/widgets + Android safe chrome
+- **UI**: [egui](https://github.com/emilk/egui) + [vidya](https://tangled.org/nandi.uk/vidya) theme/widgets + Android safe chrome
 - **Network**: [freeq-sdk](../freeq/freeq-sdk) (guest IRC, TLS / WebSocket)
 - **Targets**: desktop host (Wayland/X11) and Android NativeActivity (`cargo-apk` / Waydroid)
 
@@ -37,10 +37,11 @@ just host          # desktop window (cargo run)
 just lib           # build android package as rlib (desktop target)
 just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
 
-# Or via the flake (builds desktop host into ./result):
-nix build          # → ./result/bin/sleek
-nix run            # pure Nix store binary (hermetic)
-nix run .#host     # in-tree cargo run (iterative; needs sibling vidya/freeq)
+# Or via the flake:
+nix run            # in-tree cargo run --release (default app; needs sibling vidya/freeq)
+nix run .#host     # same as nix run
+nix run .#sleek    # pure Nix store binary (hermetic)
+nix build .#sleek  # → ./result/bin/sleek
 
 # Waydroid (x86_64 cargo-apk + install/launch + full UI window):
 nix run .#waydroid                 # debug: build + install + launch + show-full-ui
@@ -163,9 +164,9 @@ scheme `freeq` (`SleekActivity`, `singleTask`) and resumes the app with tokens
 just codespace-host          # foreground
 just codespace-host --bg     # background → /tmp/sleek-logs/host.log
 
-# Or only the binary (deps already present):
+# Or only the desktop host (deps already present):
 just host
-# or:
+# or (cargo run --release via flake app):
 nix run
 ```
 

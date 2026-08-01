@@ -1,14 +1,16 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{
-    self, Align, Color32, CursorIcon, Layout, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
+    self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Layout, Rect,
+    RichText, ScrollArea, Sense, Stroke, Vec2,
 };
 use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
 
-use crate::preview::{self, Embed};
+use crate::preview::{self, Embed, UrlSpan};
 use crate::state::{
-    display_emoji, emoji_matches_search, Buffer, ChatMessage, EmojiPickerGroup, ImageState,
-    LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT, QUICK_REACT_EMOJIS,
+    display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
+    ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
+    QUICK_REACT_EMOJIS,
 };
 
 /// Interaction from a chat message bubble.
@@ -22,6 +24,12 @@ pub enum MessageBubbleAction {
     OpenReactPicker { msgid: String },
     /// Dismiss the emoji reaction picker.
     CloseReactPicker,
+    /// Open the full-screen image lightbox for an embed URL.
+    OpenImage { url: String },
+    /// Begin editing this message in the compose bar.
+    Edit { msgid: String, text: String },
+    /// Soft-delete this message (`+draft/delete`).
+    Delete { msgid: String },
 }
 
 /// Card frame filling parent width.
@@ -183,8 +191,8 @@ fn badge(ui: &mut egui::Ui, th: &Theme, text: &str) {
 
 /// Message bubble / row in chat detail (with optional image / OG link embed).
 ///
-/// When the reaction picker is open, pass mutable search + category so the
-/// full emoji grid can filter without reopening the bubble.
+/// `react_picker_open` highlights the react control while the modal picker
+/// ([`react_picker_overlay`]) is open for this message.
 pub fn message_bubble(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -192,8 +200,7 @@ pub fn message_bubble(
     own_nick: &str,
     media: &mut MediaCache,
     react_picker_open: bool,
-    react_search: &mut String,
-    react_group: &mut EmojiPickerGroup,
+    highlighted: bool,
 ) -> MessageBubbleAction {
     let p = &th.palette;
     let sp = &th.spacing;
@@ -219,21 +226,31 @@ pub fn message_bubble(
         msg.text.clone()
     };
 
-    let bg = if is_own {
+    let bg = if highlighted {
+        p.accent.gamma_multiply(0.38)
+    } else if is_own {
         p.accent.gamma_multiply(0.28)
     } else {
         p.card_bg
     };
+    let stroke = if highlighted {
+        Stroke::new(2.0_f32, p.accent)
+    } else {
+        Stroke::new(1.0_f32, p.border_soft)
+    };
 
     let embed = msg.resolved_embed();
-    let can_react =
+    let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
+    let can_react = can_mutate;
+    let can_edit = can_mutate && is_own;
+    let can_delete = can_mutate && is_own;
 
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
     let frame_resp = egui::Frame::new()
         .fill(bg)
-        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
@@ -267,11 +284,7 @@ pub fn message_bubble(
                         paint_emoji_in(ui, r.shrink(2.0), "😂", react_color);
                         let react_btn = react_resp
                             .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text(if react_picker_open {
-                                "Hide reactions"
-                            } else {
-                                "Add reaction"
-                            });
+                            .on_hover_text("Add reaction");
                         if react_btn.clicked() {
                             action = if react_picker_open {
                                 MessageBubbleAction::CloseReactPicker
@@ -294,33 +307,59 @@ pub fn message_bubble(
                 });
             });
             ui.add_space(sp.xs);
-            // Sense on the body only — double-click heart, right-click / long-press picker
-            // (freeq-android parity). Keeps chips / embeds / ☺ free of click steal.
+            // Sense on the body — URL tap opens browser; double-click heart;
+            // right-click / long-press opens the context menu.
+            let url_spans = preview::extract_url_spans(&body_text);
+            let mut job = linkify_layout_job(&body_text, &url_spans, th);
+            job.wrap.max_width = ui.available_width();
+            let galley = ui.fonts(|f| f.layout_job(job));
             let body_resp = ui.add(
-                egui::Label::new(
-                    RichText::new(&body_text)
-                        .size(th.type_scale.body)
-                        .color(p.text),
-                )
-                .wrap()
-                .sense(if can_react {
-                    Sense::click()
-                } else {
-                    Sense::hover()
-                }),
+                egui::Label::new(egui::WidgetText::Galley(galley.clone()))
+                    .sense(Sense::click())
+                    .selectable(false),
             );
-            if can_react {
+            let galley_origin = body_resp.rect.min;
+            let hovered_url = body_resp.hover_pos().and_then(|pos| {
+                url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+            });
+            let tip = if let Some(url) = hovered_url.as_deref() {
+                url.to_string()
+            } else if can_edit || can_delete {
+                "Right-click / long-press for edit, delete, react".to_string()
+            } else if can_react {
                 let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                let body_resp = body_resp.on_hover_text(format!(
-                    "Double-click {heart} · right-click / long-press to react"
-                ));
-                if matches!(action, MessageBubbleAction::None) {
-                    if body_resp.double_clicked() {
-                        action = MessageBubbleAction::ToggleReaction {
-                            msgid: msg.id.clone(),
-                            emoji: DEFAULT_REACT_EMOJI.to_string(),
-                        };
-                    } else if body_resp.secondary_clicked() || body_resp.long_touched() {
+                format!("Double-click {heart} · right-click / long-press for more")
+            } else {
+                "Right-click / long-press to copy".into()
+            };
+            let mut body_resp = body_resp.on_hover_text(tip);
+            if hovered_url.is_some() {
+                body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
+            }
+            let mut opened_link = false;
+            if body_resp.clicked() {
+                if let Some(pos) = body_resp.interact_pointer_pos() {
+                    if let Some(url) =
+                        url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        opened_link = true;
+                    }
+                }
+            }
+            if can_react
+                && !opened_link
+                && matches!(action, MessageBubbleAction::None)
+                && body_resp.double_clicked()
+            {
+                action = MessageBubbleAction::ToggleReaction {
+                    msgid: msg.id.clone(),
+                    emoji: DEFAULT_REACT_EMOJI.to_string(),
+                };
+            }
+            body_resp.context_menu(|ui| {
+                if can_react {
+                    if ui.button("React…").clicked() {
                         action = if react_picker_open {
                             MessageBubbleAction::CloseReactPicker
                         } else {
@@ -328,15 +367,43 @@ pub fn message_bubble(
                                 msgid: msg.id.clone(),
                             }
                         };
+                        ui.close_menu();
                     }
                 }
-            }
+                if !msg.text.is_empty() && ui.button("Copy text").clicked() {
+                    ui.ctx().copy_text(msg.text.clone());
+                    ui.close_menu();
+                }
+                if can_edit || can_delete {
+                    ui.separator();
+                }
+                if can_edit && ui.button("Edit").clicked() {
+                    action = MessageBubbleAction::Edit {
+                        msgid: msg.id.clone(),
+                        text: msg.text.clone(),
+                    };
+                    ui.close_menu();
+                }
+                if can_delete && ui.button("Delete").clicked() {
+                    // Server `+draft/delete` names the edit-chain root.
+                    let delete_id = msg
+                        .edit_of
+                        .clone()
+                        .unwrap_or_else(|| msg.id.clone());
+                    action = MessageBubbleAction::Delete {
+                        msgid: delete_id,
+                    };
+                    ui.close_menu();
+                }
+            });
 
             if let Some(embed) = embed {
                 ui.add_space(sp.sm);
                 match embed {
                     Embed::Image { url } => {
-                        inline_image_preview(ui, th, media, &url);
+                        if inline_image_preview(ui, th, media, &url) {
+                            action = MessageBubbleAction::OpenImage { url };
+                        }
                     }
                     Embed::Link { url } => {
                         let seed = msg.link_meta.clone();
@@ -444,63 +511,88 @@ pub fn message_bubble(
         });
     }
 
-    // Full emoji reaction picker (quick row + search + category grid).
-    if react_picker_open && can_react {
-        if let Some(picked) = emoji_react_picker(
-            ui,
-            th,
-            msg,
-            own_nick,
-            react_search,
-            react_group,
-        ) {
-            action = MessageBubbleAction::ToggleReaction {
-                msgid: msg.id.clone(),
-                emoji: picked,
-            };
-        }
-    }
-
     action
 }
 
-/// Full emoji reaction picker: quick reacts, search, category tabs, scrollable grid.
-/// Returns the chosen emoji string when the user picks one.
-fn emoji_react_picker(
-    ui: &mut egui::Ui,
+/// Modal emoji reaction picker (quick row + search + category grid).
+///
+/// Call once per frame while `state.react_picker_msg` is set for `channel`.
+/// Returns `(msgid, emoji)` when the user picks a reaction. Esc / backdrop /
+/// Close dismiss without reacting.
+pub fn react_picker_overlay(
+    ctx: &egui::Context,
     th: &Theme,
-    msg: &ChatMessage,
-    own_nick: &str,
-    search: &mut String,
-    group: &mut EmojiPickerGroup,
-) -> Option<String> {
+    state: &mut AppState,
+    channel: &str,
+) -> Option<(String, String)> {
+    let Some(msgid) = state.react_picker_msg.clone() else {
+        return None;
+    };
+
+    let msg = state
+        .channels
+        .get(channel)
+        .and_then(|buf| buf.messages.iter().find(|m| m.id == msgid).cloned());
+    let Some(msg) = msg else {
+        // Message left the buffer (history trim / channel switch) — drop picker.
+        state.close_react_picker();
+        return None;
+    };
+    let own_nick = state.nick.clone();
+
     let p = &th.palette;
     let sp = &th.spacing;
-    let pick_size = (th.type_scale.body * 1.25).max(18.0);
-    let mut picked: Option<String> = None;
-
-    ui.add_space(sp.xs);
-    egui::Frame::new()
-        .fill(p.headerbar_bg)
+    let frame = egui::Frame::new()
+        .fill(p.card_bg)
         .stroke(Stroke::new(1.0_f32, p.border_soft))
-        .corner_radius(sp.radius_sm)
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+        .corner_radius(sp.radius_md)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 4],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(80),
+        });
 
-            // Header + search
+    let mut picked: Option<String> = None;
+    let mut close = false;
+
+    let modal = egui::Modal::new(egui::Id::new("react_emoji_picker"))
+        .backdrop_color(Color32::from_black_alpha(140))
+        .frame(frame)
+        .show(ctx, |ui| {
+            let panel_w = (ctx.screen_rect().width() - 32.0).clamp(260.0, 360.0);
+            ui.set_width(panel_w);
+
+            // Header + search + close
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("Add reaction")
-                        .size(th.type_scale.caption)
-                        .color(p.text_secondary)
+                        .size(th.type_scale.body)
+                        .color(p.text)
                         .strong(),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let search_w = (ui.available_width() - 8.0).clamp(120.0, 220.0);
+                    let close_resp = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("✕")
+                                    .size(th.type_scale.body)
+                                    .color(p.text_secondary),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(Stroke::NONE)
+                            .frame(false),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("Close ({})", vidya::escape_label()));
+                    if close_resp.clicked() {
+                        close = true;
+                    }
+                    let search_w = (ui.available_width() - 8.0).clamp(100.0, 200.0);
                     ui.add(
-                        egui::TextEdit::singleline(search)
-                            .id_salt(("react_emoji_search", msg.id.as_str()))
+                        egui::TextEdit::singleline(&mut state.react_picker_search)
+                            .id_salt(("react_emoji_search", msgid.as_str()))
                             .desired_width(search_w)
                             .hint_text("Search emoji…")
                             .font(egui::TextStyle::Body),
@@ -508,13 +600,15 @@ fn emoji_react_picker(
                 });
             });
 
-            ui.add_space(sp.xs);
+            ui.add_space(sp.sm);
+
+            let pick_size = (th.type_scale.body * 1.25).max(18.0);
 
             // Quick-react strip (freeq-android parity).
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for emoji in QUICK_REACT_EMOJIS {
-                    if emoji_pick_button(ui, th, emoji, msg, own_nick, pick_size) {
+                    if emoji_pick_button(ui, th, emoji, &msg, &own_nick, pick_size) {
                         picked = Some((*emoji).to_string());
                     }
                 }
@@ -522,7 +616,7 @@ fn emoji_react_picker(
 
             ui.add_space(sp.xs);
 
-            let searching = !search.trim().is_empty();
+            let searching = !state.react_picker_search.trim().is_empty();
 
             // Category tabs (hidden while searching — results span all groups).
             if !searching {
@@ -530,7 +624,7 @@ fn emoji_react_picker(
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let tab_icon = (th.type_scale.caption * 1.15).max(14.0);
                     for g in EmojiPickerGroup::ALL {
-                        let selected = *group == *g;
+                        let selected = state.react_picker_group == *g;
                         let fill = if selected {
                             p.accent.gamma_multiply(0.35)
                         } else {
@@ -558,21 +652,27 @@ fn emoji_react_picker(
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .on_hover_text(g.label());
                         if resp.clicked() {
-                            *group = *g;
+                            state.react_picker_group = *g;
                         }
                     }
                 });
                 ui.add_space(sp.xs);
             } else {
-                dim_label(ui, th, &format!("Results for “{}”", search.trim()));
+                dim_label(
+                    ui,
+                    th,
+                    &format!("Results for “{}”", state.react_picker_search.trim()),
+                );
                 ui.add_space(2.0);
             }
 
             // Scrollable emoji grid.
-            let grid_h = 220.0_f32;
+            let grid_h = 240.0_f32;
             let cell = Vec2::new(36.0, 34.0);
+            let group = state.react_picker_group;
+            let search_q = state.react_picker_search.clone();
             ScrollArea::vertical()
-                .id_salt(("react_emoji_grid", msg.id.as_str(), searching))
+                .id_salt(("react_emoji_grid", msgid.as_str(), searching))
                 .max_height(grid_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -580,18 +680,17 @@ fn emoji_react_picker(
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
                         if searching {
-                            let q = search.clone();
                             let mut count = 0usize;
                             for emoji in emojis::iter() {
-                                if !emoji_matches_search(emoji, &q) {
+                                if !emoji_matches_search(emoji, &search_q) {
                                     continue;
                                 }
                                 if emoji_pick_cell(
                                     ui,
                                     th,
                                     emoji.as_str(),
-                                    msg,
-                                    own_nick,
+                                    &msg,
+                                    &own_nick,
                                     cell,
                                     pick_size,
                                 ) {
@@ -619,8 +718,8 @@ fn emoji_react_picker(
                                     ui,
                                     th,
                                     emoji.as_str(),
-                                    msg,
-                                    own_nick,
+                                    &msg,
+                                    &own_nick,
                                     cell,
                                     pick_size,
                                 ) {
@@ -632,7 +731,17 @@ fn emoji_react_picker(
                 });
         });
 
-    picked
+    if close || modal.should_close() {
+        state.close_react_picker();
+        return None;
+    }
+
+    if let Some(emoji) = picked {
+        state.close_react_picker();
+        return Some((msgid, emoji));
+    }
+
+    None
 }
 
 /// Compact quick-react button; returns true when clicked.
@@ -705,7 +814,81 @@ fn emoji_pick_cell(
 const EMBED_MAX_W: f32 = 280.0;
 const EMBED_MAX_H: f32 = 220.0;
 
-fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, url: &str) {
+/// LayoutJob with http(s) spans styled as accent underlines.
+fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
+    let p = &th.palette;
+    let size = th.type_scale.body;
+    let base = TextFormat {
+        font_id: FontId::proportional(size),
+        color: p.text,
+        ..Default::default()
+    };
+    let link = TextFormat {
+        font_id: FontId::proportional(size),
+        color: p.accent,
+        underline: Stroke::new(1.0_f32, p.accent),
+        ..Default::default()
+    };
+
+    let mut job = LayoutJob::default();
+    if spans.is_empty() {
+        job.append(text, 0.0, base);
+        return job;
+    }
+
+    let mut cursor = 0usize;
+    for span in spans {
+        if span.start > cursor && span.start <= text.len() {
+            job.append(&text[cursor..span.start], 0.0, base.clone());
+        }
+        let end = span.end.min(text.len());
+        if span.start < end {
+            job.append(&text[span.start..end], 0.0, link.clone());
+        }
+        cursor = end;
+    }
+    if cursor < text.len() {
+        job.append(&text[cursor..], 0.0, base);
+    } else if job.is_empty() {
+        job.append(text, 0.0, base);
+    }
+    job
+}
+
+/// URL under a pointer position within a laid-out message body galley, if any.
+fn url_at_galley_pos(
+    galley: &egui::Galley,
+    galley_origin: egui::Pos2,
+    text: &str,
+    spans: &[UrlSpan],
+    pos: egui::Pos2,
+) -> Option<String> {
+    if spans.is_empty() {
+        return None;
+    }
+    let relative = pos - galley_origin;
+    let cursor = galley.cursor_from_pos(relative);
+    let char_idx = cursor.ccursor.index;
+    let byte_idx = text
+        .char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    spans
+        .iter()
+        .find(|s| byte_idx >= s.start && byte_idx < s.end)
+        .or_else(|| {
+            // Cursor often lands just after the last glyph of a link.
+            let prev = byte_idx.saturating_sub(1);
+            spans
+                .iter()
+                .find(|s| byte_idx == s.end && prev >= s.start && prev < s.end)
+        })
+        .map(|s| s.url.clone())
+}
+
+/// Inline chat image. Returns `true` when the user taps to open the lightbox.
+fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, url: &str) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
     media.touch_image(url);
@@ -718,9 +901,9 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
         }
         Some(ImageState::Loading) => None,
         Some(ImageState::Failed) | None => {
-            // Failed: show the URL as a muted fallback (still tappable).
+            // Failed: show the URL as a muted fallback (still tappable → web).
             link_fallback_row(ui, th, url, "Couldn't load image");
-            return;
+            return false;
         }
     };
 
@@ -738,6 +921,7 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                         dim_label(ui, th, "Loading image…");
                     });
                 });
+            false
         }
         Some((tex, width, height)) => {
             let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
@@ -755,10 +939,8 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                         .sense(Sense::click()),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text(url);
-            if resp.clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-            }
+                .on_hover_text("Tap to enlarge");
+            resp.clicked()
         }
     }
 }
@@ -952,6 +1134,168 @@ fn link_fallback_row(ui: &mut egui::Ui, th: &Theme, url: &str, note: &str) {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
     });
+}
+
+/// Full-screen image lightbox: large preview + link to open the original on the web.
+///
+/// Call once per frame while `state.image_lightbox` is set. Handles Esc, backdrop
+/// tap, and Close. "View original" opens the URL in the system browser.
+pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppState) {
+    let Some(url) = state.image_lightbox.clone() else {
+        return;
+    };
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let screen = ctx.screen_rect();
+
+    let mut close = false;
+    let mut open_web = false;
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        close = true;
+    }
+
+    // Keep the decoded image warm while the lightbox is open.
+    state.media.touch_image(&url);
+
+    let ready = match state.media.images.get_mut(url.as_str()) {
+        Some(ImageState::Ready(pixels)) => {
+            let tex = pixels.texture(ctx, &url).clone();
+            Some((tex, pixels.width, pixels.height))
+        }
+        _ => None,
+    };
+
+    egui::Area::new(egui::Id::new("image_lightbox"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (full, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter()
+                .rect_filled(full, 0.0, Color32::from_black_alpha(220));
+
+            // Top chrome: Close (left) + View original (right).
+            let chrome_h = (sp.control_height + sp.md * 2.0).max(48.0);
+            let chrome = egui::Rect::from_min_size(
+                full.min + Vec2::new(sp.md, sp.md),
+                Vec2::new((full.width() - sp.md * 2.0).max(1.0), chrome_h),
+            );
+
+            // Image area: remaining viewport below chrome, with padding.
+            let img_pad = sp.md;
+            let img_area = egui::Rect::from_min_max(
+                egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
+                egui::pos2(full.right() - img_pad, full.bottom() - img_pad),
+            );
+
+            let mut hit_chrome = false;
+            let mut img_rect = egui::Rect::NOTHING;
+
+            ui.scope_builder(egui::UiBuilder::new().max_rect(chrome), |ui| {
+                ui.horizontal(|ui| {
+                    let close_resp = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Close")
+                                    .size(th.type_scale.body)
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(p.card_bg.gamma_multiply(0.85))
+                            .stroke(Stroke::new(1.0_f32, p.border_soft))
+                            .corner_radius(sp.radius_md)
+                            .min_size(Vec2::new(0.0, sp.control_height)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("Close ({})", vidya::escape_label()));
+                    if close_resp.clicked() {
+                        close = true;
+                    }
+                    if close_resp.hovered() || close_resp.contains_pointer() {
+                        hit_chrome = true;
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let view_resp = ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("View original")
+                                        .size(th.type_scale.body)
+                                        .color(p.accent)
+                                        .strong(),
+                                )
+                                .fill(p.card_bg.gamma_multiply(0.85))
+                                .stroke(Stroke::new(1.0_f32, p.accent.gamma_multiply(0.55)))
+                                .corner_radius(sp.radius_md)
+                                .min_size(Vec2::new(0.0, sp.control_height)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text(&url);
+                        if view_resp.clicked() {
+                            open_web = true;
+                        }
+                        if view_resp.hovered() || view_resp.contains_pointer() {
+                            hit_chrome = true;
+                        }
+                    });
+                });
+            });
+
+            match ready {
+                Some((tex, width, height)) => {
+                    // Letterbox into img_area — never stretch. (`ui.put` uses a
+                    // justified layout that expands the widget to the full rect.)
+                    let max_w = img_area.width().max(1.0);
+                    let max_h = img_area.height().max(1.0);
+                    let nw = width.max(1) as f32;
+                    let nh = height.max(1) as f32;
+                    let scale = (max_w / nw).min(max_h / nh).min(3.0);
+                    let size = Vec2::new((nw * scale).max(1.0), (nh * scale).max(1.0));
+                    img_rect = egui::Rect::from_center_size(img_area.center(), size);
+                    let uv = egui::Rect::from_min_max(
+                        egui::pos2(0.0, 0.0),
+                        egui::pos2(1.0, 1.0),
+                    );
+                    ui.painter().add(
+                        egui::epaint::RectShape::filled(img_rect, sp.radius_sm, Color32::WHITE)
+                            .with_texture(tex.id(), uv),
+                    );
+                }
+                None => {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(img_area), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(img_area.height() * 0.35);
+                            ui.spinner();
+                            ui.add_space(sp.sm);
+                            ui.label(
+                                RichText::new("Loading image…")
+                                    .size(th.type_scale.body)
+                                    .color(Color32::WHITE),
+                            );
+                        });
+                    });
+                }
+            }
+
+            // Backdrop tap (outside chrome / image) dismisses.
+            if backdrop.clicked() && !hit_chrome {
+                let on_image = backdrop
+                    .interact_pointer_pos()
+                    .is_some_and(|pos| img_rect.contains(pos));
+                if !on_image {
+                    close = true;
+                }
+            }
+        });
+
+    if open_web {
+        ctx.open_url(egui::OpenUrl::new_tab(url));
+    }
+    if close {
+        state.close_image_lightbox();
+    }
 }
 
 pub fn empty_state(ui: &mut egui::Ui, th: &Theme, title: &str, blurb: &str) {

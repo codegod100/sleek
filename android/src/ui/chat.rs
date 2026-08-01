@@ -1,11 +1,17 @@
 //! Chat detail — messages + compose (freeq-android ChatDetailScreen inspired).
 
-use eframe::egui::{self, text::CCursor, text::CCursorRange, Align, Align2, CursorIcon, Layout, RichText, Sense, ScrollArea, Vec2};
-use vidya::{button, dim_label, primary_button, Theme};
+use eframe::egui::{self, text::CCursor, text::CCursorRange, Align, Align2, CursorIcon, Key, Layout, RichText, Sense, ScrollArea, Vec2};
+use vidya::{
+    button, command_shortcut_label, consume_command, consume_escape, dim_label, primary_button,
+    Theme,
+};
 
 use crate::clipboard;
 use crate::state::{AppState, NickTabComplete};
-use crate::ui::widgets::{avatar_circle, empty_state, message_bubble, MessageBubbleAction};
+use crate::ui::search::{message_search_panel, SearchAction};
+use crate::ui::widgets::{
+    avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
+};
 
 pub enum ChatAction {
     None,
@@ -34,20 +40,42 @@ pub enum ChatAction {
     AvSelectSpeaker(Option<String>),
     /// Jump to the channel that holds our active call.
     OpenCallChannel(String),
-    /// Desktop: swap window width/height (landscape ↔ portrait) for the whole app.
-    AvRotateWindow,
     /// Toggle our reaction on a message (`+react` / `+freeq.at/unreact`).
     React {
         target: String,
         msgid: String,
         emoji: String,
     },
+    /// Edit a previously sent message (`+draft/edit`).
+    Edit {
+        target: String,
+        msgid: String,
+        text: String,
+    },
+    /// Soft-delete a message (`+draft/delete`).
+    Delete { target: String, msgid: String },
 }
 
 pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel: &str) -> ChatAction {
     let mut action = ChatAction::None;
     let sp = &th.spacing;
     let p = &th.palette;
+
+    state.tick_search_highlight();
+
+    // Message search hotkeys (vidya): Cmd/Ctrl+F open/refocus, Esc close.
+    // Lightbox / react-picker Esc are handled in their overlays.
+    let overlay_open =
+        state.image_lightbox.is_some() || state.react_picker_msg.is_some();
+    if !overlay_open && consume_command(ui, Key::F) {
+        if state.show_message_search {
+            state.focus_message_search = true;
+        } else if !state.show_members {
+            state.open_message_search();
+        }
+    } else if !overlay_open && state.show_message_search && consume_escape(ui) {
+        state.close_message_search();
+    }
 
     // Snapshot buffer data we need (avoid holding borrow across mut compose)
     let (topic, member_count, mut members, messages, is_channel, join_pending, join_error, channel_call) = {
@@ -81,6 +109,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     let joined = is_channel && join_error.is_none() && !join_pending;
     // Member list only when we actually got into the room.
     let show_members = state.show_members && is_channel && joined;
+    let show_search = state.show_message_search;
     let header_title = if is_channel {
         channel.to_string()
     } else {
@@ -92,7 +121,13 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // under Leave/Users or past the panel edge.
     ui.horizontal(|ui| {
         if button(ui, th, "←").clicked() {
-            if show_members {
+            if state.image_lightbox.is_some() {
+                state.close_image_lightbox();
+            } else if state.react_picker_msg.is_some() {
+                state.close_react_picker();
+            } else if show_search {
+                state.close_message_search();
+            } else if show_members {
                 state.show_members = false;
             } else {
                 action = ChatAction::Back;
@@ -100,7 +135,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
         }
         ui.add_space(sp.sm);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if is_channel && !show_members {
+            if !show_search && is_channel && !show_members {
                 let leave_label = if join_error.is_some() {
                     "Dismiss"
                 } else {
@@ -121,13 +156,36 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     }
                 }
             }
+            // Close lives next to the search field; keep header Search only when closed.
+            if !show_members && !show_search {
+                if button(ui, th, "Search")
+                    .on_hover_text(format!(
+                        "Search messages ({})",
+                        command_shortcut_label(Key::F)
+                    ))
+                    .clicked()
+                {
+                    state.open_message_search();
+                }
+            }
             let title_w = ui.available_width().max(40.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(title_w, ui.available_height().max(th.type_scale.title_2 * 2.2)),
                 Layout::top_down(Align::Min),
                 |ui| {
                     ui.set_max_width(title_w);
-                    if show_members {
+                    if show_search {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Search")
+                                    .size(th.type_scale.title_2)
+                                    .strong()
+                                    .color(p.text),
+                            )
+                            .truncate(),
+                        );
+                        dim_label(ui, th, "Across chats");
+                    } else if show_members {
                         ui.add(
                             egui::Label::new(
                                 RichText::new("Users")
@@ -200,6 +258,16 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     ui.add_space(sp.sm);
     ui.separator();
     ui.add_space(sp.sm);
+
+    if show_search {
+        match message_search_panel(ui, th, state) {
+            SearchAction::None => {}
+            SearchAction::Open { channel, msgid } => {
+                state.navigate_to_message(&channel, &msgid);
+            }
+        }
+        return action;
+    }
 
     // ── AV call banner (start / join only; active call chrome is global) ─
     // The MoQ section for an open call lives in the app-level top panel so it
@@ -412,6 +480,30 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     };
                 }
             } else {
+                let is_editing = state.editing_msgid.is_some();
+                if is_editing {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Editing message")
+                                .size(th.type_scale.caption)
+                                .color(p.accent)
+                                .strong(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .small_button("Cancel")
+                                .on_hover_text("Cancel edit (Esc)")
+                                .clicked()
+                            {
+                                state.cancel_edit();
+                            }
+                        });
+                    });
+                    ui.add_space(sp.xs);
+                    if state.react_picker_msg.is_none() && consume_escape(ui) {
+                        state.cancel_edit();
+                    }
+                }
                 let attach_tip = if pick_busy {
                     "Opening file picker…"
                 } else if cfg!(target_os = "android") {
@@ -419,18 +511,23 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 } else {
                     "Attach image (or paste with Ctrl+V)"
                 };
+                let (hint, action_label, action_w) = if is_editing {
+                    ("Edit message…", "Save", 72.0_f32)
+                } else {
+                    ("Message…", "Send", 72.0_f32)
+                };
                 let (resp, attach_clicked, send_clicked) = compose_input_row(
                     ui,
                     th,
                     &mut state.compose,
-                    "Message…",
-                    "Send",
-                    72.0,
+                    hint,
+                    action_label,
+                    action_w,
                     attach_tip,
                     true,
                     compose_id,
                 );
-                if attach_clicked && !pick_busy {
+                if attach_clicked && !pick_busy && !is_editing {
                     state.start_file_pick();
                 }
                 if state.focus_compose {
@@ -440,10 +537,19 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let enter = resp.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 if (send_clicked || enter) && can_send {
-                    action = ChatAction::Send {
-                        target: channel.to_string(),
-                        text: state.compose.trim().to_string(),
-                    };
+                    let text = state.compose.trim().to_string();
+                    if let Some(msgid) = state.editing_msgid.clone() {
+                        action = ChatAction::Edit {
+                            target: channel.to_string(),
+                            msgid,
+                            text,
+                        };
+                    } else {
+                        action = ChatAction::Send {
+                            target: channel.to_string(),
+                            text,
+                        };
+                    }
                 }
             }
         });
@@ -452,14 +558,27 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     let msg_h = ui.available_height().max(80.0);
     let jump_id = egui::Id::new("chat_jump_to_bottom").with(channel);
     let want_jump = ui.ctx().data_mut(|d| d.get_temp::<bool>(jump_id).unwrap_or(false));
+    // Keep stick-to-bottom off for the whole highlight window, not just the
+    // one-shot `scroll_to_msgid` frame. egui remembers `scroll_stuck_to_end`
+    // across frames: if we re-enable stick while still marked stuck, end()
+    // yanks us back to the bottom before stuck is recomputed, and the search
+    // jump looks like a no-op.
+    //
+    // Keep ScrollArea animation enabled during the hold: `animated(false)`
+    // applies the jump without clearing kinetic `vel`, so a prior fling undoes
+    // it. `ScrollAnimation::none()` still lands in one frame via offset_target,
+    // which zeroes velocity.
+    let hold_search_scroll =
+        state.scroll_to_msgid.is_some() || state.highlight_msgid.is_some();
 
     // Do **not** pair this with `vertical_scroll_offset(f32::MAX)`: that value
     // destroys f32 layout precision, so `scroll_to_cursor` computes a bogus
     // target (often ~top) and the jump appears to do nothing / go the wrong way.
-    // Instant animation so kinetic fling velocity is cleared and we re-stick.
+    // Per-channel id: shared "chat_scroll" reused offset/stuck state across rooms
+    // and made search jumps land in the wrong place after switching buffers.
     let scroll_out = ScrollArea::vertical()
-        .id_salt("chat_scroll")
-        .stick_to_bottom(true)
+        .id_salt(("chat_scroll", channel))
+        .stick_to_bottom(!hold_search_scroll)
         .auto_shrink([false, false])
         .max_height(msg_h)
         .show(ui, |ui| {
@@ -470,38 +589,81 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     dim_label(ui, th, "No messages yet — say hello.");
                 });
             } else {
+                let scroll_target = state.scroll_to_msgid.clone();
+                let highlight_id = state.highlight_msgid.clone();
+                let mut did_scroll = false;
+                let mut target_in_view = false;
                 for msg in &messages {
+                    let highlighted = highlight_id.as_ref().is_some_and(|id| id == &msg.id);
                     let picker_open = state
                         .react_picker_msg
                         .as_ref()
                         .is_some_and(|id| id == &msg.id);
-                    match message_bubble(
-                        ui,
-                        th,
-                        msg,
-                        &own_nick,
-                        &mut state.media,
-                        picker_open,
-                        &mut state.react_picker_search,
-                        &mut state.react_picker_group,
-                    ) {
-                        MessageBubbleAction::None => {}
-                        MessageBubbleAction::ToggleReaction { msgid, emoji } => {
-                            state.close_react_picker();
-                            action = ChatAction::React {
-                                target: channel.to_string(),
-                                msgid,
-                                emoji,
-                            };
+                    let want_scroll = scroll_target.as_ref().is_some_and(|id| id == &msg.id);
+                    let outer = ui.push_id(("chat_msg", msg.id.as_str()), |ui| {
+                        match message_bubble(
+                            ui,
+                            th,
+                            msg,
+                            &own_nick,
+                            &mut state.media,
+                            picker_open,
+                            highlighted,
+                        ) {
+                            MessageBubbleAction::None => {}
+                            MessageBubbleAction::ToggleReaction { msgid, emoji } => {
+                                state.close_react_picker();
+                                action = ChatAction::React {
+                                    target: channel.to_string(),
+                                    msgid,
+                                    emoji,
+                                };
+                            }
+                            MessageBubbleAction::OpenReactPicker { msgid } => {
+                                state.open_react_picker(msgid);
+                            }
+                            MessageBubbleAction::CloseReactPicker => {
+                                state.close_react_picker();
+                            }
+                            MessageBubbleAction::OpenImage { url } => {
+                                state.open_image_lightbox(url);
+                            }
+                            MessageBubbleAction::Edit { msgid, text } => {
+                                state.begin_edit(msgid, text);
+                            }
+                            MessageBubbleAction::Delete { msgid } => {
+                                action = ChatAction::Delete {
+                                    target: channel.to_string(),
+                                    msgid,
+                                };
+                            }
                         }
-                        MessageBubbleAction::OpenReactPicker { msgid } => {
-                            state.open_react_picker(msgid);
-                        }
-                        MessageBubbleAction::CloseReactPicker => {
-                            state.close_react_picker();
-                        }
+                    });
+                    if want_scroll {
+                        // Keep requesting until the bubble intersects the viewport;
+                        // clearing on the first frame often no-ops (layout not ready).
+                        outer.response.scroll_to_me_animation(
+                            Some(Align::Center),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        did_scroll = true;
+                        let clip = ui.clip_rect();
+                        // Any overlap is enough — requiring the center in-view
+                        // never clears for tall (image) bubbles.
+                        target_in_view = clip.intersects(outer.response.rect)
+                            && outer.response.rect.height() > 1.0;
+                        ui.ctx().request_repaint();
                     }
                     ui.add_space(sp.sm);
+                }
+                // Only consume once the hit is on-screen (or missing from buffer).
+                if scroll_target.is_some() {
+                    if !did_scroll {
+                        state.scroll_to_msgid = None;
+                        state.clear_search_highlight();
+                    } else if target_in_view {
+                        state.scroll_to_msgid = None;
+                    }
                 }
             }
             ui.add_space(sp.md);
@@ -557,6 +719,15 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     ui.ctx().request_repaint();
                 }
             });
+    }
+
+    // Modal reaction picker (above chat; Esc / backdrop dismiss).
+    if let Some((msgid, emoji)) = react_picker_overlay(ui.ctx(), th, state, channel) {
+        action = ChatAction::React {
+            target: channel.to_string(),
+            msgid,
+            emoji,
+        };
     }
 
     action
@@ -1081,20 +1252,12 @@ pub fn active_call_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) ->
     let Some(lc) = state.local_call.clone() else {
         return None;
     };
-
-    // Esc exits theater mode from anywhere in the call UI.
-    if state.av_fullscreen && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        state.av_fullscreen = false;
-    }
-
-    if state.av_fullscreen {
-        return active_call_panel_fullscreen(ui, th, state, &lc);
-    }
-    active_call_panel_compact(ui, th, state, &lc)
+    active_call_panel_body(ui, th, state, &lc)
 }
 
-/// Compact call strip (top panel while chat/tabs stay visible).
-fn active_call_panel_compact(
+/// Call strip (top panel while chat/tabs stay visible). Video height is
+/// user-resizable via the drag handle under the tiles.
+fn active_call_panel_body(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
@@ -1155,7 +1318,22 @@ fn active_call_panel_compact(
             lc.media,
             crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
         ) {
-            paint_av_video_tiles(ui, th, state, /*fill_height=*/ None);
+            let screen_h = ui.ctx().screen_rect().height();
+            let min_h = 96.0;
+            let max_h = (screen_h * 0.72).max(min_h + 40.0);
+            state.av_video_height = state.av_video_height.clamp(min_h, max_h);
+
+            let video_size = Vec2::new(panel_w, state.av_video_height);
+            ui.add_space(sp.sm);
+            ui.allocate_ui_with_layout(video_size, Layout::top_down(Align::Center), |ui| {
+                ui.set_min_size(video_size);
+                ui.set_max_size(video_size);
+                let stage = ui.max_rect();
+                ui.painter()
+                    .rect_filled(stage, sp.radius_sm, p.card_bg.gamma_multiply(0.85));
+                paint_av_video_tiles(ui, th, state, Some(video_size));
+            });
+            paint_av_video_resize_handle(ui, th, state, min_h, max_h);
         }
 
         ui.add_space(sp.xs);
@@ -1180,111 +1358,41 @@ fn active_call_panel_compact(
     action
 }
 
-/// Full-window theater mode: video fills the viewport; chrome sits above/below.
-fn active_call_panel_fullscreen(
+/// Drag handle under the video stage — vertical resize of `av_video_height`.
+fn paint_av_video_resize_handle(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
-    lc: &crate::av::LocalCall,
-) -> Option<ChatAction> {
-    let sp = &th.spacing;
+    min_h: f32,
+    max_h: f32,
+) {
     let p = &th.palette;
-    let mut action = None;
+    let handle_h = 10.0;
+    let w = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(w, handle_h), Sense::click_and_drag());
 
-    let (headline, status_line, on_call_channel) = av_call_chrome_meta(state, lc);
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+    }
 
-    // Claim the entire central area — do not size-to-content (that kept video tiny).
-    let full = ui.available_rect_before_wrap();
-    ui.allocate_rect(full, Sense::hover());
-    ui.painter()
-        .rect_filled(full, 0.0, p.window_bg);
-
-    // Fixed chrome heights so the video rect is deterministic.
-    let header_h = th.type_scale.body * 1.35 + th.type_scale.caption + sp.sm * 2.0 + sp.md;
-    let devices_h = if state.av_show_devices {
-        // Cam/Mic/Out rows + padding (generous so we never clip the strip).
-        sp.control_height * 3.5 + sp.md * 2.0
+    let bar_w = (w * 0.18).clamp(28.0, 56.0);
+    let bar = egui::Rect::from_center_size(rect.center(), Vec2::new(bar_w, 3.0));
+    let color = if active {
+        p.accent
     } else {
-        0.0
+        p.border_soft
     };
-    let footer_h = sp.control_height + sp.md * 2.0 + devices_h;
-    let video_h = (full.height() - header_h - footer_h).max(120.0);
-    let content_w = full.width().max(1.0);
+    ui.painter().rect_filled(bar, 1.5, color);
 
-    // Layout inside the allocated full rect.
-    ui.scope_builder(
-        egui::UiBuilder::new().max_rect(full).layout(Layout::top_down(Align::Min)),
-        |ui| {
-            ui.set_min_size(full.size());
-            ui.set_max_size(full.size());
-            ui.spacing_mut().item_spacing.y = sp.xs;
+    if response.dragged() {
+        state.av_video_height =
+            (state.av_video_height + response.drag_delta().y).clamp(min_h, max_h);
+        ui.ctx().request_repaint();
+    }
 
-            // ── Header ────────────────────────────────────────────
-            ui.add_space(sp.sm);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!("📞 {headline}"))
-                        .size(th.type_scale.body)
-                        .color(p.text)
-                        .strong(),
-                )
-                .truncate()
-                .sense(Sense::hover()),
-            )
-            .on_hover_text(format!("{headline}\n{}", lc.channel));
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&status_line)
-                        .size(th.type_scale.caption)
-                        .color(p.text_secondary),
-                )
-                .truncate(),
-            );
-            ui.add_space(sp.xs);
-
-            // ── Video (exact remaining height) ────────────────────
-            let video_size = Vec2::new(content_w, video_h);
-            ui.allocate_ui_with_layout(video_size, Layout::top_down(Align::Center), |ui| {
-                ui.set_min_size(video_size);
-                ui.set_max_size(video_size);
-                // Dark stage behind tiles.
-                let stage = ui.max_rect();
-                ui.painter()
-                    .rect_filled(stage, sp.radius_sm, p.card_bg.gamma_multiply(0.85));
-                if matches!(
-                    lc.media,
-                    crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
-                ) {
-                    paint_av_video_tiles(ui, th, state, Some(video_size));
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        dim_label(ui, th, "Waiting for media…");
-                    });
-                }
-            });
-
-            ui.add_space(sp.sm);
-
-            // ── Controls ──────────────────────────────────────────
-            if let Some(act) = av_call_controls_row(ui, th, state, lc, on_call_channel) {
-                action = Some(act);
-            }
-            if state.av_show_devices {
-                if state.av_device_cameras.is_empty()
-                    && state.av_device_mics.is_empty()
-                    && state.av_device_speakers.is_empty()
-                {
-                    state.refresh_av_devices();
-                }
-                ui.add_space(sp.xs);
-                if let Some(act) = av_device_selectors(ui, th, state, /*in_call=*/ true) {
-                    action = Some(act);
-                }
-            }
-        },
-    );
-
-    action
+    response.on_hover_text("Drag to resize video");
 }
 
 fn av_call_chrome_meta(
@@ -1319,7 +1427,7 @@ fn av_call_chrome_meta(
     (headline, status_line, on_call_channel)
 }
 
-/// Mic / speaker / camera / leave / Full / Devices strip shared by compact + fullscreen.
+/// Mic / speaker / camera / leave / Devices strip.
 fn av_call_controls_row(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -1396,33 +1504,7 @@ fn av_call_controls_row(
         if button(ui, th, "Leave").clicked() {
             action = Some(ChatAction::AvLeave);
         }
-        // Theater mode: fill the app window with video (not OS borderless fullscreen).
-        let fs_label = if state.av_fullscreen {
-            "Exit full"
-        } else {
-            "Full"
-        };
-        if button(ui, th, fs_label)
-            .on_hover_text(if state.av_fullscreen {
-                "Exit fullscreen (Esc)"
-            } else {
-                "Fullscreen call view"
-            })
-            .clicked()
-        {
-            state.av_fullscreen = !state.av_fullscreen;
-            ui.ctx().request_repaint();
-        }
-        // Desktop: swap the whole app window landscape ↔ portrait.
-        if cfg!(not(target_os = "android")) {
-            if button(ui, th, "Rotate")
-                .on_hover_text("Rotate app window (swap width/height)")
-                .clicked()
-            {
-                action = Some(ChatAction::AvRotateWindow);
-            }
-        }
-        if !on_call_channel && !state.av_fullscreen {
+        if !on_call_channel {
             if button(ui, th, "Open chat").clicked() {
                 action = Some(ChatAction::OpenCallChannel(lc.channel.clone()));
             }

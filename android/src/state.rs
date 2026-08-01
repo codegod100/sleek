@@ -16,6 +16,12 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// Max messages retained per buffer.
 const MAX_MESSAGES: usize = 500;
 
+/// How long a search-hit message stays highlighted after navigation.
+const SEARCH_HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+
+/// Cap on message-search hits shown in the overlay.
+const MESSAGE_SEARCH_LIMIT: usize = 50;
+
 /// IRC-style Tab nick completion cycle for the chat compose field.
 #[derive(Debug, Clone, Default)]
 pub struct NickTabComplete {
@@ -108,6 +114,13 @@ pub struct LinkMeta {
     pub site_name: Option<String>,
 }
 
+/// One hit from global in-memory message search (freeq-android SearchSheet).
+#[derive(Debug, Clone)]
+pub struct MessageSearchHit {
+    pub channel: String,
+    pub message: ChatMessage,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub id: String,
@@ -119,6 +132,8 @@ pub struct ChatMessage {
     pub is_deleted: bool,
     pub timestamp: DateTime<Local>,
     pub reply_to: Option<String>,
+    /// Root msgid before any edit chain (delete names this; history dedup).
+    pub edit_of: Option<String>,
     pub is_signed: bool,
     /// Inline image / OG link embed (from tags or URL scan).
     pub embed: Option<Embed>,
@@ -140,6 +155,7 @@ impl ChatMessage {
             is_deleted: false,
             timestamp: Local::now(),
             reply_to: None,
+            edit_of: None,
             is_signed: false,
             embed: None,
             link_meta: None,
@@ -162,7 +178,8 @@ impl ChatMessage {
     }
 
     pub fn time_label(&self) -> String {
-        self.timestamp.format("%H:%M").to_string()
+        // 12-hour clock with AM/PM (e.g. "3:45 PM").
+        self.timestamp.format("%-I:%M %p").to_string()
     }
 
     pub fn preview(&self) -> String {
@@ -216,6 +233,8 @@ pub struct Buffer {
     /// Active freeq AV call in this channel (`av-state`), if any.
     pub call: Option<ChannelCall>,
     message_ids: HashSet<String>,
+    /// Original msgids rewritten by `+draft/edit` — skip if history replays them.
+    edit_aliases: HashSet<String>,
 }
 
 impl Buffer {
@@ -232,6 +251,7 @@ impl Buffer {
             join_error: None,
             call: None,
             message_ids: HashSet::new(),
+            edit_aliases: HashSet::new(),
         }
     }
 
@@ -291,6 +311,10 @@ impl Buffer {
     }
 
     pub fn append(&mut self, msg: ChatMessage) {
+        // Pre-edit row already rewritten in place — don't resurrect old text.
+        if !msg.id.is_empty() && self.edit_aliases.contains(&msg.id) {
+            return;
+        }
         if !msg.id.is_empty() && !self.message_ids.insert(msg.id.clone()) {
             return;
         }
@@ -323,6 +347,75 @@ impl Buffer {
                 self.message_ids.remove(&old.id);
             }
         }
+    }
+
+    /// Apply inbound `+draft/edit`. Rewrites the original in place; swaps `id`
+    /// to the edit's msgid so further edits chain. Returns true if applied.
+    pub fn apply_edit(
+        &mut self,
+        editor_nick: &str,
+        original_msgid: &str,
+        new_msgid: Option<&str>,
+        new_text: &str,
+        embed: Option<Embed>,
+        link_meta: Option<LinkMeta>,
+    ) -> bool {
+        let (old_id, swap_to) = {
+            let Some(msg) = self.find_message_mut(original_msgid) else {
+                return false;
+            };
+            if !msg.from.eq_ignore_ascii_case(editor_nick) {
+                return false;
+            }
+            if msg.is_deleted {
+                return false;
+            }
+            let old_id = msg.id.clone();
+            msg.text = new_text.to_string();
+            msg.is_edited = true;
+            msg.embed = embed;
+            msg.link_meta = link_meta;
+            if msg.edit_of.is_none() {
+                msg.edit_of = Some(original_msgid.to_string());
+            }
+            let swap_to = new_msgid
+                .filter(|id| !id.is_empty() && *id != old_id.as_str())
+                .map(str::to_string);
+            if let Some(id) = swap_to.as_ref() {
+                msg.id = id.clone();
+            }
+            (old_id, swap_to)
+        };
+        self.edit_aliases.insert(original_msgid.to_string());
+        if old_id != original_msgid {
+            self.edit_aliases.insert(old_id.clone());
+        }
+        if let Some(id) = swap_to {
+            self.message_ids.remove(&old_id);
+            self.message_ids.insert(id);
+        }
+        true
+    }
+
+    /// Soft-delete via `+draft/delete`. Matches current id or edit-chain root.
+    pub fn apply_delete(&mut self, deleter_nick: &str, msgid: &str) -> bool {
+        let Some(msg) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.id == msgid || m.edit_of.as_deref() == Some(msgid))
+        else {
+            return false;
+        };
+        if !msg.from.eq_ignore_ascii_case(deleter_nick) {
+            return false;
+        }
+        msg.is_deleted = true;
+        msg.text.clear();
+        msg.embed = None;
+        msg.link_meta = None;
+        msg.reactions.clear();
+        true
     }
 
     /// Absorb another buffer's messages/unread (DID-keyed DM merge).
@@ -371,7 +464,9 @@ impl Buffer {
         if msg_id.is_empty() {
             return None;
         }
-        self.messages.iter_mut().find(|m| m.id == msg_id)
+        self.messages
+            .iter_mut()
+            .find(|m| m.id == msg_id || m.edit_of.as_deref() == Some(msg_id))
     }
 
     /// Idempotent add of `from`'s reaction. Empty emoji is ignored.
@@ -858,12 +953,28 @@ pub struct AppState {
     pub discover_input: String,
     /// Channel member list open (chat detail only).
     pub show_members: bool,
-    /// Message id whose emoji reaction picker is open (active chat only).
+    /// Global message search overlay open (chat detail only).
+    pub show_message_search: bool,
+    /// Query for the message search overlay.
+    pub message_search: String,
+    /// One-shot: focus the message search field next frame.
+    pub focus_message_search: bool,
+    /// Scroll the chat list to this msgid once (from a search result).
+    pub scroll_to_msgid: Option<String>,
+    /// Briefly highlight this msgid after navigating from search.
+    pub highlight_msgid: Option<String>,
+    /// When `highlight_msgid` should clear.
+    pub highlight_until: Option<Instant>,
+    /// Message id whose emoji reaction picker dialog is open (active chat only).
     pub react_picker_msg: Option<String>,
-    /// Search query for the full emoji picker (cleared when the picker closes).
+    /// Search query for the reaction picker dialog (cleared when it closes).
     pub react_picker_search: String,
-    /// Active category tab in the full emoji picker.
+    /// Active category tab in the reaction picker dialog.
     pub react_picker_group: EmojiPickerGroup,
+    /// Full-screen image lightbox URL (chat embed tap). `None` = closed.
+    pub image_lightbox: Option<String>,
+    /// msgid currently being edited in the compose bar (`None` = normal send).
+    pub editing_msgid: Option<String>,
 
     /// Connect form fields (editable while disconnected).
     pub connect_mode: ConnectMode,
@@ -912,9 +1023,8 @@ pub struct AppState {
     /// In-call / pre-call: show Cam/Mic/Out pickers (collapsed by default mid-call
     /// so mute/leave stay uncluttered; expanded when the user opens Devices).
     pub av_show_devices: bool,
-    /// In-call theater mode: video fills the app viewport (hides chat/tabs chrome).
-    /// Not OS window fullscreen — just the call UI taking the full window.
-    pub av_fullscreen: bool,
+    /// Height of the in-call video stage (drag the handle under the tiles to resize).
+    pub av_video_height: f32,
 
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
@@ -986,9 +1096,17 @@ impl AppState {
             join_input: String::new(),
             discover_input: String::new(),
             show_members: false,
+            show_message_search: false,
+            message_search: String::new(),
+            focus_message_search: false,
+            scroll_to_msgid: None,
+            highlight_msgid: None,
+            highlight_until: None,
             react_picker_msg: None,
             react_picker_search: String::new(),
             react_picker_group: EmojiPickerGroup::default(),
+            image_lightbox: None,
+            editing_msgid: None,
             connect_mode: ConnectMode::Bluesky,
             form_handle: String::new(),
             form_callback: String::new(),
@@ -1016,7 +1134,7 @@ impl AppState {
             av_device_mics: Vec::new(),
             av_device_speakers: Vec::new(),
             av_show_devices: false,
-            av_fullscreen: false,
+            av_video_height: 220.0,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
@@ -1482,12 +1600,19 @@ impl AppState {
             self.compose_image = None;
             self.compose_uploading = false;
             self.compose_nick_tab.clear();
+            self.cancel_edit();
         }
         self.ensure_buffer(&key);
         self.active_channel = Some(key.clone());
         self.route = Route::Chat(key.clone());
         self.show_members = false;
+        self.close_message_search();
         self.close_react_picker();
+        self.close_image_lightbox();
+        // Drop stale scroll/highlight when opening via the list (search nav
+        // re-sets these immediately after `open_chat`).
+        self.scroll_to_msgid = None;
+        self.clear_search_highlight();
         if let Some(buf) = self.channels.get_mut(&key) {
             buf.mark_read();
         }
@@ -1498,23 +1623,137 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
+        self.close_message_search();
         self.close_react_picker();
+        self.close_image_lightbox();
+        self.scroll_to_msgid = None;
+        self.clear_search_highlight();
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
         self.compose_nick_tab.clear();
+        self.cancel_edit();
     }
 
-    /// Open the full emoji reaction picker on `msgid` (clears any prior search).
+    /// Open the full-screen image lightbox for a chat embed URL.
+    pub fn open_image_lightbox(&mut self, url: String) {
+        if url.is_empty() {
+            return;
+        }
+        self.image_lightbox = Some(url);
+    }
+
+    /// Dismiss the image lightbox.
+    pub fn close_image_lightbox(&mut self) {
+        self.image_lightbox = None;
+    }
+
+    /// Open the message search overlay (freeq-android SearchSheet).
+    pub fn open_message_search(&mut self) {
+        self.show_members = false;
+        self.close_react_picker();
+        self.show_message_search = true;
+        self.focus_message_search = true;
+    }
+
+    /// Dismiss the message search overlay and clear its query.
+    pub fn close_message_search(&mut self) {
+        self.show_message_search = false;
+        self.message_search.clear();
+        self.focus_message_search = false;
+    }
+
+    /// Clear the transient search-hit highlight.
+    pub fn clear_search_highlight(&mut self) {
+        self.highlight_msgid = None;
+        self.highlight_until = None;
+    }
+
+    /// Expire a stale search highlight (call each frame from the chat UI).
+    pub fn tick_search_highlight(&mut self) {
+        if let Some(until) = self.highlight_until {
+            if Instant::now() >= until {
+                self.clear_search_highlight();
+            }
+        }
+    }
+
+    /// Open a buffer and scroll/highlight a specific message (from search).
+    pub fn navigate_to_message(&mut self, channel: &str, msgid: &str) {
+        // `open_chat` clears scroll/highlight (list opens); re-apply after.
+        self.close_message_search();
+        self.open_chat(channel);
+        if !msgid.is_empty() {
+            self.scroll_to_msgid = Some(msgid.to_string());
+            self.highlight_msgid = Some(msgid.to_string());
+            self.highlight_until = Some(Instant::now() + SEARCH_HIGHLIGHT_DURATION);
+        }
+    }
+
+    /// Search loaded chat/DM buffers for messages matching `query` (min 2 chars).
+    ///
+    /// Matches body text or sender nick (case-insensitive). Skips system and
+    /// deleted messages. Newest hits first, capped at [`MESSAGE_SEARCH_LIMIT`].
+    pub fn search_messages(&self, query: &str) -> Vec<MessageSearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.chars().count() < 2 {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        for key in &self.channel_order {
+            let Some(buf) = self.channels.get(key) else {
+                continue;
+            };
+            if buf.name == "*status" {
+                continue;
+            }
+            for msg in &buf.messages {
+                if msg.from.is_empty() || msg.is_deleted || msg.is_system {
+                    continue;
+                }
+                if msg.text.to_lowercase().contains(&q) || msg.from.to_lowercase().contains(&q) {
+                    matches.push(MessageSearchHit {
+                        // Prefer the HashMap key (DID for DMs) so navigate/open_chat
+                        // lands in the same buffer search scanned.
+                        channel: key.clone(),
+                        message: msg.clone(),
+                    });
+                }
+            }
+        }
+        matches.sort_by(|a, b| b.message.timestamp.cmp(&a.message.timestamp));
+        matches.truncate(MESSAGE_SEARCH_LIMIT);
+        matches
+    }
+
+    /// Open the emoji reaction picker dialog on `msgid` (clears any prior search).
     pub fn open_react_picker(&mut self, msgid: String) {
         self.react_picker_msg = Some(msgid);
         self.react_picker_search.clear();
     }
 
-    /// Dismiss the emoji reaction picker and reset its search field.
+    /// Dismiss the emoji reaction picker dialog and reset its search field.
     pub fn close_react_picker(&mut self) {
         self.react_picker_msg = None;
         self.react_picker_search.clear();
+    }
+
+    /// Start editing an existing message in the compose bar.
+    pub fn begin_edit(&mut self, msgid: String, text: String) {
+        self.editing_msgid = Some(msgid);
+        self.compose = text;
+        self.compose_image = None;
+        self.compose_nick_tab.clear();
+        self.focus_compose = true;
+        self.close_react_picker();
+    }
+
+    /// Cancel an in-progress compose edit.
+    pub fn cancel_edit(&mut self) {
+        if self.editing_msgid.take().is_some() {
+            self.compose.clear();
+            self.compose_nick_tab.clear();
+        }
     }
 
     pub fn sorted_conversations(&self) -> Vec<&Buffer> {
@@ -1549,7 +1788,10 @@ impl AppState {
         self.route = Route::Tabs;
         self.tab = Tab::Chats;
         self.show_members = false;
+        self.close_message_search();
         self.close_react_picker();
+        self.scroll_to_msgid = None;
+        self.clear_search_highlight();
         self.compose.clear();
         self.compose_image = None;
         self.compose_uploading = false;
@@ -1567,7 +1809,6 @@ impl AppState {
         self.av_focused_video = None;
         // Next call starts with a clean control strip (Devices collapsed).
         self.av_show_devices = false;
-        self.av_fullscreen = false;
     }
 
     /// Full sign-out: disconnect buffers + wipe cached account / guest so the
@@ -1709,6 +1950,7 @@ mod tests {
             is_deleted: false,
             timestamp: Local::now(),
             reply_to: None,
+            edit_of: None,
             is_signed: false,
             embed: None,
             link_meta: None,
@@ -1735,6 +1977,7 @@ mod tests {
             is_deleted: false,
             timestamp: Local::now(),
             reply_to: None,
+            edit_of: None,
             is_signed: false,
             embed: None,
             link_meta: None,
@@ -1748,5 +1991,122 @@ mod tests {
         buf.remove_reaction("m1", "🎉", "other");
         let msg = buf.messages.iter().find(|m| m.id == "m1").unwrap();
         assert!(!msg.reactions.contains_key("🎉"));
+    }
+
+    fn sample_msg(id: &str, from: &str, text: &str, ts: DateTime<Local>) -> ChatMessage {
+        ChatMessage {
+            id: id.into(),
+            from: from.into(),
+            text: text.into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: ts,
+            reply_to: None,
+            edit_of: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn message_search_matches_text_and_nick_newest_first() {
+        let mut state = AppState::new();
+        let t0 = Local::now() - chrono::Duration::minutes(2);
+        let t1 = Local::now() - chrono::Duration::minutes(1);
+        let t2 = Local::now();
+        state.ensure_buffer("#a");
+        state.ensure_buffer("#b");
+        state.channels.get_mut("#a").unwrap().append(sample_msg("1", "alice", "hello world", t0));
+        state.channels.get_mut("#a").unwrap().append(sample_msg("2", "bob", "nope", t1));
+        state.channels.get_mut("#b").unwrap().append(sample_msg("3", "carol", "HELLO again", t2));
+        state.channels.get_mut("#b").unwrap().append(ChatMessage {
+            id: "sys".into(),
+            from: String::new(),
+            text: "hello system".into(),
+            is_system: true,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: t2,
+            reply_to: None,
+            edit_of: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+
+        assert!(state.search_messages("h").is_empty()); // min 2 chars
+        let hits = state.search_messages("hello");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].message.id, "3"); // newest first
+        assert_eq!(hits[1].message.id, "1");
+
+        let nick_hits = state.search_messages("bob");
+        assert_eq!(nick_hits.len(), 1);
+        assert_eq!(nick_hits[0].message.id, "2");
+    }
+
+    #[test]
+    fn navigate_to_message_opens_chat_and_sets_scroll() {
+        let mut state = AppState::new();
+        state.ensure_buffer("#room");
+        state.navigate_to_message("#room", "msg-42");
+        assert!(matches!(state.route, Route::Chat(ref c) if c == "#room"));
+        assert!(!state.show_message_search);
+        assert_eq!(state.scroll_to_msgid.as_deref(), Some("msg-42"));
+        assert_eq!(state.highlight_msgid.as_deref(), Some("msg-42"));
+        assert!(state.highlight_until.is_some());
+    }
+
+    #[test]
+    fn apply_edit_rewrites_in_place_and_delete_matches_root() {
+        let mut buf = Buffer::new("#t");
+        buf.append(ChatMessage {
+            id: "orig".into(),
+            from: "alice".into(),
+            text: "v1".into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: Local::now(),
+            reply_to: None,
+            edit_of: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+        assert!(buf.apply_edit("alice", "orig", Some("edit1"), "v2", None, None));
+        let msg = buf.messages.front().unwrap();
+        assert_eq!(msg.id, "edit1");
+        assert_eq!(msg.text, "v2");
+        assert!(msg.is_edited);
+        assert_eq!(msg.edit_of.as_deref(), Some("orig"));
+        // History replay of the pre-edit row is dropped.
+        buf.append(ChatMessage {
+            id: "orig".into(),
+            from: "alice".into(),
+            text: "v1".into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: Local::now(),
+            reply_to: None,
+            edit_of: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+        assert_eq!(buf.messages.len(), 1);
+        assert!(buf.apply_delete("alice", "orig"));
+        assert!(buf.messages.front().unwrap().is_deleted);
     }
 }

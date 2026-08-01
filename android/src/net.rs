@@ -43,6 +43,8 @@ pub enum NetCmd {
         target: String,
         text: String,
     },
+    /// Raw IRC line (slash-command fallthrough, NICK, TOPIC, …).
+    Raw(String),
     /// Upload image bytes to freeq `/api/v1/upload`, then PRIVMSG the URL (+ caption).
     UploadAndSend {
         target: String,
@@ -124,6 +126,14 @@ pub enum NetCmd {
         emoji: String,
         msgid: String,
     },
+    /// PRIVMSG with `+draft/edit` — replace a previously sent message.
+    EditMessage {
+        target: String,
+        msgid: String,
+        text: String,
+    },
+    /// TAGMSG `+draft/delete` — soft-delete a message.
+    DeleteMessage { target: String, msgid: String },
     Quit,
 }
 
@@ -492,6 +502,15 @@ async fn apply_cmd(
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
             }
         }
+        NetCmd::Raw(line) => {
+            if let Some(h) = handle {
+                if let Err(e) = h.raw(&line).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Raw send failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
         NetCmd::React {
             target,
             emoji,
@@ -516,6 +535,28 @@ async fn apply_cmd(
                 tags.insert("+reply".to_string(), msgid);
                 if let Err(e) = h.send_tagmsg(&target, tags).await {
                     let _ = event_tx.send(NetEvent::Failed(format!("Unreact failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
+        NetCmd::EditMessage {
+            target,
+            msgid,
+            text,
+        } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.edit_message(&target, &msgid, &text).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Edit failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
+        NetCmd::DeleteMessage { target, msgid } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.delete_message(&target, &msgid).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Delete failed: {e}")));
                 }
             } else {
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));

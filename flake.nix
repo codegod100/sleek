@@ -181,6 +181,7 @@
               nativeBuildInputs = with pkgs; [
                 pkg-config
                 makeWrapper
+                copyDesktopItems
                 llvmPackages.libclang
               ];
               buildInputs = libs;
@@ -190,9 +191,58 @@
               doCheck = false;
 
               # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
+              # Desktop entry + icons for app menus / launchers.
+              desktopItems = [
+                (pkgs.makeDesktopItem {
+                  name = "uk.nandi.sleek";
+                  desktopName = "Sleek";
+                  genericName = "Chat";
+                  comment = "Freeq chat client — channels, DMs, and calls";
+                  exec = "sleek";
+                  # Name-based lookup; postInstall rewrites to an absolute PNG
+                  # path so launchers that skip nix-profile hicolor still work.
+                  icon = "uk.nandi.sleek";
+                  categories = [
+                    "Network"
+                    "Chat"
+                    "InstantMessaging"
+                  ];
+                  keywords = [
+                    "freeq"
+                    "irc"
+                    "chat"
+                    "call"
+                    "video"
+                  ];
+                  startupNotify = true;
+                  # Must match ViewportBuilder::with_app_id("uk.nandi.sleek").
+                  startupWMClass = "uk.nandi.sleek";
+                  terminal = false;
+                })
+              ];
+
               postInstall = ''
                 wrapProgram $out/bin/sleek \
                   --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libs}
+
+                # Freedesktop icon theme (scalable + common raster sizes).
+                install -Dm644 ${./assets/uk.nandi.sleek.svg} \
+                  $out/share/icons/hicolor/scalable/apps/uk.nandi.sleek.svg
+                for size in 16 24 32 48 64 128 256 512; do
+                  install -Dm644 ${./assets/icons}/uk.nandi.sleek-$size.png \
+                    $out/share/icons/hicolor/''${size}x''${size}/apps/uk.nandi.sleek.png
+                done
+                # Legacy pixmap lookup (some menus only check pixmaps/).
+                install -Dm644 ${./assets/icons}/uk.nandi.sleek-256.png \
+                  $out/share/pixmaps/uk.nandi.sleek.png
+
+                # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
+                # and when the launcher does not merge nix-profile into the theme path.
+                if [ -f $out/share/applications/uk.nandi.sleek.desktop ]; then
+                  substituteInPlace $out/share/applications/uk.nandi.sleek.desktop \
+                    --replace-fail 'Icon=uk.nandi.sleek' \
+                    "Icon=$out/share/icons/hicolor/256x256/apps/uk.nandi.sleek.png"
+                fi
               '';
 
               meta = with pkgs.lib; {
@@ -595,9 +645,9 @@ EOF
             release = true;
           };
 
-          # Iterative desktop host: flake toolchain + in-tree `cargo run`.
-          # Unlike .#default / `nix run` (pure Nix store binary), this builds and
-          # runs against the working tree so incremental cargo caches apply.
+          # Desktop host app entry: flake toolchain + in-tree `cargo run --release`.
+          # Used by apps.default / apps.host (`nix run`, `nix run .#host`).
+          # Hermetic store binary remains packages.sleek / apps.sleek.
           # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
           run-host =
             let
@@ -664,7 +714,7 @@ EOF
                 fi
                 cd "$root"
 
-                exec cargo run --manifest-path host/Cargo.toml "$@"
+                exec cargo run --release --manifest-path host/Cargo.toml "$@"
               '';
             };
         in
@@ -685,14 +735,20 @@ EOF
       );
 
       apps = forAllSystems (system: {
+        # Desktop host via in-tree `cargo run --release` (iterative; needs repo root + path deps).
+        # Hermetic store binary is packages.default / packages.sleek (`nix build .#sleek`).
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/sleek";
+          program = "${self.packages.${system}.run-host}/bin/run-host";
         };
-        # In-tree cargo run (iterative). Store binary remains `nix run` / .#default.
         host = {
           type = "app";
           program = "${self.packages.${system}.run-host}/bin/run-host";
+        };
+        # Pure store binary (no cargo; from packages.sleek).
+        sleek = {
+          type = "app";
+          program = "${self.packages.${system}.sleek}/bin/sleek";
         };
         install-android = {
           type = "app";
@@ -795,7 +851,7 @@ EOF
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — nix run .#host | nix run .#waydroid | nix run .#waydroid-release | nix run .#deploy-android | nix build .#android"
+                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix run .#waydroid-release | nix run .#deploy-android | nix build .#android"
                 fi
               '';
             }
