@@ -721,4 +721,21 @@ mod tests {
         assert!(!camera_publish_at_dial(false, true));
         assert!(!camera_publish_at_dial(false, false));
     }
+
+    /// Contract for Android JNI: CameraCapture lives in APK classes.dex and
+    /// must be loaded with Activity ClassLoader + Java binary name (dots).
+    /// `FindClass("uk/nandi/sleek/CameraCapture")` from a native worker thread
+    /// uses the system loader and returns ClassNotFound — which made AV report
+    /// "camera unavailable" even with CAMERA granted and dex injected.
+    #[test]
+    fn android_camera_capture_class_binary_name() {
+        assert_eq!(
+            "uk.nandi.sleek.CameraCapture",
+            "uk.nandi.sleek.CameraCapture"
+        );
+        assert!(
+            !"uk.nandi.sleek.CameraCapture".contains('/'),
+            "ClassLoader.loadClass wants dots, not JNI slashes"
+        );
+    }
 }
