@@ -124,7 +124,10 @@
             chmod -R u+w $out
             # Drop heavy/irrelevant freeq crates so cargo metadata stays lean
             # (path dep only needs freeq-sdk + its workspace graph).
-            rm -rf $out/sleek/{.git,host/target,android/target} 2>/dev/null || true
+            # Drop CI/docs/flake metadata so Spindle-only commits do not bust
+            # Cachix store paths (cargo only needs android/host/vendor/…).
+            rm -rf $out/sleek/{.git,host/target,android/target,.tangled,.devcontainer,.jj,docs} \
+              $out/sleek/{README.md,justfile,flake.nix,flake.lock} 2>/dev/null || true
           '';
 
       androidApiLevel = "28";
