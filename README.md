@@ -42,6 +42,8 @@ nix run            # in-tree cargo run --release (default app; needs sibling vid
 nix run .#host     # same as nix run
 nix run .#sleek    # pure Nix store binary (hermetic)
 nix build .#sleek  # → ./result/bin/sleek
+nix build .#flatpak  # → ./result/uk.nandi.sleek.flatpak (GNOME Platform 49)
+# flatpak install --user ./result/uk.nandi.sleek.flatpak && flatpak run uk.nandi.sleek
 
 # Waydroid (x86_64 cargo-apk + install/launch + full UI window):
 nix run .#waydroid                 # debug: build + install + launch + show-full-ui
@@ -63,6 +65,18 @@ nix run .#install-android -- --launch
 # Manual push of an existing out-link:
 just push ./result-android
 ```
+
+### Spindle (Tangled CI)
+
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) builds `.#android` and `.#flatpak` on pushes/PRs to `main` (and manual runs). On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
+| `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
+| `CACHIX_AUTH_TOKEN` | Optional — push store paths to `codegod100` |
+
+Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`, `CACHIX_CACHE`. Spindle timeout should be ≥ ~60m for cold builds.
 
 ### Cachix (Codespaces)
 
@@ -214,6 +228,7 @@ create a new one from `main` after the Ubuntu+bootstrap config is pushed.
 sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
+  .tangled/         # Spindle CI (Tangled)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake

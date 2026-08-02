@@ -25,6 +25,8 @@
       url = "github:codegod100/freeq";
       flake = false;
     };
+    # Convert the Nix sleek package into a distributable .flatpak bundle.
+    nix2flatpak.url = "github:neobrain/nix2flatpak";
   };
 
   outputs =
@@ -34,6 +36,7 @@
       rust-overlay,
       vidya,
       freeq,
+      nix2flatpak,
     }:
     let
       systems = [
@@ -236,6 +239,10 @@
                 install -Dm644 ${./assets/icons}/uk.nandi.sleek-256.png \
                   $out/share/pixmaps/uk.nandi.sleek.png
 
+                # AppStream metadata (Flatpak / software centers).
+                install -Dm644 ${./assets/uk.nandi.sleek.metainfo.xml} \
+                  $out/share/metainfo/uk.nandi.sleek.metainfo.xml
+
                 # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
                 # and when the launcher does not merge nix-profile into the theme path.
                 if [ -f $out/share/applications/uk.nandi.sleek.desktop ]; then
@@ -255,6 +262,48 @@
             }
             // (v4l2BindgenEnv pkgs)
           );
+
+          # Distributable Flatpak bundle of packages.sleek (no Nix required to install).
+          #   nix build .#flatpak
+          #   flatpak install --user ./result/uk.nandi.sleek.flatpak
+          #   flatpak run uk.nandi.sleek
+          sleek-flatpak = nix2flatpak.lib.${system}.mkFlatpak {
+            appId = "uk.nandi.sleek";
+            appName = "Sleek";
+            developer = "nandi";
+            package = sleek-host;
+            # GNOME Platform indexes ship with nix2flatpak; includes Freedesktop base.
+            runtime = "org.gnome.Platform/49";
+            command = "sleek";
+            icon = ./assets/uk.nandi.sleek.svg;
+            appdata = ./assets/uk.nandi.sleek.metainfo.xml;
+            desktopFile = ./assets/uk.nandi.sleek.desktop;
+            permissions = {
+              share = [
+                "network"
+                "ipc"
+              ];
+              sockets = [
+                "fallback-x11"
+                "wayland"
+                "pulseaudio"
+              ];
+              # dri = GL; all = camera / mic for freeq AV calls.
+              devices = [
+                "dri"
+                "all"
+              ];
+              filesystems = [
+                "xdg-run/pipewire-0"
+              ];
+              talk-names = [
+                "org.freedesktop.Notifications"
+                "org.freedesktop.portal.Desktop"
+              ];
+            };
+            # nixpkgs unstable vs GNOME 49 runtime — ABI check is advisory here.
+            skipAbiChecks = true;
+          };
 
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
@@ -722,6 +771,8 @@ EOF
           default = sleek-host;
           sleek = sleek-host;
           inherit sleek-host;
+          flatpak = sleek-flatpak;
+          inherit sleek-flatpak;
           android = sleek-android;
           inherit sleek-android;
           inherit install-android;

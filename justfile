@@ -81,6 +81,13 @@ launch:
 android:
     ./scripts/nix-build-push.sh .#android -L --out-link result-android
 
+# Flatpak bundle of the desktop host (nix2flatpak → uk.nandi.sleek.flatpak)
+#   just flatpak
+#   flatpak install --user ./result-flatpak/uk.nandi.sleek.flatpak
+#   flatpak run uk.nandi.sleek
+flatpak:
+    nix build .#flatpak -L --out-link result-flatpak
+
 # adb install result of .#android onto a connected phone
 install-android *args:
     nix run .#install-android -- {{args}}
