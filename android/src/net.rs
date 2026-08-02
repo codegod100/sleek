@@ -11,6 +11,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 
 use crate::auth::{self, AuthTokens};
+use crate::bsky::{self, HandleSuggestion};
 use crate::state::{prefer_websocket, websocket_url_for};
 
 use crate::av_media::{AvMediaConfig, AvMediaSession};
@@ -134,6 +135,12 @@ pub enum NetCmd {
     },
     /// TAGMSG `+draft/delete` — soft-delete a message.
     DeleteMessage { target: String, msgid: String },
+    /// Bluesky handle typeahead for the connect-screen login field.
+    SearchHandles {
+        /// Monotonic id so the UI can ignore stale responses.
+        request_id: u64,
+        query: String,
+    },
     Quit,
 }
 
@@ -193,6 +200,14 @@ pub enum NetEvent {
         mic_level: Option<crate::av::MicLevel>,
         /// True when a real mic is feeding outbound Opus (false = silence/listen-only).
         has_mic: bool,
+    },
+    /// Bluesky handle typeahead results (or empty on soft failure).
+    HandleSuggestions {
+        request_id: u64,
+        query: String,
+        actors: Vec<HandleSuggestion>,
+        /// `None` on success; set when the AppView request failed.
+        error: Option<String>,
     },
 }
 
@@ -836,6 +851,30 @@ async fn apply_cmd(
         }
         NetCmd::AvSpeakerDevice { id } => {
             media.set_speaker_device(id);
+        }
+        NetCmd::SearchHandles { request_id, query } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match bsky::search_actors_typeahead(&query, bsky::TYPEAHEAD_LIMIT).await {
+                    Ok(actors) => {
+                        let _ = tx.send(NetEvent::HandleSuggestions {
+                            request_id,
+                            query,
+                            actors,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("handle typeahead {query}: {e}");
+                        let _ = tx.send(NetEvent::HandleSuggestions {
+                            request_id,
+                            query,
+                            actors: Vec::new(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            });
         }
         NetCmd::Quit => {
             media.stop().await;
