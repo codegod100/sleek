@@ -1,6 +1,5 @@
-# Install .#flatpak from binary cache (no local compile).
-# Hosted Spindle OOMs/kills real nix builds ~3m with no logs.
-# Warm the cache first:  nix build .#flatpak && cachix push codegod100 ./result-flatpak
+# Substitute .#flatpak from binary cache only (hosted Spindle cannot compile).
+# Warm cache: just flatpak && cachix push codegod100 ./result-flatpak
 
 when:
   - event: ["push", "manual"]
@@ -18,15 +17,14 @@ steps:
   - name: "Substitute Flatpak from cache"
     command: |
       set -euo pipefail
-      export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true
-      max-jobs = 0"
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true\nmax-jobs = 0\nextra-substituters = https://codegod100.cachix.org\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='
       echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
       nix --version
-      if ! nix build .#flatpak --out-link result-flatpak; then
-        echo "error: .#flatpak not substitutable. Build+push elsewhere:" >&2
-        echo "  nix build .#flatpak --out-link result-flatpak" >&2
-        echo "  cachix push codegod100 ./result-flatpak" >&2
+      if ! nix build .#flatpak --out-link result-flatpak \
+          --substituters 'https://codegod100.cachix.org https://cache.nixos.org' \
+          --trusted-public-keys 'codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='; then
+        echo "error: .#flatpak not in cache. On a machine with Cachix write access:" >&2
+        echo "  just flatpak && cachix push codegod100 ./result-flatpak" >&2
         exit 1
       fi
       test -s result-flatpak/uk.nandi.sleek.flatpak

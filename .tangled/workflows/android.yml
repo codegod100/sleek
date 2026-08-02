@@ -1,6 +1,5 @@
-# Install .#android from binary cache (no local compile).
-# Hosted Spindle OOMs/kills real nix builds ~3m with no logs.
-# Warm the cache first:  nix build .#android && cachix push codegod100 ./result-android
+# Substitute .#android from binary cache only (hosted Spindle cannot compile).
+# Warm cache: just android   # or: nix build .#android && cachix push codegod100 ./result-android
 
 when:
   - event: ["push", "manual"]
@@ -18,16 +17,14 @@ steps:
   - name: "Substitute APK from cache"
     command: |
       set -euo pipefail
-      export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true
-      max-jobs = 0"
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true\nmax-jobs = 0\nextra-substituters = https://codegod100.cachix.org\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='
       echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
       nix --version
-      # max-jobs=0 → download only; fail fast if not in codegod100/cache.nixos.org
-      if ! nix build .#android --out-link result-android; then
-        echo "error: .#android not substitutable. Build+push elsewhere:" >&2
-        echo "  nix build .#android --out-link result-android" >&2
-        echo "  cachix push codegod100 ./result-android" >&2
+      if ! nix build .#android --out-link result-android \
+          --substituters 'https://codegod100.cachix.org https://cache.nixos.org' \
+          --trusted-public-keys 'codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='; then
+        echo "error: .#android not in cache. On a machine with Cachix write access:" >&2
+        echo "  just android" >&2
         exit 1
       fi
       test -s result-android/sleek.apk
