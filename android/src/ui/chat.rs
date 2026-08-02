@@ -30,7 +30,7 @@ pub enum ChatAction {
     AvToggleMute,
     /// Toggle speaker (remote audio) mute.
     AvToggleSpeakerMute,
-    /// Toggle camera publish (desktop MoQ).
+    /// Toggle camera publish (MoQ).
     AvToggleCamera,
     /// Select camera device (`None` = system first / default).
     AvSelectCamera(Option<String>),

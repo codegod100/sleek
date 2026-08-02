@@ -18,6 +18,8 @@ mod v4l2cam;
 
 #[cfg(target_os = "android")]
 mod android_media;
+#[cfg(target_os = "android")]
+mod android_camera;
 
 pub use app::run_desktop;
 
