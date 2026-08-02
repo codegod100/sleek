@@ -47,12 +47,58 @@ pub fn android_app_handle() -> Option<&'static AndroidApp> {
     android_app()
 }
 
+/// True when CAMERA is already granted (no dialog).
+pub fn has_camera_permission() -> bool {
+    check_self_permission("android.permission.CAMERA").unwrap_or(false)
+}
+
+/// True when RECORD_AUDIO is already granted (no dialog).
+pub fn has_record_audio_permission() -> bool {
+    check_self_permission("android.permission.RECORD_AUDIO").unwrap_or(false)
+}
+
+/// Outcome of [`ensure_av_call_permissions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvCallPermissions {
+    pub mic: bool,
+    pub camera: bool,
+}
+
+/// Request mic (+ optional camera) in a **single** system dialog.
+///
+/// Calling `requestPermissions` twice in a row replaces the first dialog, so
+/// RECORD_AUDIO + CAMERA must be batched. Returns the current grant state
+/// (dialog may still be open — check again after the user responds).
+pub fn ensure_av_call_permissions(want_camera: bool) -> AvCallPermissions {
+    let mut need: Vec<&str> = vec!["android.permission.RECORD_AUDIO"];
+    if want_camera {
+        need.push("android.permission.CAMERA");
+    }
+    match request_all_permissions(&need, 0x5_1EE_9) {
+        Ok(true) => {
+            log::debug!("android AV permissions already granted (camera={want_camera})");
+        }
+        Ok(false) => {
+            log::info!(
+                "android AV permissions requested (awaiting user; want_camera={want_camera})"
+            );
+        }
+        Err(e) => {
+            log::warn!("android AV permissions: {e}");
+        }
+    }
+    AvCallPermissions {
+        mic: has_record_audio_permission(),
+        camera: has_camera_permission(),
+    }
+}
+
 /// Ensure camera access for AV video publish; prompt if needed.
 ///
 /// Returns `true` when already granted. `false` means the system dialog was
 /// shown or the permission was denied — caller may still dial audio-only.
 pub fn ensure_camera_permission() -> bool {
-    match request_permissions(&["android.permission.CAMERA"], 0x5_1EE_8) {
+    match request_all_permissions(&["android.permission.CAMERA"], 0x5_1EE_8) {
         Ok(true) => {
             log::debug!("android CAMERA granted");
             true
@@ -668,7 +714,7 @@ pub fn ensure_read_images_permission() {
 /// Returns `true` when already granted. A `false` means the system dialog was
 /// shown — caller may dial anyway and retry after the user accepts, or wait.
 pub fn ensure_record_audio_permission() -> bool {
-    match request_permissions(&["android.permission.RECORD_AUDIO"], 0x5_1EE_7) {
+    match request_all_permissions(&["android.permission.RECORD_AUDIO"], 0x5_1EE_7) {
         Ok(true) => {
             log::debug!("android RECORD_AUDIO granted");
             true
@@ -684,13 +730,8 @@ pub fn ensure_record_audio_permission() -> bool {
     }
 }
 
-/// `Ok(true)` = at least one listed permission already granted (or none needed).
-/// `Ok(false)` = dialog shown / not granted yet.
-///
-/// For photo-read we treat *any* of the alternatives as sufficient (API 33+
-/// uses `READ_MEDIA_IMAGES`; older uses `READ_EXTERNAL_STORAGE`). For mic we
-/// pass a single permission.
-fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+/// `Ok(true)` when `permission` is already granted.
+fn check_self_permission(permission: &str) -> Result<bool, String> {
     let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
 
     let vm_ptr = app.vm_as_ptr();
@@ -713,57 +754,108 @@ fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, 
         .attach_current_thread(|env| -> jni::errors::Result<bool> {
             // SAFETY: activity is a global ref owned by the Android runtime.
             let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-
-            // Alternatives (e.g. READ_MEDIA_IMAGES | READ_EXTERNAL_STORAGE): any
-            // one grant is enough. Single-permission lists (mic) require that one.
-            let mut need: Vec<String> = Vec::new();
-            for perm in permissions {
-                let jperm = env.new_string(*perm)?;
-                let res = env
-                    .call_method(
-                        &activity,
-                        jni_str!("checkSelfPermission"),
-                        jni_sig!((java.lang.String) -> jint),
-                        &[JValue::Object(jperm.as_ref())],
-                    )?
-                    .i()?;
-                // PackageManager.PERMISSION_GRANTED == 0
-                if res == 0 {
-                    return Ok(true);
-                }
-                need.push((*perm).to_string());
-            }
-
-            if need.is_empty() {
-                return Ok(true);
-            }
-
-            let empty = env.new_string("")?;
-            let empty_obj: &JObject = empty.as_ref();
-            let arr = env.new_object_array(
-                need.len() as jni::sys::jsize,
-                jni_str!("java/lang/String"),
-                empty_obj,
-            )?;
-            for (i, perm) in need.iter().enumerate() {
-                let jperm = env.new_string(perm)?;
-                let jperm_obj: &JObject = jperm.as_ref();
-                arr.set_element(env, i, jperm_obj)?;
-            }
-
-            let arr_obj: &JObject = arr.as_ref();
-            env.call_method(
-                &activity,
-                jni_str!("requestPermissions"),
-                jni_sig!(([java.lang.String], jint)),
-                &[JValue::Object(arr_obj), JValue::Int(request_code)],
-            )?;
-
-            Ok(false)
+            let jperm = env.new_string(permission)?;
+            let res = env
+                .call_method(
+                    &activity,
+                    jni_str!("checkSelfPermission"),
+                    jni_sig!((java.lang.String) -> jint),
+                    &[JValue::Object(jperm.as_ref())],
+                )?
+                .i()?;
+            // PackageManager.PERMISSION_GRANTED == 0
+            Ok(res == 0)
         })
         .map_err(|e| format!("{e}"))?;
 
     Ok(result)
+}
+
+/// `Ok(true)` = at least one listed permission already granted (or none needed).
+/// `Ok(false)` = dialog shown / not granted yet.
+///
+/// For photo-read we treat *any* of the alternatives as sufficient (API 33+
+/// uses `READ_MEDIA_IMAGES`; older uses `READ_EXTERNAL_STORAGE`).
+fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    for perm in permissions {
+        if check_self_permission(perm)? {
+            return Ok(true);
+        }
+    }
+    if permissions.is_empty() {
+        return Ok(true);
+    }
+    // None granted — show dialog for all alternatives (user accepts either).
+    request_permissions_dialog(permissions, request_code)
+}
+
+/// `Ok(true)` = **all** listed permissions already granted.
+/// `Ok(false)` = dialog shown for the missing ones / not granted yet.
+///
+/// Use for AV (mic + camera): a second `requestPermissions` call replaces the
+/// first system dialog, so missing grants must be batched.
+fn request_all_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    let mut need: Vec<&str> = Vec::new();
+    for perm in permissions {
+        if !check_self_permission(perm)? {
+            need.push(*perm);
+        }
+    }
+    if need.is_empty() {
+        return Ok(true);
+    }
+    request_permissions_dialog(&need, request_code)?;
+    Ok(false)
+}
+
+fn request_permissions_dialog(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
+
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return Err("null JavaVM".into());
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return Err("null Activity".into());
+    }
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    // SAFETY: vm comes from the live AndroidApp for this process.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        // SAFETY: activity is a global ref owned by the Android runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+
+        let empty = env.new_string("")?;
+        let empty_obj: &JObject = empty.as_ref();
+        let arr = env.new_object_array(
+            permissions.len() as jni::sys::jsize,
+            jni_str!("java/lang/String"),
+            empty_obj,
+        )?;
+        for (i, perm) in permissions.iter().enumerate() {
+            let jperm = env.new_string(*perm)?;
+            let jperm_obj: &JObject = jperm.as_ref();
+            arr.set_element(env, i, jperm_obj)?;
+        }
+
+        let arr_obj: &JObject = arr.as_ref();
+        env.call_method(
+            &activity,
+            jni_str!("requestPermissions"),
+            jni_sig!(([java.lang.String], jint)),
+            &[JValue::Object(arr_obj), JValue::Int(request_code)],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| format!("{e}"))?;
+
+    Ok(false)
 }
 
 // ── OS image picker ─────────────────────────────────────────────────────────
