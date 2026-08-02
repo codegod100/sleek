@@ -1,8 +1,10 @@
 # Build flake packages on merge to main and push store paths to Cachix.
 # Cache: https://codegod100.cachix.org
 #
-# Requires repository secret CACHIX_AUTH_TOKEN (write token from
-# https://app.cachix.org → codegod100 → Auth tokens).
+# CACHIX_AUTH_TOKEN is pulled at runtime from OpenBao (openbao.boxd.sh),
+# same KV layout as eve (`secret/data/ai-api-keys`, plus `secret/data/cachix`).
+#
+# Requires repository secret OPENBAO_TOKEN (read token for OpenBao).
 
 name: Cachix
 
@@ -34,6 +36,21 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
           df -h /
 
+      - name: Fetch secrets from OpenBao
+        env:
+          OPENBAO_ADDR: https://openbao.boxd.sh
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+          OPENBAO_SECRET_PATH: secret/data/ai-api-keys
+          OPENBAO_EXTRA_PATHS: secret/data/cachix
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPENBAO_TOKEN:-}" ]]; then
+            echo "OPENBAO_TOKEN repository secret is not set" >&2
+            exit 1
+          fi
+          chmod +x scripts/fetch-openbao-env.sh
+          ./scripts/fetch-openbao-env.sh --github-env --keys CACHIX_AUTH_TOKEN
+
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
@@ -43,7 +60,7 @@ jobs:
       - uses: cachix/cachix-action@v17
         with:
           name: codegod100
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          authToken: ${{ env.CACHIX_AUTH_TOKEN }}
 
       - name: nix build .#${{ matrix.attr }}
         run: nix build ".#${{ matrix.attr }}" -L --print-build-logs

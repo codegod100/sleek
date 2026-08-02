@@ -70,11 +70,12 @@ Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs 
 
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
-On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes the resulting store paths to the same cache. Set `CACHIX_AUTH_TOKEN` as a **GitHub Actions** repository secret (in addition to Codespaces, if you use that).
+On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes store paths to the same cache. CI pulls `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
 
 | Secret / env | Purpose |
 |--------------|---------|
-| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) — Codespaces + Actions |
+| `OPENBAO_TOKEN` | OpenBao read token — **GitHub Actions** secret used by CI to fetch Cachix credentials |
+| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) — Codespaces / local; stored in OpenBao for CI |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
 | `SLEEK_SKIP_CACHIX=1` | Skip Cachix setup in bootstrap |
