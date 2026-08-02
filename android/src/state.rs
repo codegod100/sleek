@@ -1178,6 +1178,14 @@ impl AppState {
                 state.auto_guest_connect = true;
             }
         }
+        // Pre-fill Bluesky handle from prefs if not already set from session.
+        if state.form_handle.is_empty() {
+            if let Some(handle) = prefs.last_bsky_handle {
+                if !handle.is_empty() {
+                    state.form_handle = handle;
+                }
+            }
+        }
         state
     }
 
@@ -1380,10 +1388,11 @@ impl AppState {
             } else {
                 self.nick.clone()
             };
+            let handle = self.handle.clone().unwrap_or_default();
             let session = crate::auth::SavedSession {
                 broker_token,
                 did: self.did.clone().unwrap_or_default(),
-                handle: self.handle.clone().unwrap_or_default(),
+                handle: handle.clone(),
                 nick,
                 server: self.server.clone(),
                 last_login_unix: now,
@@ -1393,6 +1402,14 @@ impl AppState {
             };
             if let Err(e) = session.save() {
                 log::warn!("failed to save session: {e}");
+            }
+            // Remember handle in prefs (survives logout).
+            if !handle.is_empty() {
+                let mut prefs = crate::auth::SavedPrefs::load();
+                if prefs.last_bsky_handle.as_deref() != Some(&handle) {
+                    prefs.last_bsky_handle = Some(handle);
+                    let _ = prefs.save();
+                }
             }
             return;
         }
