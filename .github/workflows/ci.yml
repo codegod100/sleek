@@ -4,7 +4,7 @@
 #
 # On push to main, pair with cachix.yml (if present) for store-path caching.
 
-name: CI
+name: Build
 
 on:
   push:
@@ -98,3 +98,18 @@ jobs:
           name: sleek-flatpak
           path: uk.nandi.sleek.flatpak
           if-no-files-found: error
+
+  # Single required check for branch protection / auto-merge.
+  ci:
+    name: CI
+    if: always()
+    needs: [apk, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require APK + Flatpak
+        run: |
+          set -euo pipefail
+          apk="${{ needs.apk.result }}"
+          flatpak="${{ needs.flatpak.result }}"
+          echo "apk=$apk flatpak=$flatpak"
+          [[ "$apk" == success && "$flatpak" == success ]]
