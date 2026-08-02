@@ -1,9 +1,6 @@
-# Build .#android APK; on main optionally push cachix + publish Tangled asset on tag `dev`.
-
+# Probe: can microvm complete a real nix build (.#sleek desktop)?
 when:
   - event: ["push", "manual"]
-    branch: ["main"]
-  - event: ["pull_request"]
     branch: ["main"]
 
 engine: microvm
@@ -12,32 +9,21 @@ image: nixos
 dependencies:
   - git
 
-environment:
-  DEV_TAG: "dev"
-
 steps:
   - name: "Flake check"
     command: |
       set -euxo pipefail
       export NIX_CONFIG="experimental-features = nix-command flakes
       accept-flake-config = true"
-      nix --version
-      nix eval .#packages.x86_64-linux.android.name --no-write-lock-file
+      nix eval .#packages.x86_64-linux.sleek.name --no-write-lock-file
 
-  - name: "Build APK"
+  - name: "Build desktop sleek"
     command: |
       set -euo pipefail
       export NIX_CONFIG="experimental-features = nix-command flakes
       accept-flake-config = true"
       set -o pipefail
-      nix build .#android --out-link result-android 2>&1 | tee /tmp/android-build.log
-      test -s result-android/sleek.apk
-      ls -lah result-android/
-
-  - name: "Push APK to Cachix"
-    command: |
-      set -euo pipefail
-      if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then echo "skip cachix"; exit 0; fi
-      export NIX_CONFIG="experimental-features = nix-command flakes"
-      nix shell nixpkgs#cachix -c cachix authtoken "$CACHIX_AUTH_TOKEN"
-      nix shell nixpkgs#cachix -c cachix push "${CACHIX_CACHE:-codegod100}" ./result-android
+      nix build .#sleek --out-link result-sleek 2>&1 | tee /tmp/sleek-build.log
+      test -x result-sleek/bin/sleek
+      ls -lah result-sleek/bin/
+      echo OK

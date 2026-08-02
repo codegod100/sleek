@@ -1,10 +1,6 @@
-# Build .#flatpak and (on main) move tag `dev` + publish Tangled assets.
-# microvm+nixos; minimal deps. Raise spindle timeout for cold builds.
-
+# Probe: android dry-run (eval + fetch plan, no compile)
 when:
   - event: ["push", "manual"]
-    branch: ["main"]
-  - event: ["pull_request"]
     branch: ["main"]
 
 engine: microvm
@@ -13,33 +9,11 @@ image: nixos
 dependencies:
   - git
 
-environment:
-  DEV_TAG: "dev"
-
 steps:
-  - name: "Flake check"
+  - name: "Android dry-run"
     command: |
       set -euxo pipefail
       export NIX_CONFIG="experimental-features = nix-command flakes
       accept-flake-config = true"
-      nix --version
-      nix eval .#packages.x86_64-linux.flatpak.name --no-write-lock-file
-
-  - name: "Build Flatpak"
-    command: |
-      set -euo pipefail
-      export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true"
-      set -o pipefail
-      nix build .#flatpak --out-link result-flatpak 2>&1 | tee /tmp/flatpak-build.log
-      test -s result-flatpak/uk.nandi.sleek.flatpak
-      ls -lah result-flatpak/
-      cat result-flatpak/build-info.json
-
-  - name: "Push Flatpak to Cachix"
-    command: |
-      set -euo pipefail
-      if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then echo "skip cachix"; exit 0; fi
-      export NIX_CONFIG="experimental-features = nix-command flakes"
-      nix shell nixpkgs#cachix -c cachix authtoken "$CACHIX_AUTH_TOKEN"
-      nix shell nixpkgs#cachix -c cachix push "${CACHIX_CACHE:-codegod100}" ./result-flatpak
+      nix build .#android --dry-run 2>&1 | tee /tmp/android-dry.log | tail -n 50
+      echo OK
