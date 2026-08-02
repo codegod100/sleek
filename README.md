@@ -62,7 +62,21 @@ nix run .#install-android -- --launch
 
 # Manual push of an existing out-link:
 just push ./result-android
+
+# Desktop Flatpak bundle (from hermetic .#sleek via nix2flatpak):
+just flatpak                   # → result-flatpak/*.flatpak
+nix build .#flatpak
+# Install: flatpak install --user ./result-flatpak/*.flatpak
 ```
+
+### CI artifacts
+
+On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds:
+
+| Job | Flake attr | Artifact |
+|-----|------------|----------|
+| APK | `.#android` | `sleek-apk` (`sleek.apk`) |
+| Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
 
 ### Cachix
 
@@ -226,11 +240,13 @@ create a new one from `main` after the Ubuntu+bootstrap config is pushed.
 sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
+  assets/           # desktop entry + icons (Flatpak / host)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
+  .github/workflows # CI: APK + Flatpak artifacts
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake
   justfile
-  flake.nix
+  flake.nix         # .#sleek, .#android, .#flatpak, …
 ```
 
 ## License

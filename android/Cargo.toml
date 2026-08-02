@@ -7,8 +7,9 @@ license = "MIT"
 publish = false
 
 # Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
-# Empty [workspace] — cargo-apk 0.9.x rejects members = ["."] with UnexpectedWorkspace.
+# members = ["."] is required by current cargo-apk / cargo_toml (empty [workspace] errors).
 [workspace]
+members = ["."]
 
 [lib]
 name = "sleek"
