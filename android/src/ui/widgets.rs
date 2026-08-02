@@ -305,6 +305,8 @@ fn message_action_icons(
 }
 
 /// Floating icon actions shown while the pointer hovers a message bubble.
+///
+/// Desktop / mouse only — touch screens use long-press → context menu instead.
 fn message_hover_actions(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -317,6 +319,10 @@ fn message_hover_actions(
     menu_open: bool,
     msg: &ChatMessage,
 ) -> Option<MessageBubbleAction> {
+    // APK / touch: no hover; long-press opens the icon context menu.
+    if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+        return None;
+    }
     if menu_open || (!can_react && !can_edit && !can_delete) {
         return None;
     }
@@ -383,10 +389,19 @@ fn message_hover_actions(
     action
 }
 
+/// Track a press that started over a bubble so long-press works on the whole
+/// bubble (not only the selectable body label) without stealing click sense.
+#[derive(Clone, Copy)]
+struct BubblePress {
+    t0: f64,
+    pos: Pos2,
+}
+
 /// Right-click / long-press menu for a message bubble: React, Edit, Delete icons.
 ///
 /// Uses raw secondary-button clicks (not [`Response::context_menu`]) so
-/// selectable body text's drag-sense cannot swallow the right-click.
+/// selectable body text's drag-sense cannot swallow the right-click. On touch /
+/// APK, a press-and-hold anywhere on the bubble opens the same icon menu.
 fn message_context_menu(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -406,13 +421,64 @@ fn message_context_menu(
     #[derive(Clone, Copy)]
     struct MenuPos(Pos2);
 
+    let press_id = menu_id.with("press");
     let clipped = bubble_rect.intersect(ui.clip_rect());
     let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
     let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
-    let opening = over_bubble && (secondary || body_long_touched);
+
+    // Whole-bubble long-press (APK): track primary press start over the bubble.
+    // Edge-triggers once duration exceeds egui's max_click_duration (~0.8s) and
+    // the finger hasn't moved enough to look like a scroll.
+    let long_press_anywhere = {
+        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let time = ui.input(|i| i.time);
+        let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
+        // Match egui's "still a click / long-press" slide budget (points).
+        let max_slide = ui.ctx().options(|o| o.input_options.max_click_dist as f32).max(8.0);
+        let pos = ui.ctx().pointer_interact_pos();
+
+        if primary_pressed && over_bubble {
+            if let Some(pos) = pos {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(press_id, BubblePress { t0: time, pos }));
+            }
+        }
+
+        let mut fired = false;
+        if primary_down {
+            if let Some(start) = ui.ctx().data(|d| d.get_temp::<BubblePress>(press_id)) {
+                let moved = pos
+                    .map(|p| (p - start.pos).length() > max_slide)
+                    .unwrap_or(false);
+                if moved {
+                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
+                } else if time - start.t0 >= max_dur {
+                    fired = true;
+                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
+                }
+            }
+        } else {
+            ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
+        }
+        fired
+    };
+
+    let long_press = body_long_touched || long_press_anywhere;
+    let opening = over_bubble && (secondary || long_press);
 
     if opening {
-        if let Some(pos) = ui.ctx().pointer_interact_pos() {
+        if let Some(mut pos) = ui.ctx().pointer_interact_pos() {
+            // On touch, place the menu above the finger so it isn't covered.
+            if cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen())
+            {
+                pos.y -= 48.0;
+            }
+            ui.memory_mut(|m| m.open_popup(menu_id));
+            ui.ctx().data_mut(|d| d.insert_temp(menu_id, MenuPos(pos)));
+        } else if long_press {
+            // Touch can briefly clear interact_pos; fall back to bubble corner.
+            let pos = Pos2::new(bubble_rect.center().x, bubble_rect.top() - 8.0);
             ui.memory_mut(|m| m.open_popup(menu_id));
             ui.ctx().data_mut(|d| d.insert_temp(menu_id, MenuPos(pos)));
         }
@@ -456,13 +522,22 @@ fn message_context_menu(
         });
 
     let escape = ui.input(|i| i.key_pressed(Key::Escape));
-    let click_outside = ui.input(|i| i.pointer.any_click())
-        && !popup.response.hovered()
-        && !popup.response.contains_pointer();
-    // Don't close on the same secondary click that opened the menu.
-    if close || escape || (click_outside && !opening) {
+    // Close on a new press outside the menu (egui context-menu style). Prefer
+    // `any_pressed` over `any_click` so the finger-*up* after a long-press open
+    // does not immediately dismiss the menu on APK.
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    // Don't close on the same secondary / long-press that opened the menu.
+    if close || escape || (press_outside && !opening) {
         ui.memory_mut(|m| m.close_popup());
-        ui.ctx().data_mut(|d| d.remove::<MenuPos>(menu_id));
+        ui.ctx().data_mut(|d| {
+            d.remove::<MenuPos>(menu_id);
+            d.remove::<BubblePress>(press_id);
+        });
     }
 
     action
@@ -573,6 +648,14 @@ pub fn message_bubble(
             });
             let tip = if let Some(url) = hovered_url.as_deref() {
                 url.to_string()
+            } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+                if can_edit || can_delete {
+                    "Long-press for React, Edit, Delete".to_string()
+                } else if can_react {
+                    "Long-press for React".to_string()
+                } else {
+                    String::new()
+                }
             } else if can_edit || can_delete {
                 "Select to copy · hover or right-click for React, Edit, Delete".to_string()
             } else if can_react {
