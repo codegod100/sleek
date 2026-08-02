@@ -1,8 +1,8 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{
-    self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Id, Key, Layout,
-    Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
+    self, text::LayoutJob, text::TextFormat, Align, Align2, Color32, CursorIcon, FontId, Id, Key,
+    Layout, Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
 use vidya::{dim_label, icon_colored, paint_emoji_in, paint_icon_in, title_2, Icon, Theme};
 
@@ -418,13 +418,20 @@ fn message_context_menu(
         return None;
     }
 
+    /// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
+    /// whole popup sits above the contact point (not under the fingertip).
     #[derive(Clone, Copy)]
-    struct MenuPos(Pos2);
+    struct MenuAnchor {
+        pos: Pos2,
+        above_finger: bool,
+    }
 
     let press_id = menu_id.with("press");
     let clipped = bubble_rect.intersect(ui.clip_rect());
     let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
     let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
 
     // Whole-bubble long-press (APK): track primary press start over the bubble.
     // Edge-triggers once duration exceeds egui's max_click_duration (~0.8s) and
@@ -468,39 +475,63 @@ fn message_context_menu(
     let opening = over_bubble && (secondary || long_press);
 
     if opening {
-        if let Some(mut pos) = ui.ctx().pointer_interact_pos() {
-            // On touch, place the menu above the finger so it isn't covered.
-            if cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen())
-            {
-                pos.y -= 48.0;
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui || long_press {
+                // Bottom-center of the menu sits above the contact point with
+                // enough clearance that the icons are not under the fingertip.
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
             }
-            ui.memory_mut(|m| m.open_popup(menu_id));
-            ui.ctx().data_mut(|d| d.insert_temp(menu_id, MenuPos(pos)));
         } else if long_press {
-            // Touch can briefly clear interact_pos; fall back to bubble corner.
-            let pos = Pos2::new(bubble_rect.center().x, bubble_rect.top() - 8.0);
-            ui.memory_mut(|m| m.open_popup(menu_id));
-            ui.ctx().data_mut(|d| d.insert_temp(menu_id, MenuPos(pos)));
-        }
+            // Touch can briefly clear interact_pos; fall back above the bubble.
+            MenuAnchor {
+                pos: Pos2::new(bubble_rect.center().x, bubble_rect.top() - 8.0),
+                above_finger: true,
+            }
+        } else {
+            MenuAnchor {
+                pos: bubble_rect.left_top(),
+                above_finger: false,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(menu_id));
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, anchor));
     }
 
     if !ui.memory(|m| m.is_popup_open(menu_id)) {
         return None;
     }
 
-    let pos = ui
+    let anchor = ui
         .ctx()
-        .data(|d| d.get_temp::<MenuPos>(menu_id).map(|p| p.0))
-        .unwrap_or_else(|| bubble_rect.left_top());
+        .data(|d| d.get_temp::<MenuAnchor>(menu_id))
+        .unwrap_or(MenuAnchor {
+            pos: bubble_rect.left_top(),
+            above_finger: false,
+        });
 
     let mut action = None;
     let mut close = false;
     let p = &th.palette;
 
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
     let popup = egui::Area::new(menu_id.with("area"))
         .kind(egui::UiKind::Popup)
         .order(Order::Foreground)
-        .fixed_pos(pos)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
         .sense(Sense::click())
         .show(ui.ctx(), |ui| {
             egui::Frame::menu(ui.style())
@@ -521,6 +552,36 @@ fn message_context_menu(
                 });
         });
 
+    // Keep a touch menu on-screen after the first layout (it grows upward).
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    menu_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
     let escape = ui.input(|i| i.key_pressed(Key::Escape));
     // Close on a new press outside the menu (egui context-menu style). Prefer
     // `any_pressed` over `any_click` so the finger-*up* after a long-press open
@@ -535,7 +596,7 @@ fn message_context_menu(
     if close || escape || (press_outside && !opening) {
         ui.memory_mut(|m| m.close_popup());
         ui.ctx().data_mut(|d| {
-            d.remove::<MenuPos>(menu_id);
+            d.remove::<MenuAnchor>(menu_id);
             d.remove::<BubblePress>(press_id);
         });
     }

@@ -82,6 +82,13 @@ pub struct SavedPrefs {
     /// Most recently used Bluesky handle (survives logout, pre-filled on connect).
     #[serde(default)]
     pub last_bsky_handle: Option<String>,
+    /// Previously used Bluesky handles — MRU, shown on the connect screen.
+    /// `last_bsky_handle` stays as the primary prefill (first entry when present).
+    #[serde(default)]
+    pub recent_handles: Vec<String>,
+    /// Previously used guest nicknames — MRU, shown on the guest connect screen.
+    #[serde(default)]
+    pub recent_nicks: Vec<String>,
 }
 
 impl Default for SavedPrefs {
@@ -95,6 +102,8 @@ impl Default for SavedPrefs {
             av_pref_speaker_id: None,
             recent_channels: default_recent_channels(),
             last_bsky_handle: None,
+            recent_handles: Vec::new(),
+            recent_nicks: Vec::new(),
         }
     }
 }
@@ -123,6 +132,19 @@ impl SavedPrefs {
                 prefs.av_pref_camera_id = None;
                 let _ = prefs.save();
             }
+        }
+        // Migrate singular last_bsky_handle into the MRU list when needed.
+        if let Some(handle) = prefs.last_bsky_handle.clone() {
+            if !handle.is_empty()
+                && !prefs
+                    .recent_handles
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&handle))
+            {
+                prefs.recent_handles.insert(0, handle);
+            }
+        } else if let Some(first) = prefs.recent_handles.first().cloned() {
+            prefs.last_bsky_handle = Some(first);
         }
         prefs
     }
@@ -706,6 +728,20 @@ mod tests {
         assert_eq!(
             with_ch.recent_channels,
             vec!["#test".to_string(), "#general".to_string()]
+        );
+
+        let with_hist: SavedPrefs = serde_json::from_str(
+            r#"{"recent_nicks":["alice","bob"],"recent_handles":["a.bsky.social"],"last_bsky_handle":"a.bsky.social"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_hist.recent_nicks, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(
+            with_hist.recent_handles,
+            vec!["a.bsky.social".to_string()]
+        );
+        assert_eq!(
+            with_hist.last_bsky_handle.as_deref(),
+            Some("a.bsky.social")
         );
     }
 }

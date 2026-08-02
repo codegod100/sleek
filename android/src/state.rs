@@ -1034,6 +1034,10 @@ pub struct AppState {
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
     pub recent_channels: Vec<String>,
+    /// Previously used guest nicknames (MRU). Persisted; shown on guest login.
+    pub recent_nicks: Vec<String>,
+    /// Previously used Bluesky handles (MRU). Persisted; shown on Bluesky login.
+    pub recent_handles: Vec<String>,
 
     /// User clicked Disconnect / Cancel / Logout — do not auto-reconnect.
     pub intentional_disconnect: bool,
@@ -1149,6 +1153,8 @@ impl AppState {
             av_show_devices: false,
             av_video_height: 220.0,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
+            recent_nicks: normalize_recent_nicks(prefs.recent_nicks),
+            recent_handles: normalize_recent_handles(prefs.recent_handles),
             intentional_disconnect: false,
             reconnect_attempts: 0,
             reconnect_at: None,
@@ -1181,7 +1187,16 @@ impl AppState {
             } else if saved.has_guest() {
                 // Restore last guest nick/server and auto-connect on launch.
                 state.nick = saved.nick.clone();
-                state.form_nick = saved.nick;
+                state.form_nick = saved.nick.clone();
+                // Ensure the remembered guest nick appears in login history even
+                // if it was saved before recent_nicks existed.
+                let prior = state.recent_nicks.clone();
+                push_mru(&mut state.recent_nicks, &saved.nick, MAX_RECENT_NICKS);
+                if state.recent_nicks != prior {
+                    // Migrated into MRU — persist so the connect screen can show it
+                    // after logout without relying on session.json.
+                    state.persist_prefs();
+                }
                 if !saved.server.is_empty() {
                     state.server = saved.server.clone();
                     state.form_server = saved.server;
@@ -1200,6 +1215,8 @@ impl AppState {
                 if !handle.is_empty() {
                     state.form_handle = handle;
                 }
+            } else if let Some(handle) = state.recent_handles.first() {
+                state.form_handle = handle.clone();
             }
         }
         state
@@ -1311,7 +1328,8 @@ impl AppState {
         true
     }
 
-    /// Persist app prefs (AV + recent rooms) to disk (independent of session logout).
+    /// Persist app prefs (AV + recent rooms / nicks / handles) to disk
+    /// (independent of session logout).
     pub fn persist_prefs(&self) {
         let mut prefs = crate::auth::SavedPrefs::load();
         prefs.av_pref_muted = self.av_pref_muted;
@@ -1321,6 +1339,11 @@ impl AppState {
         prefs.av_pref_mic_id = self.av_pref_mic_id.clone();
         prefs.av_pref_speaker_id = self.av_pref_speaker_id.clone();
         prefs.recent_channels = self.recent_channels.clone();
+        prefs.recent_nicks = self.recent_nicks.clone();
+        prefs.recent_handles = self.recent_handles.clone();
+        if let Some(h) = self.recent_handles.first() {
+            prefs.last_bsky_handle = Some(h.clone());
+        }
         if let Err(e) = prefs.save() {
             log::warn!("failed to save prefs: {e}");
         }
@@ -1393,7 +1416,7 @@ impl AppState {
         }
     }
 
-    pub fn persist_session(&self) {
+    pub fn persist_session(&mut self) {
         let now = chrono::Utc::now().timestamp();
         if let Some(broker_token) = self.broker_token.clone() {
             // Never poison storage with a Guest temp nick while DID-authenticated
@@ -1418,13 +1441,10 @@ impl AppState {
             if let Err(e) = session.save() {
                 log::warn!("failed to save session: {e}");
             }
-            // Remember handle in prefs (survives logout).
+            // Remember handle in prefs (survives logout) + MRU history.
             if !handle.is_empty() {
-                let mut prefs = crate::auth::SavedPrefs::load();
-                if prefs.last_bsky_handle.as_deref() != Some(&handle) {
-                    prefs.last_bsky_handle = Some(handle);
-                    let _ = prefs.save();
-                }
+                push_mru(&mut self.recent_handles, &handle, MAX_RECENT_HANDLES);
+                self.persist_prefs();
             }
             return;
         }
@@ -1445,6 +1465,8 @@ impl AppState {
             if let Err(e) = session.save() {
                 log::warn!("failed to save guest session: {e}");
             }
+            push_mru(&mut self.recent_nicks, &self.nick, MAX_RECENT_NICKS);
+            self.persist_prefs();
         }
     }
 
@@ -1457,11 +1479,21 @@ impl AppState {
         self.form_handle.clear();
         self.auto_guest_connect = false;
         crate::auth::SavedSession::clear();
-        // Restore remembered handle from prefs so it's pre-filled for next login.
-        let prefs = crate::auth::SavedPrefs::load();
-        if let Some(handle) = prefs.last_bsky_handle {
-            if !handle.is_empty() {
-                self.form_handle = handle;
+        // Restore remembered handle from prefs / MRU so it's pre-filled for next login.
+        if let Some(handle) = self.recent_handles.first().cloned() {
+            self.form_handle = handle;
+        } else {
+            let prefs = crate::auth::SavedPrefs::load();
+            if let Some(handle) = prefs.last_bsky_handle {
+                if !handle.is_empty() {
+                    self.form_handle = handle;
+                }
+            }
+        }
+        // Prefill the most recent guest nick when returning to the connect form.
+        if let Some(nick) = self.recent_nicks.first() {
+            if !nick.is_empty() {
+                self.form_nick = nick.clone();
             }
         }
     }
@@ -1879,8 +1911,14 @@ impl AppState {
     pub fn logout(&mut self) {
         self.clear_session();
         self.clear_auth();
-        // Don't leave form_nick as the old handle (e.g. nandi.uk) after clear.
-        let nick = default_nick();
+        // Prefer a remembered guest nick for the form; otherwise a fresh default.
+        // Don't leave form_nick as a Bluesky handle (e.g. nandi.uk) after clear.
+        let nick = self
+            .recent_nicks
+            .first()
+            .cloned()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(default_nick);
         self.nick = nick.clone();
         self.form_nick = nick;
         self.connect_mode = ConnectMode::Guest;
@@ -1918,6 +1956,39 @@ fn normalize_recent_channels(raw: Vec<String>) -> Vec<String> {
     if out.is_empty() {
         out.push("#general".into());
         out.push("#test".into());
+    }
+    out
+}
+
+const MAX_RECENT_NICKS: usize = 8;
+const MAX_RECENT_HANDLES: usize = 8;
+
+/// Insert `value` at the front of an MRU list (case-insensitive dedupe + cap).
+fn push_mru(list: &mut Vec<String>, value: &str, max: usize) {
+    let v = value.trim();
+    if v.is_empty() {
+        return;
+    }
+    list.retain(|x| !x.eq_ignore_ascii_case(v));
+    list.insert(0, v.to_string());
+    if list.len() > max {
+        list.truncate(max);
+    }
+}
+
+fn normalize_recent_nicks(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for nick in raw {
+        push_mru(&mut out, &nick, MAX_RECENT_NICKS);
+    }
+    out
+}
+
+fn normalize_recent_handles(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for handle in raw {
+        let h = handle.trim().trim_start_matches('@').trim();
+        push_mru(&mut out, h, MAX_RECENT_HANDLES);
     }
     out
 }
