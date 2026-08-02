@@ -1361,7 +1361,7 @@ impl SleekApp {
         self.state.status_line = "Connecting…".into();
 
         // Client-side room memory (prefs) — freeq does not reliably restore
-        // channel membership across reconnects. Defaults: #general, #test.
+        // channel membership across reconnects. Defaults: #test.
         let auto_join = self.state.auto_join_channels();
 
         self.net.send(NetCmd::Connect {
