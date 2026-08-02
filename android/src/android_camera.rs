@@ -335,6 +335,7 @@ pub extern "system" fn Java_uk_nandi_sleek_CameraCapture_onNv12Frame<'local>(
     height: jni::sys::jint,
     y_stride: jni::sys::jint,
     uv_stride: jni::sys::jint,
+    rotation_degrees: jni::sys::jint,
 ) {
     if width <= 0 || height <= 0 {
         return;
@@ -343,14 +344,41 @@ pub extern "system" fn Java_uk_nandi_sleek_CameraCapture_onNv12Frame<'local>(
         .with_env(|env| -> jni::errors::Result<()> {
             let y_bytes = env.convert_byte_array(&y_data)?;
             let uv_bytes = env.convert_byte_array(&uv_data)?;
-            let w = width as u32;
-            let h = height as u32;
+            let src_w = width as u32;
+            let src_h = height as u32;
+            let rot = if rotation_degrees < 0 {
+                0
+            } else {
+                rotation_degrees as u32
+            };
+            // Apply sensor/display orientation so published + preview frames
+            // are upright (Camera2 ImageReader buffers are sensor-oriented).
+            let (y_bytes, uv_bytes, w, h, y_str, uv_str) =
+                match crate::nv12_orient::orient_nv12(
+                    &y_bytes,
+                    &uv_bytes,
+                    src_w,
+                    src_h,
+                    y_stride as u32,
+                    uv_stride as u32,
+                    rot,
+                ) {
+                    Some((y, uv, w, h)) => (y, uv, w, h, w, w),
+                    None => (
+                        y_bytes,
+                        uv_bytes,
+                        src_w,
+                        src_h,
+                        y_stride as u32,
+                        uv_stride as u32,
+                    ),
+                };
             let frame = VideoFrame::new_nv12(
                 Nv12Planes {
                     y_data: y_bytes,
-                    y_stride: y_stride as u32,
+                    y_stride: y_str,
                     uv_data: uv_bytes,
-                    uv_stride: uv_stride as u32,
+                    uv_stride: uv_str,
                     width: w,
                     height: h,
                 },
@@ -370,7 +398,7 @@ pub extern "system" fn Java_uk_nandi_sleek_CameraCapture_onNv12Frame<'local>(
             }
             let n = s.frames_pushed.fetch_add(1, Ordering::Relaxed);
             if n == 0 {
-                log::info!("android camera: first NV12 frame {w}x{h}");
+                log::info!("android camera: first NV12 frame {w}x{h} (src {src_w}x{src_h} rot={rot})");
             }
             Ok(())
         })
