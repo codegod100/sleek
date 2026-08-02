@@ -534,6 +534,9 @@ pub fn parse_reactions_tag(raw: &str) -> HashMap<String, HashSet<String>> {
 pub const QUICK_REACT_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "👎"];
 
 /// Default heart reaction glyph (freeq-android parity: heavy black heart + VS16).
+/// Kept as the canonical form for tests / future shortcuts (body double-click
+/// react was removed so drag/word selection can own that gesture).
+#[allow(dead_code)]
 pub const DEFAULT_REACT_EMOJI: &str = "❤️";
 
 /// Category tabs for the full reaction emoji picker (Unicode CLDR groups).
