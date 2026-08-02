@@ -3,11 +3,11 @@
     "freeq": {
       "flake": false,
       "locked": {
-        "lastModified": 1785144955,
-        "narHash": "sha256-7vpp+bIwvAamo3EIrLLmaUR39CMa0k+i4rgJ4P5McpE=",
+        "lastModified": 1785546552,
+        "narHash": "sha256-l6zuuC4S0lMAworB/1lsF05+rx+uyHb0gV6qOMBgPbA=",
         "owner": "codegod100",
         "repo": "freeq",
-        "rev": "1b5bd537ab49f27b40c5d2382e7a9b82d2040b3d",
+        "rev": "96fab1e7b3dfefb9c03dbac18d49718610e51725",
         "type": "github"
       },
       "original": {
