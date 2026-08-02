@@ -1178,6 +1178,14 @@ impl AppState {
                 state.auto_guest_connect = true;
             }
         }
+        // Pre-fill Bluesky handle from prefs if not already set from session.
+        if state.form_handle.is_empty() {
+            if let Some(handle) = prefs.last_bsky_handle {
+                if !handle.is_empty() {
+                    state.form_handle = handle;
+                }
+            }
+        }
         state
     }
 
@@ -1289,15 +1297,14 @@ impl AppState {
 
     /// Persist app prefs (AV + recent rooms) to disk (independent of session logout).
     pub fn persist_prefs(&self) {
-        let prefs = crate::auth::SavedPrefs {
-            av_pref_muted: self.av_pref_muted,
-            av_pref_speaker_muted: self.av_pref_speaker_muted,
-            av_pref_camera: self.av_pref_camera,
-            av_pref_camera_id: self.av_pref_camera_id.clone(),
-            av_pref_mic_id: self.av_pref_mic_id.clone(),
-            av_pref_speaker_id: self.av_pref_speaker_id.clone(),
-            recent_channels: self.recent_channels.clone(),
-        };
+        let mut prefs = crate::auth::SavedPrefs::load();
+        prefs.av_pref_muted = self.av_pref_muted;
+        prefs.av_pref_speaker_muted = self.av_pref_speaker_muted;
+        prefs.av_pref_camera = self.av_pref_camera;
+        prefs.av_pref_camera_id = self.av_pref_camera_id.clone();
+        prefs.av_pref_mic_id = self.av_pref_mic_id.clone();
+        prefs.av_pref_speaker_id = self.av_pref_speaker_id.clone();
+        prefs.recent_channels = self.recent_channels.clone();
         if let Err(e) = prefs.save() {
             log::warn!("failed to save prefs: {e}");
         }
@@ -1380,10 +1387,11 @@ impl AppState {
             } else {
                 self.nick.clone()
             };
+            let handle = self.handle.clone().unwrap_or_default();
             let session = crate::auth::SavedSession {
                 broker_token,
                 did: self.did.clone().unwrap_or_default(),
-                handle: self.handle.clone().unwrap_or_default(),
+                handle: handle.clone(),
                 nick,
                 server: self.server.clone(),
                 last_login_unix: now,
@@ -1393,6 +1401,14 @@ impl AppState {
             };
             if let Err(e) = session.save() {
                 log::warn!("failed to save session: {e}");
+            }
+            // Remember handle in prefs (survives logout).
+            if !handle.is_empty() {
+                let mut prefs = crate::auth::SavedPrefs::load();
+                if prefs.last_bsky_handle.as_deref() != Some(&handle) {
+                    prefs.last_bsky_handle = Some(handle);
+                    let _ = prefs.save();
+                }
             }
             return;
         }
@@ -1425,6 +1441,13 @@ impl AppState {
         self.form_handle.clear();
         self.auto_guest_connect = false;
         crate::auth::SavedSession::clear();
+        // Restore remembered handle from prefs so it's pre-filled for next login.
+        let prefs = crate::auth::SavedPrefs::load();
+        if let Some(handle) = prefs.last_bsky_handle {
+            if !handle.is_empty() {
+                self.form_handle = handle;
+            }
+        }
     }
 
     /// True when a previous Bluesky login is still on disk or in memory.
