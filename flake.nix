@@ -364,6 +364,7 @@
               ];
               filesystems = [
                 "xdg-run/pipewire-0"
+                "xdg-download"
               ];
               talk-names = [
                 "org.freedesktop.Notifications"
@@ -864,35 +865,6 @@ PY
           waydroid-release = run-waydroid-release;
           inherit run-waydroid-release;
           inherit run-host;
-
-          # Distributable Flatpak bundle (uk.nandi.sleek.flatpak) from sleek-host.
-          # Uses GNOME Platform for Wayland/GL/audio; not Flathub-from-source.
-          flatpak = nix2flatpak.lib.${system}.mkFlatpak {
-            appId = "uk.nandi.sleek";
-            appName = "Sleek";
-            developer = "nandi";
-            package = sleek-host;
-            runtime = "org.gnome.Platform/48";
-            command = "sleek";
-            desktopFile = ./assets/uk.nandi.sleek.desktop;
-            icon = ./assets/uk.nandi.sleek.svg;
-            # Chat + AV: network, display, GPU, mic/camera, downloads for file pick.
-            permissions = {
-              share = [
-                "network"
-                "ipc"
-              ];
-              sockets = [
-                "fallback-x11"
-                "wayland"
-                "pulseaudio"
-              ];
-              devices = [ "all" ];
-              filesystems = [ "xdg-download" ];
-            };
-            # egui/Rust + PipeWire stack may trail GNOME runtime libstdc++/glibc.
-            skipAbiChecks = true;
-          };
         }
       );
 
