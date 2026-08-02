@@ -4,6 +4,7 @@ mod app;
 mod auth;
 mod av;
 mod av_media;
+mod bsky;
 mod clipboard;
 mod net;
 mod preview;

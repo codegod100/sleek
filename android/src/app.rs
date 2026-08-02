@@ -273,6 +273,23 @@ impl SleekApp {
         }
     }
 
+    /// Debounced Bluesky handle typeahead while the connect form is visible.
+    fn poll_handle_typeahead(&mut self, ctx: &egui::Context) {
+        if self.state.connection.is_live() || self.state.connect_mode != crate::state::ConnectMode::Bluesky
+        {
+            return;
+        }
+        self.state
+            .handle_typeahead
+            .sync_from_input(&self.state.form_handle);
+        if let Some((request_id, query)) = self.state.handle_typeahead.take_ready_fetch() {
+            self.net.send(NetCmd::SearchHandles { request_id, query });
+        }
+        if self.state.handle_typeahead.needs_repaint() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn poll_net(&mut self, ctx: &egui::Context) {
         for ev in self.net.poll() {
             self.handle_net_event(ev);
@@ -536,6 +553,20 @@ impl SleekApp {
                         self.state.show_toast(format!("Call media failed: {e}"));
                     }
                     _ => {}
+                }
+            }
+            NetEvent::HandleSuggestions {
+                request_id,
+                query,
+                actors,
+                error,
+            } => {
+                if error.is_some() {
+                    self.state.handle_typeahead.apply_failed(request_id);
+                } else {
+                    self.state
+                        .handle_typeahead
+                        .apply_results(request_id, query, actors);
                 }
             }
             NetEvent::Sdk(event) => self.handle_sdk_event(event),
@@ -1460,6 +1491,7 @@ impl SleekApp {
             return;
         }
         self.state.error = None;
+        self.state.handle_typeahead.dismiss();
         self.state.awaiting_oauth = true;
         self.state.connection = ConnectionState::Connecting;
         #[cfg(target_os = "android")]
@@ -1948,6 +1980,7 @@ impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
         self.poll_auto_reconnect(ctx);
+        self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
         self.poll_oauth_deep_link(ctx);

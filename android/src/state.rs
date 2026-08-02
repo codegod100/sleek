@@ -984,6 +984,8 @@ pub struct AppState {
     pub form_server: String,
     pub form_tls: bool,
     pub form_websocket: bool,
+    /// Bluesky handle typeahead (connect screen).
+    pub handle_typeahead: crate::bsky::HandleTypeahead,
     /// Guest session was loaded from disk — consumed once for launch auto-connect.
     pub auto_guest_connect: bool,
 
@@ -1121,6 +1123,7 @@ impl AppState {
             form_server: server,
             form_tls: true,
             form_websocket: use_ws,
+            handle_typeahead: crate::bsky::HandleTypeahead::default(),
             auto_guest_connect: false,
             local_call: None,
             av_pref_muted: prefs.av_pref_muted,
