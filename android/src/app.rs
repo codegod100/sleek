@@ -1127,8 +1127,8 @@ impl SleekApp {
         }
     }
 
-    /// Dial MoQ media (desktop + Android). Android is audio-only publish for now
-    /// (no CameraX bridge under cargo-apk NativeActivity).
+    /// Dial MoQ media (desktop + Android). Android publishes mic + optional
+    /// Camera2 video (NV12 → H.264) when CAMERA permission is granted.
     ///
     /// Skips dial when the SFU needs a JWT we do not have yet, and skips
     /// re-dial while already Connecting/Live for the same session + token
@@ -1149,11 +1149,20 @@ impl SleekApp {
             );
             return;
         }
-        // Android 6+: RECORD_AUDIO is runtime. Prompt before opening the mic;
+        // Android 6+: RECORD_AUDIO / CAMERA are runtime. Prompt before dial;
         // dial still proceeds so a later retry (after grant) can succeed.
         #[cfg(target_os = "android")]
         {
             let _ = crate::android_media::ensure_record_audio_permission();
+            if self
+                .state
+                .local_call
+                .as_ref()
+                .map(|lc| lc.camera)
+                .unwrap_or(self.state.av_pref_camera)
+            {
+                let _ = crate::android_media::ensure_camera_permission();
+            }
         }
         // Dedup: same session + same token while already up / in flight.
         if let Some(lc) = self.state.local_call.as_ref() {

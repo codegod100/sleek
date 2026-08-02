@@ -995,7 +995,7 @@ pub struct AppState {
     /// Preferred speaker mute (remote audio off) for the next call / in-call.
     /// Toggleable before start/join. Persisted in prefs.json.
     pub av_pref_speaker_muted: bool,
-    /// Preferred camera publish for the next call (desktop MoQ).
+    /// Preferred camera publish for the next call (MoQ).
     /// Toggleable before start/join; applied when hardware is available.
     /// Persisted in prefs.json (survives logout).
     pub av_pref_camera: bool,
