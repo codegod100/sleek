@@ -68,15 +68,14 @@ just push ./result-android
 
 ### Spindle (Tangled CI)
 
-[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) builds `.#android` and `.#flatpak` on pushes/PRs to `main` (and manual runs). On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs). Hosted Spindle cannot compile these — warm the cache locally with `just android` / `just flatpak` first. On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
 
 | Secret | Purpose |
 |--------|---------|
 | `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
 | `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
-| `CACHIX_AUTH_TOKEN` | Optional — push store paths to `codegod100` |
 
-Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`, `CACHIX_CACHE`. Uses the **nixery** engine. Hosted spindle default timeout is ~5m — raise it (or use a longer-timeout spindle) for cold Android/Flatpak builds.
+Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm** engine.
 
 ### Cachix (Codespaces)
 
