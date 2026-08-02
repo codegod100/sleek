@@ -60,13 +60,20 @@ declare -A VALUES=()
 
 fetch_path() {
   local path="$1"
-  local url resp
+  local quiet="${2:-0}"
+  local url resp http
   path="$(normalize_path "$path")"
   url="$ADDR/v1/$path"
-  if ! resp="$(curl -fsS -H "X-Vault-Token: $OPENBAO_TOKEN" "$url")"; then
-    echo "fetch-openbao-env: failed to read $url" >&2
+  http="$(curl -sS -o /tmp/fetch-openbao-env.body -w '%{http_code}' \
+    -H "X-Vault-Token: $OPENBAO_TOKEN" "$url" || true)"
+  if [[ "$http" != "200" ]]; then
+    if [[ "$quiet" != "1" ]]; then
+      echo "fetch-openbao-env: failed to read $url (HTTP ${http:-000})" >&2
+    fi
     return 1
   fi
+  resp="$(cat /tmp/fetch-openbao-env.body)"
+  rm -f /tmp/fetch-openbao-env.body
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     local key="${line%%=*}"
@@ -89,7 +96,8 @@ for p in "${extra[@]}"; do
   p="$(echo "$p" | xargs)"
   [[ -z "$p" ]] && continue
   [[ "$(normalize_path "$p")" == "$PRIMARY" ]] && continue
-  fetch_path "$p" || true
+  # Optional extras: missing path is fine (e.g. secret/data/cachix absent).
+  fetch_path "$p" 1 || true
 done
 
 want_key() {
