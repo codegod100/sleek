@@ -1,15 +1,16 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{
-    self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Layout, Rect,
-    RichText, ScrollArea, Sense, Stroke, Vec2,
+    self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Id, Key, Layout,
+    Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
 use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
 
 use crate::preview::{self, Embed, UrlSpan};
 use crate::state::{
     display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
-    ImageState, LinkMeta, LinkState, MediaCache, EMOJI_SEARCH_LIMIT, QUICK_REACT_EMOJIS,
+    ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
+    QUICK_REACT_EMOJIS,
 };
 
 /// Interaction from a chat message bubble.
@@ -188,6 +189,112 @@ fn badge(ui: &mut egui::Ui, th: &Theme, text: &str) {
         });
 }
 
+/// Right-click / long-press menu for a message bubble: React, Edit, Delete.
+///
+/// Uses raw secondary-button clicks (not [`Response::context_menu`]) so
+/// selectable body text's drag-sense cannot swallow the right-click.
+fn message_context_menu(
+    ui: &mut egui::Ui,
+    bubble_rect: Rect,
+    menu_id: Id,
+    body_long_touched: bool,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    if !can_react && !can_edit && !can_delete {
+        return None;
+    }
+
+    #[derive(Clone, Copy)]
+    struct MenuPos(Pos2);
+
+    let clipped = bubble_rect.intersect(ui.clip_rect());
+    let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
+    let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+    let opening = over_bubble && (secondary || body_long_touched);
+
+    if opening {
+        if let Some(pos) = ui.ctx().pointer_interact_pos() {
+            ui.memory_mut(|m| m.open_popup(menu_id));
+            ui.ctx().data_mut(|d| d.insert_temp(menu_id, MenuPos(pos)));
+        }
+    }
+
+    if !ui.memory(|m| m.is_popup_open(menu_id)) {
+        return None;
+    }
+
+    let pos = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuPos>(menu_id).map(|p| p.0))
+        .unwrap_or_else(|| bubble_rect.left_top());
+
+    let mut action = MessageBubbleAction::None;
+    let mut close = false;
+
+    let popup = egui::Area::new(menu_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(pos)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            // Match egui's built-in menu styling.
+            ui.spacing_mut().button_padding = Vec2::new(2.0, 0.0);
+            ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
+            ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
+            ui.visuals_mut().widgets.active.bg_stroke = Stroke::NONE;
+
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.set_min_width(120.0);
+                ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
+                    if can_react && ui.button("React").clicked() {
+                        action = if react_picker_open {
+                            MessageBubbleAction::CloseReactPicker
+                        } else {
+                            MessageBubbleAction::OpenReactPicker {
+                                msgid: msg.id.clone(),
+                            }
+                        };
+                        close = true;
+                    }
+                    if can_edit && ui.button("Edit").clicked() {
+                        action = MessageBubbleAction::Edit {
+                            msgid: msg.id.clone(),
+                            text: msg.text.clone(),
+                        };
+                        close = true;
+                    }
+                    if can_delete && ui.button("Delete").clicked() {
+                        // Server `+draft/delete` names the edit-chain root.
+                        let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
+                        action = MessageBubbleAction::Delete { msgid: delete_id };
+                        close = true;
+                    }
+                });
+            });
+        });
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let click_outside = ui.input(|i| i.pointer.any_click())
+        && !popup.response.hovered()
+        && !popup.response.contains_pointer();
+    // Don't close on the same secondary click that opened the menu.
+    if close || escape || (click_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| d.remove::<MenuPos>(menu_id));
+    }
+
+    if matches!(action, MessageBubbleAction::None) {
+        None
+    } else {
+        Some(action)
+    }
+}
+
 /// Message bubble / row in chat detail (with optional image / OG link embed).
 ///
 /// `react_picker_open` highlights the react control while the modal picker
@@ -244,6 +351,7 @@ pub fn message_bubble(
     let can_react = can_mutate;
     let can_edit = can_mutate && is_own;
     let can_delete = can_mutate && is_own;
+    let mut body_long_touched = false;
 
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
@@ -255,21 +363,12 @@ pub fn message_bubble(
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
             ui.horizontal(|ui| {
-                if !is_own {
-                    ui.label(
-                        RichText::new(&msg.from)
-                            .size(th.type_scale.caption)
-                            .color(p.accent)
-                            .strong(),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new("You")
-                            .size(th.type_scale.caption)
-                            .color(p.accent)
-                            .strong(),
-                    );
-                }
+                ui.label(
+                    RichText::new(&msg.from)
+                        .size(th.type_scale.caption)
+                        .color(p.accent)
+                        .strong(),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if can_react {
                         let react_size = (th.type_scale.caption * 1.2).max(16.0);
@@ -306,10 +405,9 @@ pub fn message_bubble(
                 });
             });
             ui.add_space(sp.xs);
-            // Sense on the body — drag to select (+ Ctrl/Cmd+C); URL tap opens
-            // browser; right-click / long-press opens the context menu.
-            // Selection replaces double-click-to-react (word-select owns that
-            // gesture); react remains via the header button / context menu.
+            // Sense on the body — URL tap opens browser; double-click heart.
+            // Context menu is handled on the whole bubble (below) so selectable
+            // text drag-sense can't swallow right-clicks.
             let url_spans = preview::extract_url_spans(&body_text);
             let mut job = linkify_layout_job(&body_text, &url_spans, th);
             job.wrap.max_width = ui.available_width();
@@ -319,6 +417,7 @@ pub fn message_bubble(
                     .sense(Sense::click())
                     .selectable(true),
             );
+            body_long_touched = body_resp.long_touched();
             let galley_origin = body_resp.rect.min;
             let hovered_url = body_resp.hover_pos().and_then(|pos| {
                 url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
@@ -326,64 +425,38 @@ pub fn message_bubble(
             let tip = if let Some(url) = hovered_url.as_deref() {
                 url.to_string()
             } else if can_edit || can_delete {
-                "Drag to select · right-click / long-press for edit, delete, react".to_string()
+                "Select to copy · right-click / long-press for React, Edit, Delete".to_string()
             } else if can_react {
-                "Drag to select · right-click / long-press for react / copy".into()
+                let heart = display_emoji(DEFAULT_REACT_EMOJI);
+                format!("Select to copy · double-click {heart} · right-click / long-press for React")
             } else {
-                "Drag to select · right-click / long-press to copy".into()
+                "Select to copy".into()
             };
             let mut body_resp = body_resp.on_hover_text(tip);
             if hovered_url.is_some() {
                 body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
             }
+            let mut opened_link = false;
             if body_resp.clicked() {
                 if let Some(pos) = body_resp.interact_pointer_pos() {
                     if let Some(url) =
                         url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
                     {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        opened_link = true;
                     }
                 }
             }
-            body_resp.context_menu(|ui| {
-                if can_react {
-                    if ui.button("React…").clicked() {
-                        action = if react_picker_open {
-                            MessageBubbleAction::CloseReactPicker
-                        } else {
-                            MessageBubbleAction::OpenReactPicker {
-                                msgid: msg.id.clone(),
-                            }
-                        };
-                        ui.close_menu();
-                    }
-                }
-                if !msg.text.is_empty() && ui.button("Copy text").clicked() {
-                    ui.ctx().copy_text(msg.text.clone());
-                    ui.close_menu();
-                }
-                if can_edit || can_delete {
-                    ui.separator();
-                }
-                if can_edit && ui.button("Edit").clicked() {
-                    action = MessageBubbleAction::Edit {
-                        msgid: msg.id.clone(),
-                        text: msg.text.clone(),
-                    };
-                    ui.close_menu();
-                }
-                if can_delete && ui.button("Delete").clicked() {
-                    // Server `+draft/delete` names the edit-chain root.
-                    let delete_id = msg
-                        .edit_of
-                        .clone()
-                        .unwrap_or_else(|| msg.id.clone());
-                    action = MessageBubbleAction::Delete {
-                        msgid: delete_id,
-                    };
-                    ui.close_menu();
-                }
-            });
+            if can_react
+                && !opened_link
+                && matches!(action, MessageBubbleAction::None)
+                && body_resp.double_clicked()
+            {
+                action = MessageBubbleAction::ToggleReaction {
+                    msgid: msg.id.clone(),
+                    emoji: DEFAULT_REACT_EMOJI.to_string(),
+                };
+            }
 
             if let Some(embed) = embed {
                 ui.add_space(sp.sm);
@@ -402,7 +475,22 @@ pub fn message_bubble(
                 }
             }
         });
-    let _ = frame_resp;
+
+    // Whole-bubble context menu (React / Edit / Delete). Uses raw secondary
+    // clicks so selectable body text doesn't eat the right-click.
+    if let Some(menu_action) = message_context_menu(
+        ui,
+        frame_resp.response.rect,
+        Id::new(("msg_ctx", msg.id.as_str())),
+        body_long_touched,
+        can_react,
+        can_edit,
+        can_delete,
+        react_picker_open,
+        msg,
+    ) {
+        action = menu_action;
+    }
 
     // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
     if !msg.reactions.is_empty() {
@@ -1235,12 +1323,20 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 Some((tex, width, height)) => {
                     // Letterbox into img_area — never stretch. (`ui.put` uses a
                     // justified layout that expands the widget to the full rect.)
+                    //
+                    // Size in *points* from texel count ÷ pixels_per_point so a
+                    // high-DPI screen doesn't implicitly upscale (and blur) a
+                    // texture that already fills the physical viewport.
+                    let ppp = ui.ctx().pixels_per_point().max(1.0);
                     let max_w = img_area.width().max(1.0);
                     let max_h = img_area.height().max(1.0);
                     let nw = width.max(1) as f32;
                     let nh = height.max(1) as f32;
-                    let scale = (max_w / nw).min(max_h / nh).min(3.0);
-                    let size = Vec2::new((nw * scale).max(1.0), (nh * scale).max(1.0));
+                    let native_w = (nw / ppp).max(1.0);
+                    let native_h = (nh / ppp).max(1.0);
+                    // Fit to the viewer; allow modest upscale for tiny embeds only.
+                    let scale = (max_w / native_w).min(max_h / native_h).min(1.5);
+                    let size = Vec2::new((native_w * scale).max(1.0), (native_h * scale).max(1.0));
                     img_rect = egui::Rect::from_center_size(img_area.center(), size);
                     let uv = egui::Rect::from_min_max(
                         egui::pos2(0.0, 0.0),
