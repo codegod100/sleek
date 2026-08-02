@@ -12,10 +12,12 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
 import android.util.Size;
+import android.view.Display;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -29,6 +31,12 @@ import java.util.List;
  * <p>Opens a camera (front preferred), streams {@link ImageFormat#YUV_420_888}
  * into an {@link ImageReader}, and pushes NV12 planes into Rust via JNI so
  * iroh-live can publish H.264 on the MoQ media plane.
+ *
+ * <p>ImageReader buffers are in <b>sensor</b> coordinates. Most phone sensors
+ * sit at 90°/270°, so without a CW rotate by {@link
+ * CameraCharacteristics#SENSOR_ORIENTATION} ± display rotation the published
+ * video (and local preview) looks sideways. Rotation degrees are passed to
+ * Rust, which rotates the NV12 planes before encode/preview.
  *
  * <p>Compiled into {@code sleek_activity.dex} (APK {@code classes.dex}). Rust
  * must resolve this class via {@code Activity.getClassLoader().loadClass}
@@ -49,6 +57,10 @@ public final class CameraCapture {
     private static Handler backgroundHandler;
     private static volatile boolean running;
     private static long frameCount;
+    /** Host activity — used to read live display rotation while capturing. */
+    private static volatile Activity hostActivity;
+    private static int sensorOrientationDeg = 90;
+    private static boolean frontFacing = true;
 
     static {
         // NativeActivity already loads libsleek.so; loadLibrary is a no-op when
@@ -63,14 +75,20 @@ public final class CameraCapture {
 
     private CameraCapture() {}
 
-    /** Native: push one NV12 frame into the MoQ publish pipeline. */
+    /**
+     * Native: push one NV12 frame into the MoQ publish pipeline.
+     *
+     * @param rotationDegrees CW degrees (0/90/180/270) to apply so the frame
+     *     is upright for the current display — see {@link #computeRotationDegrees()}.
+     */
     private static native void onNv12Frame(
             byte[] yData,
             byte[] uvData,
             int width,
             int height,
             int yStride,
-            int uvStride);
+            int uvStride,
+            int rotationDegrees);
 
     /** Native: camera opened successfully (or failed). */
     private static native void onCameraState(boolean opened, String detail);
@@ -178,10 +196,38 @@ public final class CameraCapture {
                 return;
             }
 
+            hostActivity = activity;
+            try {
+                CameraCharacteristics chars = manager.getCameraCharacteristics(id);
+                Integer so = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                sensorOrientationDeg = so != null ? so : 90;
+                Integer facing = chars.get(CameraCharacteristics.LENS_FACING);
+                frontFacing =
+                        facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT;
+            } catch (CameraAccessException e) {
+                Log.w(TAG, "characteristics; using default orientation", e);
+                sensorOrientationDeg = 90;
+                frontFacing = true;
+            }
+
             Size size = chooseSize(manager, id);
             int width = size.getWidth();
             int height = size.getHeight();
-            Log.i(TAG, "opening camera id=" + id + " size=" + width + "x" + height);
+            int rot = computeRotationDegrees();
+            Log.i(
+                    TAG,
+                    "opening camera id="
+                            + id
+                            + " size="
+                            + width
+                            + "x"
+                            + height
+                            + " sensorOrient="
+                            + sensorOrientationDeg
+                            + " front="
+                            + frontFacing
+                            + " rot="
+                            + rot);
 
             startBackgroundThread();
             frameCount = 0;
@@ -364,7 +410,8 @@ public final class CameraCapture {
             }
         }
 
-        onNv12Frame(yData, uvData, width, height, yStride, outUvStride);
+        int rotationDegrees = computeRotationDegrees();
+        onNv12Frame(yData, uvData, width, height, yStride, outUvStride, rotationDegrees);
         long n = ++frameCount;
         if (n == 1L || n == 30L || n == 300L) {
             Log.i(
@@ -380,7 +427,52 @@ public final class CameraCapture {
                             + " uvStride="
                             + outUvStride
                             + " uvPixelStride="
-                            + uvPixelStride);
+                            + uvPixelStride
+                            + " rot="
+                            + rotationDegrees);
+        }
+    }
+
+    /**
+     * CW degrees to rotate sensor buffers so content is upright for the
+     * current display orientation (Camera2 JPEG_ORIENTATION formula).
+     */
+    private static int computeRotationDegrees() {
+        int device = displayRotationDegrees(hostActivity);
+        if (frontFacing) {
+            return (sensorOrientationDeg + device) % 360;
+        }
+        return (sensorOrientationDeg - device + 360) % 360;
+    }
+
+    private static int displayRotationDegrees(Activity activity) {
+        if (activity == null) {
+            return 0;
+        }
+        try {
+            int rotation;
+            if (Build.VERSION.SDK_INT >= 30) {
+                Display display = activity.getDisplay();
+                rotation = display != null ? display.getRotation() : Surface.ROTATION_0;
+            } else {
+                @SuppressWarnings("deprecation")
+                Display display = activity.getWindowManager().getDefaultDisplay();
+                rotation = display.getRotation();
+            }
+            switch (rotation) {
+                case Surface.ROTATION_90:
+                    return 90;
+                case Surface.ROTATION_180:
+                    return 180;
+                case Surface.ROTATION_270:
+                    return 270;
+                case Surface.ROTATION_0:
+                default:
+                    return 0;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "displayRotationDegrees", t);
+            return 0;
         }
     }
 
@@ -461,6 +553,7 @@ public final class CameraCapture {
 
     private static void stopLocked() {
         running = false;
+        hostActivity = null;
         if (captureSession != null) {
             try {
                 captureSession.close();

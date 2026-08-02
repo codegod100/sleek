@@ -21,6 +21,8 @@ mod v4l2cam;
 mod android_media;
 #[cfg(target_os = "android")]
 mod android_camera;
+#[cfg(any(target_os = "android", test))]
+mod nv12_orient;
 
 pub use app::run_desktop;
 
