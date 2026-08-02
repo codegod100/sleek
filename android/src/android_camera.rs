@@ -138,7 +138,8 @@ fn list_cameras_jni() -> Result<Vec<(String, String)>> {
     let mut out: Option<Result<Vec<(String, String)>>> = None;
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = match android_media::load_app_class(env, &activity, CAMERA_CAPTURE_CLASS) {
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
             Ok(c) => c,
             Err(e) => {
                 out = Some(Err(anyhow!("CameraCapture class: {e}")));
@@ -150,7 +151,7 @@ fn list_cameras_jni() -> Result<Vec<(String, String)>> {
                 &cls,
                 jni_str!("listCameras"),
                 jni_sig!((android.content.Context) -> [java.lang.String]),
-                &[JValue::Object(&activity)],
+                &[JValue::Object(activity.as_ref())],
             )?
             .l()?;
         let arr = env.cast_local::<JObjectArray>(arr_obj)?;
@@ -209,7 +210,8 @@ pub fn start_capture(camera_id: Option<&str>) -> Result<()> {
     let mut start_err: Option<anyhow::Error> = None;
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = match android_media::load_app_class(env, &activity, CAMERA_CAPTURE_CLASS) {
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
             Ok(c) => c,
             Err(e) => {
                 start_err = Some(anyhow!("CameraCapture class: {e}"));
@@ -221,7 +223,7 @@ pub fn start_capture(camera_id: Option<&str>) -> Result<()> {
             &cls,
             jni_str!("start"),
             jni_sig!((android.app.Activity, java.lang.String) -> void),
-            &[JValue::Object(&activity), JValue::Object(&jid)],
+            &[JValue::Object(activity.as_ref()), JValue::Object(&jid)],
         )?;
         Ok(())
     })
@@ -288,7 +290,8 @@ pub fn stop_capture() {
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
     let _ = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = match android_media::load_app_class(env, &activity, CAMERA_CAPTURE_CLASS) {
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
             Ok(c) => c,
             Err(e) => {
                 log::warn!("android camera stop: CameraCapture class: {e}");
@@ -299,7 +302,7 @@ pub fn stop_capture() {
             &cls,
             jni_str!("stop"),
             jni_sig!((android.app.Activity) -> void),
-            &[JValue::Object(&activity)],
+            &[JValue::Object(activity.as_ref())],
         )?;
         Ok(())
     });
