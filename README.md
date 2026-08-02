@@ -74,11 +74,20 @@ On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cach
 
 | Secret / env | Purpose |
 |--------------|---------|
-| `OPENBAO_TOKEN` | OpenBao read token — **GitHub Actions** secret used by CI to fetch Cachix credentials |
-| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) — Codespaces / local; stored in OpenBao for CI |
+| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch Cachix credentials |
+| `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` so agents can manage Actions secrets |
+| `CACHIX_AUTH_TOKEN` | Write token in OpenBao / Codespaces ([cachix.org](https://app.cachix.org) → codegod100) |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
 | `SLEEK_SKIP_CACHIX=1` | Skip Cachix setup in bootstrap |
+
+```bash
+# Proper gh for agents/CI setup (run where `gh auth status` is your account):
+export OPENBAO_ADDR=https://openbao.boxd.sh
+export OPENBAO_TOKEN=…                 # same value as Cursor env secret
+./scripts/openbao-put-key.sh GH_TOKEN --from-gh
+printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
+```
 
 ```bash
 # Codespace secret → then:
