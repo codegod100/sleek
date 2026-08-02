@@ -30,8 +30,10 @@ import java.util.List;
  * into an {@link ImageReader}, and pushes NV12 planes into Rust via JNI so
  * iroh-live can publish H.264 on the MoQ media plane.
  *
- * <p>Compiled into {@code sleek_activity.dex} (APK {@code classes.dex}) so the
- * system classloader can resolve this class from Rust JNI helpers.
+ * <p>Compiled into {@code sleek_activity.dex} (APK {@code classes.dex}). Rust
+ * must resolve this class via {@code Activity.getClassLoader().loadClass}
+ * — {@code FindClass} from a native worker thread uses the system loader and
+ * cannot see APK classes.
  */
 public final class CameraCapture {
     private static final String TAG = "SleekCamera";

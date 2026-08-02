@@ -47,6 +47,57 @@ pub fn android_app_handle() -> Option<&'static AndroidApp> {
     android_app()
 }
 
+/// Load an **application** class (APK `classes.dex`) by binary name.
+///
+/// `Env::find_class` from a native-created thread (tokio / media worker,
+/// egui) uses the **system** [`ClassLoader`](https://developer.android.com/training/articles/perf-jni#faq_FindClass),
+/// which cannot see types like `uk.nandi.sleek.CameraCapture`. Always resolve
+/// app classes through the Activity's loader instead.
+///
+/// `binary_name` is the Java binary name, e.g. `"uk.nandi.sleek.CameraCapture"`
+/// (dots, not slashes).
+pub fn load_app_class<'a>(
+    env: &mut jni::Env<'a>,
+    activity: &jni::objects::JObject<'_>,
+    binary_name: &str,
+) -> Result<jni::objects::JClass<'a>, String> {
+    use jni::objects::{JClass, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let loader = env
+        .call_method(
+            activity,
+            jni_str!("getClassLoader"),
+            jni_sig!(() -> java.lang.ClassLoader),
+            &[],
+        )
+        .map_err(|e| format!("getClassLoader: {e}"))?
+        .l()
+        .map_err(|e| format!("getClassLoader: {e}"))?;
+    if loader.is_null() {
+        return Err("Activity.getClassLoader returned null".into());
+    }
+
+    let class_name = env
+        .new_string(binary_name)
+        .map_err(|e| format!("new_string({binary_name}): {e}"))?;
+    let loaded = env
+        .call_method(
+            &loader,
+            jni_str!("loadClass"),
+            jni_sig!((java.lang.String) -> java.lang.Class),
+            &[JValue::Object(class_name.as_ref())],
+        )
+        .map_err(|e| format!("loadClass({binary_name}): {e}"))?
+        .l()
+        .map_err(|e| format!("loadClass({binary_name}): {e}"))?;
+    if loaded.is_null() {
+        return Err(format!("loadClass({binary_name}) returned null"));
+    }
+    env.cast_local::<JClass>(loaded)
+        .map_err(|e| format!("cast {binary_name}: {e}"))
+}
+
 /// True when CAMERA is already granted (no dialog).
 pub fn has_camera_permission() -> bool {
     check_self_permission("android.permission.CAMERA").unwrap_or(false)

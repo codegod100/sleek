@@ -3,6 +3,10 @@
 //! Java `CameraCapture` (in APK `classes.dex`) opens Camera2 / ImageReader and
 //! calls native NV12 push methods implemented here. Frames land in a
 //! latest-only [`PushCameraSource`] that implements iroh-live's [`VideoSource`].
+//!
+//! JNI note: never resolve `CameraCapture` with `Env::find_class` from a
+//! native worker thread — that uses the system ClassLoader and misses APK
+//! classes. Use [`android_media::load_app_class`] (Activity ClassLoader).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,6 +19,9 @@ use iroh_live::media::{
 };
 
 use crate::android_media;
+
+/// Java binary name for the Camera2 helper in APK `classes.dex`.
+const CAMERA_CAPTURE_CLASS: &str = "uk.nandi.sleek.CameraCapture";
 
 /// Shared sink written by JNI and read by the encoder thread.
 struct FrameSink {
@@ -104,7 +111,8 @@ pub fn list_cameras() -> Vec<(String, String)> {
     match list_cameras_jni() {
         Ok(list) => list,
         Err(e) => {
-            log::debug!("android camera list: {e}");
+            // Warn: empty list makes AV report "camera unavailable" permanently.
+            log::warn!("android camera list: {e}");
             Vec::new()
         }
     }
@@ -127,20 +135,28 @@ fn list_cameras_jni() -> Result<Vec<(String, String)>> {
 
     // SAFETY: vm from live AndroidApp.
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
-    vm.attach_current_thread(|env| -> jni::errors::Result<Vec<(String, String)>> {
+    let mut out: Option<Result<Vec<(String, String)>>> = None;
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = env.find_class(jni_str!("uk/nandi/sleek/CameraCapture"))?;
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                out = Some(Err(anyhow!("CameraCapture class: {e}")));
+                return Ok(());
+            }
+        };
         let arr_obj = env
             .call_static_method(
                 &cls,
                 jni_str!("listCameras"),
                 jni_sig!((android.content.Context) -> [java.lang.String]),
-                &[JValue::Object(&activity)],
+                &[JValue::Object(activity.as_ref())],
             )?
             .l()?;
         let arr = env.cast_local::<JObjectArray>(arr_obj)?;
         let n = arr.len(env)?;
-        let mut out = Vec::with_capacity(n);
+        let mut list = Vec::with_capacity(n);
         for i in 0..n {
             let obj = arr.get_element(env, i)?;
             if obj.is_null() {
@@ -152,11 +168,13 @@ fn list_cameras_jni() -> Result<Vec<(String, String)>> {
                 Some((id, name)) => (id.to_string(), name.to_string()),
                 None => (s.clone(), s),
             };
-            out.push((id, name));
+            list.push((id, name));
         }
-        Ok(out)
+        out = Some(Ok(list));
+        Ok(())
     })
-    .map_err(|e| anyhow!("list cameras JNI: {e}"))
+    .map_err(|e| anyhow!("list cameras JNI: {e}"))?;
+    out.unwrap_or_else(|| Err(anyhow!("list cameras JNI: no result")))
 }
 
 /// Start Camera2 capture. Returns when the open request is dispatched (session
@@ -189,19 +207,30 @@ pub fn start_capture(camera_id: Option<&str>) -> Result<()> {
     let id = camera_id.unwrap_or("").to_string();
     // SAFETY: vm from live AndroidApp.
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+    let mut start_err: Option<anyhow::Error> = None;
     vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = env.find_class(jni_str!("uk/nandi/sleek/CameraCapture"))?;
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                start_err = Some(anyhow!("CameraCapture class: {e}"));
+                return Ok(());
+            }
+        };
         let jid = env.new_string(&id)?;
         env.call_static_method(
             &cls,
             jni_str!("start"),
             jni_sig!((android.app.Activity, java.lang.String) -> void),
-            &[JValue::Object(&activity), JValue::Object(&jid)],
+            &[JValue::Object(activity.as_ref()), JValue::Object(&jid)],
         )?;
         Ok(())
     })
     .map_err(|e| anyhow!("CameraCapture.start: {e}"))?;
+    if let Some(e) = start_err {
+        return Err(e).context("CameraCapture.start");
+    }
     Ok(())
 }
 
@@ -261,12 +290,19 @@ pub fn stop_capture() {
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
     let _ = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-        let cls = env.find_class(jni_str!("uk/nandi/sleek/CameraCapture"))?;
+        let cls = match android_media::load_app_class(env, activity.as_ref(), CAMERA_CAPTURE_CLASS)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("android camera stop: CameraCapture class: {e}");
+                return Ok(());
+            }
+        };
         env.call_static_method(
             &cls,
             jni_str!("stop"),
             jni_sig!((android.app.Activity) -> void),
-            &[JValue::Object(&activity)],
+            &[JValue::Object(activity.as_ref())],
         )?;
         Ok(())
     });
