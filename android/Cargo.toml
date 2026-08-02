@@ -11,6 +11,15 @@ publish = false
 [workspace]
 members = ["."]
 
+# Dev iteration: default rustc debuginfo=2 makes `sleek` ~800MB and slow to link.
+# Line tables on workspace crates; no debuginfo on deps (biggest link/disk win).
+# Full DWARF: CARGO_PROFILE_DEV_DEBUG=2 cargo build …
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [lib]
 name = "sleek"
 path = "src/lib.rs"
@@ -19,9 +28,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 vidya = { path = "../../vidya" }
-# Guest IRC + freeq events; skip iroh/aws-lc for lighter desktop + Android builds.
+# Guest IRC + freeq events. Prefer aws-lc-rs to match moq-native / iroh
+# (aws-lc-sys is already required). Note: `ring` still builds via quinn /
+# rustls-webpki defaults — this only avoids enabling rustls' ring *provider*
+# from freeq-sdk on top of aws-lc.
 freeq-sdk = { path = "../../freeq/freeq-sdk", default-features = false, features = [
-    "ring",
+    "aws-lc-rs",
     "rustls-tls",
     "websocket",
 ] }

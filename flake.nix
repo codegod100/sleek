@@ -134,6 +134,7 @@
                 ".github"
                 ".devcontainer"
                 ".jj"
+                ".cargo"
                 "docs"
                 "README.md"
                 "AGENTS.md"
@@ -800,6 +801,8 @@ PY
                 rust
                 pkgs.pkg-config
                 pkgs.llvmPackages.libclang
+                # .cargo/config.toml requests -fuse-ld=mold (default `cc` driver).
+                pkgs.mold
               ];
               text = ''
                 set -euo pipefail
@@ -942,6 +945,8 @@ PY
                 pkgs.cargo-apk
                 pkgs.cachix
                 pkgs.openssl
+                # Faster linking for in-tree .cargo/config.toml (-fuse-ld=mold).
+                pkgs.mold
               ]
               ++ buildLibs
               ++ cliTools;
