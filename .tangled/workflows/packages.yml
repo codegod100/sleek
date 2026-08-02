@@ -1,28 +1,22 @@
-# Minimal probe — confirm nixery + nix work on this spindle.
-# Replace with full packages.yml once this is green.
-
+# Minimal spindle pipeline — runs on push/PR/manual
 when:
   - event: ["push", "manual"]
-    branch: ["main"]
+    branch: ["main", "master"]
+  - event: ["pull_request"]
+    branch: ["main", "master"]
 
-engine: nixery
+engine: "nixery"
 
 dependencies:
   nixpkgs:
+    - hello
     - bash
-    - nix
-    - git
-
-environment:
-  NIX_CONFIG: "experimental-features = nix-command flakes"
 
 steps:
-  - name: "Probe"
+  - name: "Sanity check"
     command: |
       set -euxo pipefail
-      echo "kind=$TANGLED_PIPELINE_KIND sha=${TANGLED_SHA:-n/a} pwd=$PWD"
+      echo "CI is working on $TANGLED_REPO_NAME"
+      echo "kind=$TANGLED_PIPELINE_KIND sha=${TANGLED_SHA:-n/a}"
+      hello
       uname -a
-      nix --version
-      ls -la
-      nix flake show --no-write-lock-file 2>&1 | head -40
-      echo OK
