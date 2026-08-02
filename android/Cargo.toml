@@ -6,10 +6,6 @@ description = "Sleek — mobile freeq client with Vidya (egui)"
 license = "MIT"
 publish = false
 
-# Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
-# Empty [workspace] — cargo-apk 0.9.x rejects members = ["."] with UnexpectedWorkspace.
-[workspace]
-
 [lib]
 name = "sleek"
 path = "src/lib.rs"
