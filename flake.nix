@@ -55,6 +55,9 @@
           };
         };
 
+      # Runtime libs for the desktop host (wrapped into LD_LIBRARY_PATH).
+      # Keep bindgen-only deps (libclang, linuxHeaders, pkg-config) out of this
+      # list — they bloat the closure by ~GB and are not needed at runtime.
       eguiLibs =
         pkgs:
         with pkgs;
@@ -62,7 +65,6 @@
           libxkbcommon
           libGL
           vulkan-loader
-          pkg-config
           openssl
         ]
         ++ lib.optionals stdenv.hostPlatform.isLinux [
@@ -77,7 +79,12 @@
           alsa-lib
           # Optional PipeWire backends
           pipewire
-          # v4l2r bindgen (iroh-live capture-camera) needs libclang + videodev2.h
+        ];
+
+      # Build-only extras for v4l2r bindgen (iroh-live capture-camera).
+      eguiBuildLibs =
+        pkgs: with pkgs; [
+          pkg-config
           llvmPackages.libclang
           linuxHeaders
         ];
@@ -110,15 +117,43 @@
       #   parent/freeq/freeq-sdk
       sleekSrcTree =
         pkgs:
+        let
+          # Filter before hashing so CI/docs/flake-only commits do not bust
+          # android/flatpak store paths (and thus Cachix).
+          sleekFiltered = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              let
+                base = baseNameOf path;
+              in
+              # Keep normal cleanSource exclusions, then drop non-build paths.
+              pkgs.lib.cleanSourceFilter path type
+              && !(builtins.elem base [
+                ".tangled"
+                ".github"
+                ".devcontainer"
+                ".jj"
+                "docs"
+                "README.md"
+                "AGENTS.md"
+                "justfile"
+                "flake.nix"
+                "flake.lock"
+                "result"
+                "result-android"
+                "result-flatpak"
+                "result-sleek"
+              ]);
+          };
+        in
         pkgs.runCommand "sleek-src-tree"
           {
-            # Avoid .git / target noise from the working tree.
             nativeBuildInputs = [ pkgs.rsync ];
           }
           ''
             mkdir -p $out/{sleek,vidya,freeq}
-            # cleanSource drops .git; keep Cargo.lock under host/
-            cp -a ${pkgs.lib.cleanSource ./.}/. $out/sleek/
+            cp -a ${sleekFiltered}/. $out/sleek/
             cp -a ${vidya}/. $out/vidya/
             cp -a ${freeq}/. $out/freeq/
             chmod -R u+w $out
@@ -136,6 +171,10 @@
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          buildLibs = eguiBuildLibs pkgs;
+          # Lean toolchain for store packages (no clippy/rustfmt — not needed to compile).
+          rustBuild = pkgs.rust-bin.stable.latest.default;
+          # Full toolchain for iterative `nix run .#host` / cargo workflows.
           rust = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
@@ -156,8 +195,8 @@
             ];
           };
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = rust;
-            rustc = rust;
+            cargo = rustBuild;
+            rustc = rustBuild;
           };
           rustPlatformAndroid = pkgs.makeRustPlatform {
             cargo = rustAndroid;
@@ -182,16 +221,29 @@
               };
 
               nativeBuildInputs = with pkgs; [
-                pkg-config
                 makeWrapper
                 copyDesktopItems
-                llvmPackages.libclang
-              ];
+                removeReferencesTo
+              ]
+              ++ buildLibs;
               buildInputs = libs;
 
               OPENSSL_NO_VENDOR = "1";
               PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
               doCheck = false;
+              # Drop symbols; panic location strings still need remove-references-to.
+              stripAll = true;
+              # Avoid embedding full DWARF from cargo's default release profile.
+              CARGO_PROFILE_RELEASE_DEBUG = "0";
+              CARGO_PROFILE_RELEASE_STRIP = "symbols";
+
+              # rustc/libclang paths get baked into the binary/wrapper; scrub so
+              # the runtime closure (and thus Cachix/CI substitutes) stay small.
+              disallowedReferences = [
+                rustBuild
+                pkgs.llvmPackages.libclang
+                pkgs.llvmPackages.libclang.lib
+              ];
 
               # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
               # Desktop entry + icons for app menus / launchers.
@@ -238,6 +290,10 @@
                 # Legacy pixmap lookup (some menus only check pixmaps/).
                 install -Dm644 ${./assets/icons}/uk.nandi.sleek-256.png \
                   $out/share/pixmaps/uk.nandi.sleek.png
+
+                # AppStream metadata (Flatpak / software centers).
+                install -Dm644 ${./assets/uk.nandi.sleek.metainfo.xml} \
+                  $out/share/metainfo/uk.nandi.sleek.metainfo.xml
               '';
 
               # copyDesktopItems runs as a postInstallHook *after* the postInstall
@@ -255,6 +311,14 @@
                   echo "error: uk.nandi.sleek.desktop missing; copyDesktopItems did not run" >&2
                   exit 1
                 fi
+
+                # Drop rustc/libclang store paths leaked into the binary/wrapper
+                # (std panic locations embed rust-src paths even after strip).
+                find "$out" -type f -exec remove-references-to \
+                  -t ${rustBuild} \
+                  -t ${pkgs.llvmPackages.libclang} \
+                  -t ${pkgs.llvmPackages.libclang.lib} \
+                  {} +
               '';
 
               meta = with pkgs.lib; {
@@ -267,6 +331,49 @@
             }
             // (v4l2BindgenEnv pkgs)
           );
+
+          # Distributable Flatpak bundle of packages.sleek (no Nix required to install).
+          #   nix build .#flatpak
+          #   flatpak install --user ./result/uk.nandi.sleek.flatpak
+          #   flatpak run uk.nandi.sleek
+          sleek-flatpak = nix2flatpak.lib.${system}.mkFlatpak {
+            appId = "uk.nandi.sleek";
+            appName = "Sleek";
+            developer = "nandi";
+            package = sleek-host;
+            # GNOME Platform indexes ship with nix2flatpak; includes Freedesktop base.
+            runtime = "org.gnome.Platform/49";
+            command = "sleek";
+            icon = ./assets/uk.nandi.sleek.svg;
+            appdata = ./assets/uk.nandi.sleek.metainfo.xml;
+            desktopFile = ./assets/uk.nandi.sleek.desktop;
+            permissions = {
+              share = [
+                "network"
+                "ipc"
+              ];
+              sockets = [
+                "fallback-x11"
+                "wayland"
+                "pulseaudio"
+              ];
+              # dri = GL; all = camera / mic for freeq AV calls.
+              devices = [
+                "dri"
+                "all"
+              ];
+              filesystems = [
+                "xdg-run/pipewire-0"
+                "xdg-download"
+              ];
+              talk-names = [
+                "org.freedesktop.Notifications"
+                "org.freedesktop.portal.Desktop"
+              ];
+            };
+            # nixpkgs unstable vs GNOME 49 runtime — ABI check is advisory here.
+            skipAbiChecks = true;
+          };
 
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
@@ -302,6 +409,8 @@
             # Keep the build deterministic: no host ~/.android or ambient SDK.
             strictDeps = true;
             dontUseCmakeConfigure = true;
+            # Output is a plain APK — toolchain must not leak into the closure.
+            disallowedReferences = [ rustAndroid ];
 
             ANDROID_HOME = androidSdkRoot;
             ANDROID_SDK_ROOT = androidSdkRoot;
@@ -675,7 +784,7 @@ PY
           run-host =
             let
               sleekLibPath = pkgs.lib.makeLibraryPath libs;
-              # pkg-config needs .dev outputs for headers + .pc files.
+              # pkg-config needs .dev outputs for headers + .pc files (runtime libs only).
               pkgConfigPath = pkgs.lib.makeSearchPath "lib/pkgconfig" (
                 map (p: p.dev or p) (
                   libs
@@ -745,6 +854,8 @@ PY
           default = sleek-host;
           sleek = sleek-host;
           inherit sleek-host;
+          flatpak = sleek-flatpak;
+          inherit sleek-flatpak;
           android = sleek-android;
           inherit sleek-android;
           inherit install-android;
@@ -754,35 +865,6 @@ PY
           waydroid-release = run-waydroid-release;
           inherit run-waydroid-release;
           inherit run-host;
-
-          # Distributable Flatpak bundle (uk.nandi.sleek.flatpak) from sleek-host.
-          # Uses GNOME Platform for Wayland/GL/audio; not Flathub-from-source.
-          flatpak = nix2flatpak.lib.${system}.mkFlatpak {
-            appId = "uk.nandi.sleek";
-            appName = "Sleek";
-            developer = "nandi";
-            package = sleek-host;
-            runtime = "org.gnome.Platform/48";
-            command = "sleek";
-            desktopFile = ./assets/uk.nandi.sleek.desktop;
-            icon = ./assets/uk.nandi.sleek.svg;
-            # Chat + AV: network, display, GPU, mic/camera, downloads for file pick.
-            permissions = {
-              share = [
-                "network"
-                "ipc"
-              ];
-              sockets = [
-                "fallback-x11"
-                "wayland"
-                "pulseaudio"
-              ];
-              devices = [ "all" ];
-              filesystems = [ "xdg-download" ];
-            };
-            # egui/Rust + PipeWire stack may trail GNOME runtime libstdc++/glibc.
-            skipAbiChecks = true;
-          };
         }
       );
 
@@ -827,6 +909,7 @@ PY
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          buildLibs = eguiBuildLibs pkgs;
           # Runtime libs for the egui host only — do NOT export as ambient
           # LD_LIBRARY_PATH. On Codespaces/Ubuntu, that makes system
           # git-remote-https load nix openssl/glibc and die with
@@ -859,9 +942,9 @@ PY
                 pkgs.android-tools
                 pkgs.cargo-apk
                 pkgs.cachix
-                pkgs.pkg-config
                 pkgs.openssl
               ]
+              ++ buildLibs
               ++ cliTools;
               buildInputs = libs;
               OPENSSL_NO_VENDOR = "1";

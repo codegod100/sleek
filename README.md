@@ -42,6 +42,8 @@ nix run            # in-tree cargo run --release (default app; needs sibling vid
 nix run .#host     # same as nix run
 nix run .#sleek    # pure Nix store binary (hermetic)
 nix build .#sleek  # → ./result/bin/sleek
+nix build .#flatpak  # → ./result/uk.nandi.sleek.flatpak (GNOME Platform 49)
+# flatpak install --user ./result/uk.nandi.sleek.flatpak && flatpak run uk.nandi.sleek
 
 # Waydroid (x86_64 cargo-apk + install/launch + full UI window):
 nix run .#waydroid                 # debug: build + install + launch + show-full-ui
@@ -77,6 +79,17 @@ On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds:
 |-----|------------|----------|
 | APK | `.#android` | `sleek-apk` (`sleek.apk`) |
 | Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
+
+### Spindle (Tangled CI)
+
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs). Hosted Spindle cannot compile these — warm the cache locally with `just android` / `just flatpak` first. On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
+| `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
+
+Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm** engine.
 
 ### Cachix
 
@@ -241,6 +254,7 @@ sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
   assets/           # desktop entry + icons (Flatpak / host)
+  .tangled/         # Spindle CI (Tangled)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
   .github/workflows # CI: APK + Flatpak artifacts
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
