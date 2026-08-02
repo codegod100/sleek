@@ -733,7 +733,9 @@ async fn run_media(
                 Err(e) => {
                     log::warn!("av-media: no camera ({e}); audio-only");
                     camera_enabled.store(false, Ordering::Relaxed);
-                    false
+                    // Keep the in-call toggle when devices still enumerate
+                    // (busy / transient open failure).
+                    camera_devices_present()
                 }
             }
         }
@@ -761,7 +763,9 @@ async fn run_media(
                 Err(e) => {
                     log::warn!("av-media: Android camera unavailable ({e}); audio-only");
                     camera_enabled.store(false, Ordering::Relaxed);
-                    false
+                    // Permission race / busy: still report devices so the
+                    // in-call toggle can retry after CAMERA is granted.
+                    camera_devices_present()
                 }
             }
         }
@@ -1832,8 +1836,10 @@ fn open_android_camera(
     crate::android_camera::start_capture(camera_id)
         .context("CameraCapture.start")?;
     // Camera2 open + session configure is async on a Java handler thread.
-    crate::android_camera::wait_until_opened(std::time::Duration::from_secs(5))
-        .context("Camera2 session")?;
+    if let Err(e) = crate::android_camera::wait_until_opened(std::time::Duration::from_secs(5)) {
+        crate::android_camera::stop_capture();
+        return Err(e).context("Camera2 session");
+    }
 
     let label = camera_id
         .filter(|s| !s.is_empty())
@@ -1846,10 +1852,14 @@ fn open_android_camera(
         preview: video_store,
         frame_count: local_frame_count,
     };
-    broadcast
+    if let Err(e) = broadcast
         .video()
         .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
-        .context("video set_source")?;
+    {
+        // Camera2 is live but MoQ source failed — release hardware.
+        crate::android_camera::stop_capture();
+        return Err(e).context("video set_source");
+    }
 
     if want_publish {
         camera_enabled.store(true, Ordering::Relaxed);

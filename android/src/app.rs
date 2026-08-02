@@ -296,6 +296,7 @@ impl SleekApp {
         }
         // Kick off any image / OG fetches requested while painting chat.
         self.flush_media_fetches();
+        self.poll_android_camera_permission();
         // Keep UI live while connecting / connected / media loading / in a video call.
         let in_live_call = self
             .state
@@ -313,6 +314,40 @@ impl SleekApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(ms));
         }
     }
+
+    /// After the user grants CAMERA mid-call, enable publish once (no re-dial).
+    #[cfg(target_os = "android")]
+    fn poll_android_camera_permission(&mut self) {
+        let enable = {
+            let Some(lc) = self.state.local_call.as_ref() else {
+                return;
+            };
+            if !lc.camera_awaiting_permission || !lc.camera {
+                return;
+            }
+            if !matches!(lc.media, MediaStatus::Live) {
+                return;
+            }
+            if !crate::android_media::has_camera_permission() {
+                return;
+            }
+            true
+        };
+        if !enable {
+            return;
+        }
+        if let Some(lc) = self.state.local_call.as_mut() {
+            lc.camera_awaiting_permission = false;
+            // Optimistic: toggle stays usable while Camera2 opens.
+            lc.has_camera = true;
+        }
+        log::info!("av-media: CAMERA granted — enabling deferred camera publish");
+        self.net.send(NetCmd::AvCamera { enabled: true });
+        self.state.show_toast("Camera permission granted");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn poll_android_camera_permission(&mut self) {}
 
     /// Send queued media fetches to the net thread.
     fn flush_media_fetches(&mut self) {
@@ -443,6 +478,7 @@ impl SleekApp {
                         has_mic: false,
                         media: MediaStatus::Idle,
                         awaiting_start: started,
+                        camera_awaiting_permission: false,
                     });
                 }
                 if started {
@@ -491,7 +527,10 @@ impl SleekApp {
                         // `lc.camera = has_camera && lc.camera` permanently forced
                         // camera off after a failed open, so a later re-dial opened
                         // the device but published no frames (gated off).
-                        if has_camera {
+                        //
+                        // Skip sync while awaiting Android CAMERA grant — enabling
+                        // now would fail open and flap Live status updates.
+                        if has_camera && !lc.camera_awaiting_permission {
                             // Hardware present — keep join/pre-call intent; re-sync
                             // the media plane in case AtomicBool drifted.
                             sync_camera = Some(lc.camera);
@@ -504,6 +543,7 @@ impl SleekApp {
                         // Media plane down — hide camera control; keep mute/camera prefs.
                         lc.has_camera = false;
                         lc.has_mic = false;
+                        lc.camera_awaiting_permission = false;
                     }
                 }
                 if let Some(store) = video {
@@ -523,7 +563,14 @@ impl SleekApp {
                 }
                 match &status {
                     MediaStatus::Live => {
-                        let cam = if has_camera {
+                        let awaiting = self
+                            .state
+                            .local_call
+                            .as_ref()
+                            .is_some_and(|lc| lc.camera_awaiting_permission);
+                        let cam = if awaiting {
+                            " · awaiting camera permission"
+                        } else if has_camera {
                             if self
                                 .state
                                 .local_call
@@ -1180,21 +1227,28 @@ impl SleekApp {
             );
             return;
         }
-        // Android 6+: RECORD_AUDIO / CAMERA are runtime. Prompt before dial;
-        // dial still proceeds so a later retry (after grant) can succeed.
+        // Android 6+: RECORD_AUDIO / CAMERA are runtime. Batch into one dialog
+        // (a second requestPermissions replaces the first). Dial proceeds with
+        // camera publish only when CAMERA is already granted; otherwise we
+        // defer and enable after [`poll_android_camera_permission`].
         #[cfg(target_os = "android")]
-        {
-            let _ = crate::android_media::ensure_record_audio_permission();
-            if self
+        let android_camera_granted = {
+            let want_camera = self
                 .state
                 .local_call
                 .as_ref()
                 .map(|lc| lc.camera)
-                .unwrap_or(self.state.av_pref_camera)
-            {
-                let _ = crate::android_media::ensure_camera_permission();
+                .unwrap_or(self.state.av_pref_camera);
+            let perms = crate::android_media::ensure_av_call_permissions(want_camera);
+            if want_camera && !perms.camera {
+                if let Some(lc) = self.state.local_call.as_mut() {
+                    lc.camera_awaiting_permission = true;
+                }
             }
-        }
+            perms.camera
+        };
+        #[cfg(not(target_os = "android"))]
+        let android_camera_granted = true;
         // Dedup: same session + same token while already up / in flight.
         if let Some(lc) = self.state.local_call.as_ref() {
             let same_session = lc.session_id == session_id;
@@ -1236,12 +1290,13 @@ impl SleekApp {
             .map(|lc| lc.speaker_muted)
             .unwrap_or(self.state.av_pref_speaker_muted);
         // In-call intent if set; otherwise persisted pref.
-        let camera = self
+        let camera_intent = self
             .state
             .local_call
             .as_ref()
             .map(|lc| lc.camera)
             .unwrap_or(self.state.av_pref_camera);
+        let camera = av::camera_publish_at_dial(camera_intent, android_camera_granted);
         if let Some(lc) = self.state.local_call.as_mut() {
             lc.media = MediaStatus::Connecting;
             // Keep token in sync so the next try_start can dedup.
@@ -1250,9 +1305,15 @@ impl SleekApp {
                     lc.token = Some(t.to_string());
                 }
             }
+            if camera_intent && !android_camera_granted {
+                lc.camera_awaiting_permission = true;
+            } else if android_camera_granted {
+                lc.camera_awaiting_permission = false;
+            }
         }
         log::info!(
-            "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?} speaker_muted={speaker_muted}",
+            "av-media: dial camera={camera} (intent={camera_intent} perm={android_camera_granted}) \
+             cam_id={:?} mic={:?} spk={:?} speaker_muted={speaker_muted}",
             self.state.av_pref_camera_id,
             self.state.av_pref_mic_id,
             self.state.av_pref_speaker_id
@@ -1289,6 +1350,7 @@ impl SleekApp {
             has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: true,
+            camera_awaiting_permission: false,
         });
         self.net.send(NetCmd::AvStart { channel });
     }
@@ -1310,6 +1372,7 @@ impl SleekApp {
             has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: false,
+            camera_awaiting_permission: false,
         });
         self.net.send(NetCmd::AvJoin {
             channel,
@@ -1371,6 +1434,20 @@ impl SleekApp {
                 return;
             };
             if !lc.has_camera {
+                #[cfg(target_os = "android")]
+                {
+                    // Permission denied / not yet granted: prompt and defer enable.
+                    if !crate::android_media::has_camera_permission() {
+                        let _ = crate::android_media::ensure_camera_permission();
+                        lc.camera = true;
+                        lc.camera_awaiting_permission = true;
+                        self.state.av_pref_camera = true;
+                        self.state.persist_av_prefs();
+                        self.state
+                            .show_toast("Grant camera permission to enable video");
+                        return;
+                    }
+                }
                 self.state.show_toast("No camera available");
                 return;
             }
@@ -1379,6 +1456,19 @@ impl SleekApp {
         };
         self.state.av_pref_camera = camera;
         self.state.persist_av_prefs();
+        #[cfg(target_os = "android")]
+        if camera && !crate::android_media::has_camera_permission() {
+            let _ = crate::android_media::ensure_camera_permission();
+            if let Some(lc) = self.state.local_call.as_mut() {
+                lc.camera_awaiting_permission = true;
+            }
+            self.state
+                .show_toast("Grant camera permission to enable video");
+            return;
+        }
+        if let Some(lc) = self.state.local_call.as_mut() {
+            lc.camera_awaiting_permission = false;
+        }
         self.net.send(NetCmd::AvCamera {
             enabled: camera,
         });

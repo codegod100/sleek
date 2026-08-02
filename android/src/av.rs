@@ -40,6 +40,18 @@ pub struct LocalCall {
     pub media: MediaStatus,
     /// True after we sent av-start and are waiting for av-state=started.
     pub awaiting_start: bool,
+    /// Android: user wants camera, but CAMERA runtime permission is not granted
+    /// yet. Media dials audio-first; we enable publish once the grant lands.
+    pub camera_awaiting_permission: bool,
+}
+
+/// Whether to claim camera hardware when dialing the media plane.
+///
+/// `permission_granted` is the Android runtime CAMERA check (pass `true` on
+/// desktop). Opening Camera2 before the system dialog is answered always fails
+/// and used to stick the call in audio-only with "camera unavailable".
+pub fn camera_publish_at_dial(intent: bool, permission_granted: bool) -> bool {
+    intent && permission_granted
 }
 
 /// Frame-store key for the local self-view tile (capture tee / preview pump).
@@ -493,9 +505,10 @@ pub fn should_tap(path: &str, session_id: &str, our_broadcast: &str, my_nick: &s
 #[cfg(test)]
 mod tests {
     use super::{
-        broadcast_path, can_dial_sfu, channel_from_collision_reason, opaque_rgba_bytes, path_key,
-        path_nick, prepare_opaque_rgba_for_upload, session_id_from_collision_reason,
-        sfu_moq_dial_url, sfu_moq_url, VideoFrameStore, LOCAL_PREVIEW_KEY,
+        broadcast_path, camera_publish_at_dial, can_dial_sfu, channel_from_collision_reason,
+        opaque_rgba_bytes, path_key, path_nick, prepare_opaque_rgba_for_upload,
+        session_id_from_collision_reason, sfu_moq_dial_url, sfu_moq_url, VideoFrameStore,
+        LOCAL_PREVIEW_KEY,
     };
     use std::sync::Arc;
 
@@ -699,5 +712,13 @@ mod tests {
         assert!(can_dial_sfu("https://remote.example", Some("tok")));
         assert!(can_dial_sfu("ws://localhost:4443", Some("tok")));
         assert!(can_dial_sfu("127.0.0.1", Some("tok")));
+    }
+
+    #[test]
+    fn camera_publish_at_dial_requires_permission() {
+        assert!(!camera_publish_at_dial(true, false));
+        assert!(camera_publish_at_dial(true, true));
+        assert!(!camera_publish_at_dial(false, true));
+        assert!(!camera_publish_at_dial(false, false));
     }
 }
