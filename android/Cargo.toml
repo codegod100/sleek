@@ -6,6 +6,11 @@ description = "Sleek — mobile freeq client with Vidya (egui)"
 license = "MIT"
 publish = false
 
+# Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
+# members = ["."] is required by current cargo-apk / cargo_toml (empty [workspace] errors).
+[workspace]
+members = ["."]
+
 [lib]
 name = "sleek"
 path = "src/lib.rs"
@@ -159,6 +164,18 @@ name = "android.permission.RECORD_AUDIO"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.MODIFY_AUDIO_SETTINGS"
+
+# AV video publish — Camera2 ImageReader → H.264 via iroh-live.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CAMERA"
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.camera"
+required = false
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.camera.any"
+required = false
 
 [package.metadata.android.sdk]
 min_sdk_version = 28

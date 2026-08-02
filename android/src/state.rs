@@ -984,6 +984,8 @@ pub struct AppState {
     pub form_server: String,
     pub form_tls: bool,
     pub form_websocket: bool,
+    /// Bluesky handle typeahead (connect screen).
+    pub handle_typeahead: crate::bsky::HandleTypeahead,
     /// Guest session was loaded from disk — consumed once for launch auto-connect.
     pub auto_guest_connect: bool,
 
@@ -995,7 +997,7 @@ pub struct AppState {
     /// Preferred speaker mute (remote audio off) for the next call / in-call.
     /// Toggleable before start/join. Persisted in prefs.json.
     pub av_pref_speaker_muted: bool,
-    /// Preferred camera publish for the next call (desktop MoQ).
+    /// Preferred camera publish for the next call (MoQ).
     /// Toggleable before start/join; applied when hardware is available.
     /// Persisted in prefs.json (survives logout).
     pub av_pref_camera: bool,
@@ -1029,6 +1031,13 @@ pub struct AppState {
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
     pub recent_channels: Vec<String>,
+
+    /// User clicked Disconnect / Cancel / Logout — do not auto-reconnect.
+    pub intentional_disconnect: bool,
+    /// Consecutive unexpected disconnect / failed-reconnect attempts.
+    pub reconnect_attempts: u32,
+    /// When set, fire auto-reconnect once `Instant::now() >=` this deadline.
+    pub reconnect_at: Option<Instant>,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -1114,6 +1123,7 @@ impl AppState {
             form_server: server,
             form_tls: true,
             form_websocket: use_ws,
+            handle_typeahead: crate::bsky::HandleTypeahead::default(),
             auto_guest_connect: false,
             local_call: None,
             av_pref_muted: prefs.av_pref_muted,
@@ -1136,6 +1146,9 @@ impl AppState {
             av_show_devices: false,
             av_video_height: 220.0,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
+            intentional_disconnect: false,
+            reconnect_attempts: 0,
+            reconnect_at: None,
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -1176,6 +1189,14 @@ impl AppState {
                 state.form_websocket = saved.use_websocket;
                 state.connect_mode = ConnectMode::Guest;
                 state.auto_guest_connect = true;
+            }
+        }
+        // Pre-fill Bluesky handle from prefs if not already set from session.
+        if state.form_handle.is_empty() {
+            if let Some(handle) = prefs.last_bsky_handle {
+                if !handle.is_empty() {
+                    state.form_handle = handle;
+                }
             }
         }
         state
@@ -1289,15 +1310,14 @@ impl AppState {
 
     /// Persist app prefs (AV + recent rooms) to disk (independent of session logout).
     pub fn persist_prefs(&self) {
-        let prefs = crate::auth::SavedPrefs {
-            av_pref_muted: self.av_pref_muted,
-            av_pref_speaker_muted: self.av_pref_speaker_muted,
-            av_pref_camera: self.av_pref_camera,
-            av_pref_camera_id: self.av_pref_camera_id.clone(),
-            av_pref_mic_id: self.av_pref_mic_id.clone(),
-            av_pref_speaker_id: self.av_pref_speaker_id.clone(),
-            recent_channels: self.recent_channels.clone(),
-        };
+        let mut prefs = crate::auth::SavedPrefs::load();
+        prefs.av_pref_muted = self.av_pref_muted;
+        prefs.av_pref_speaker_muted = self.av_pref_speaker_muted;
+        prefs.av_pref_camera = self.av_pref_camera;
+        prefs.av_pref_camera_id = self.av_pref_camera_id.clone();
+        prefs.av_pref_mic_id = self.av_pref_mic_id.clone();
+        prefs.av_pref_speaker_id = self.av_pref_speaker_id.clone();
+        prefs.recent_channels = self.recent_channels.clone();
         if let Err(e) = prefs.save() {
             log::warn!("failed to save prefs: {e}");
         }
@@ -1380,10 +1400,11 @@ impl AppState {
             } else {
                 self.nick.clone()
             };
+            let handle = self.handle.clone().unwrap_or_default();
             let session = crate::auth::SavedSession {
                 broker_token,
                 did: self.did.clone().unwrap_or_default(),
-                handle: self.handle.clone().unwrap_or_default(),
+                handle: handle.clone(),
                 nick,
                 server: self.server.clone(),
                 last_login_unix: now,
@@ -1393,6 +1414,14 @@ impl AppState {
             };
             if let Err(e) = session.save() {
                 log::warn!("failed to save session: {e}");
+            }
+            // Remember handle in prefs (survives logout).
+            if !handle.is_empty() {
+                let mut prefs = crate::auth::SavedPrefs::load();
+                if prefs.last_bsky_handle.as_deref() != Some(&handle) {
+                    prefs.last_bsky_handle = Some(handle);
+                    let _ = prefs.save();
+                }
             }
             return;
         }
@@ -1425,6 +1454,13 @@ impl AppState {
         self.form_handle.clear();
         self.auto_guest_connect = false;
         crate::auth::SavedSession::clear();
+        // Restore remembered handle from prefs so it's pre-filled for next login.
+        let prefs = crate::auth::SavedPrefs::load();
+        if let Some(handle) = prefs.last_bsky_handle {
+            if !handle.is_empty() {
+                self.form_handle = handle;
+            }
+        }
     }
 
     /// True when a previous Bluesky login is still on disk or in memory.
@@ -1779,6 +1815,7 @@ impl AppState {
     pub fn clear_session(&mut self) {
         self.connection = ConnectionState::Disconnected;
         self.awaiting_oauth = false;
+        self.cancel_auto_reconnect();
         // Keep did / broker_token so reconnect can re-auth; use clear_auth for logout.
         self.channels.clear();
         self.channel_order.clear();
@@ -1799,6 +1836,29 @@ impl AppState {
         self.local_call = None;
         self.clear_av_media();
         self.status_line = "Disconnected".into();
+    }
+
+    /// Soft disconnect for unexpected EOF / ping timeout: keep chat buffers so
+    /// auto-reconnect can restore without wiping the conversation view.
+    pub fn mark_disconnected_for_reconnect(&mut self, reason: &str) {
+        self.connection = ConnectionState::Disconnected;
+        self.awaiting_oauth = false;
+        self.local_call = None;
+        self.clear_av_media();
+        self.status_line = format!("Disconnected: {reason}");
+    }
+
+    pub fn cancel_auto_reconnect(&mut self) {
+        self.reconnect_at = None;
+        self.reconnect_attempts = 0;
+    }
+
+    /// Schedule the next auto-reconnect attempt (exponential backoff).
+    pub fn schedule_auto_reconnect(&mut self) {
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        let delay = crate::reconnect::delay_secs(self.reconnect_attempts);
+        self.reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+        self.status_line = format!("Reconnecting in {delay}s…");
     }
 
     /// Drop MoQ video store, textures, mic meter, and focus (call ended or media stopped).

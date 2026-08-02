@@ -30,9 +30,9 @@ pub struct LocalCall {
     pub muted: bool,
     /// Local speaker / remote-audio mute (deafen). Peers still hear you if mic is open.
     pub speaker_muted: bool,
-    /// Camera publish enabled (desktop MoQ). False when no camera / toggled off.
+    /// Camera publish enabled (MoQ). False when no camera / toggled off.
     pub camera: bool,
-    /// True when the media plane opened a capture device (desktop).
+    /// True when the media plane opened a capture device.
     pub has_camera: bool,
     /// True when a real mic is feeding outbound Opus. False = silence/listen-only.
     pub has_mic: bool,

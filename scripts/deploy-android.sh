@@ -359,17 +359,28 @@ ensure_release_signing() {
   export SLEEK_KEY_PASSWORD=android
 
   # cargo-apk reads [package.metadata.android.signing.release] from Cargo.toml.
-  # Inject ephemerally if missing (do not commit).
+  # Inject before [patch] if missing (do not commit).
   if ! grep -q 'signing.release' "$APP/Cargo.toml"; then
-    cat >>"$APP/Cargo.toml" <<EOF
-
+    python3 - "$APP/Cargo.toml" "$keystore" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+keystore = sys.argv[2]
+text = path.read_text()
+block = f"""
 [package.metadata.android.signing.release]
-path = "$keystore"
+path = "{keystore}"
 keystore_password = "android"
 key_alias = "androiddebugkey"
 key_password = "android"
-EOF
-    echo "note: appended signing.release to android/Cargo.toml (local only)" >&2
+"""
+marker = "[patch.crates-io]"
+if marker in text:
+    text = text.replace(marker, block + "\n" + marker, 1)
+else:
+    text = text + block
+path.write_text(text)
+PY
+    echo "note: injected signing.release into android/Cargo.toml (local only)" >&2
   fi
 }
 

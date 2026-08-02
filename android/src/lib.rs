@@ -4,9 +4,11 @@ mod app;
 mod auth;
 mod av;
 mod av_media;
+mod bsky;
 mod clipboard;
 mod net;
 mod preview;
+mod reconnect;
 mod slash;
 mod state;
 mod ui;
@@ -17,6 +19,8 @@ mod v4l2cam;
 
 #[cfg(target_os = "android")]
 mod android_media;
+#[cfg(target_os = "android")]
+mod android_camera;
 
 pub use app::run_desktop;
 

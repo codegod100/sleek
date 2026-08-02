@@ -1,13 +1,13 @@
 //! Connect screen — Bluesky OAuth (auth broker) + guest, freeq-android inspired.
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Key, RichText, Vec2};
 use vidya::{
     body, button, checkbox, destructive_button, dim_label, primary_button, text_field_singleline,
     title_2, Theme,
 };
 
 use crate::state::{AppState, ConnectMode, ConnectionState};
-use crate::ui::widgets::card;
+use crate::ui::widgets::{avatar_circle, card};
 
 pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ConnectAction {
     let mut action = ConnectAction::None;
@@ -30,7 +30,7 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
 
                 body(ui, th, "Bluesky handle");
                 ui.add_space(sp.xs);
-                let _ = text_field_singleline(ui, th, &mut state.form_handle);
+                handle_field(ui, th, state, loading);
                 ui.add_space(sp.md);
 
                 if let Some(err) = &state.error {
@@ -169,6 +169,7 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 if button(ui, th, "Continue as guest").clicked() {
                     state.connect_mode = ConnectMode::Guest;
                     state.error = None;
+                    state.handle_typeahead.dismiss();
                 }
             }
             ConnectMode::Guest => {
@@ -181,6 +182,149 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
     });
 
     action
+}
+
+/// Handle text field + AppView typeahead suggestions (debounced in `App`).
+fn handle_field(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, login_loading: bool) {
+    let sp = &th.spacing;
+    let p = &th.palette;
+    let w = ui.available_width().max(1.0);
+
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut state.form_handle)
+            .margin(th.text_edit_margin())
+            .desired_width(w)
+            .min_size(Vec2::new(0.0, sp.control_height))
+            .hint_text("you.bsky.social")
+            .interactive(!login_loading),
+    );
+
+    state.handle_typeahead.sync_from_input(&state.form_handle);
+
+    let typeahead_open = state.handle_typeahead.open
+        && (!state.handle_typeahead.suggestions.is_empty() || state.handle_typeahead.loading);
+
+    if resp.has_focus() && typeahead_open {
+        let mut accept = false;
+        let mut dismiss = false;
+        let mut down = false;
+        let mut up = false;
+        ui.input(|i| {
+            if i.key_pressed(Key::ArrowDown) {
+                down = true;
+            }
+            if i.key_pressed(Key::ArrowUp) {
+                up = true;
+            }
+            if i.key_pressed(Key::Tab) || i.key_pressed(Key::Enter) {
+                // Enter also submits login when no highlight — only accept if open+selected.
+                if state.handle_typeahead.selected.is_some()
+                    || !state.handle_typeahead.suggestions.is_empty()
+                {
+                    accept = true;
+                }
+            }
+            if i.key_pressed(Key::Escape) {
+                dismiss = true;
+            }
+        });
+        if down {
+            state.handle_typeahead.move_selection(1);
+            ui.ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+        }
+        if up {
+            state.handle_typeahead.move_selection(-1);
+            ui.ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+        }
+        if dismiss {
+            state.handle_typeahead.dismiss();
+            ui.ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+        }
+        if accept && state.handle_typeahead.accept_selected(&mut state.form_handle) {
+            ui.ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab));
+            ui.ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+        }
+    }
+
+    if !typeahead_open {
+        return;
+    }
+
+    ui.add_space(sp.xs);
+    let frame = egui::Frame::new()
+        .fill(p.popover_bg)
+        .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(sp.radius_md)
+        .inner_margin(egui::Margin::symmetric(sp.sm as i8, sp.xs as i8));
+    frame.show(ui, |ui| {
+        ui.set_min_width(w);
+        if state.handle_typeahead.loading && state.handle_typeahead.suggestions.is_empty() {
+            dim_label(ui, th, "Searching handles…");
+            return;
+        }
+        let suggestions = state.handle_typeahead.suggestions.clone();
+        let selected = state.handle_typeahead.selected;
+        let mut picked: Option<String> = None;
+        let mut hovered: Option<usize> = None;
+        for (i, actor) in suggestions.iter().enumerate() {
+            let is_sel = selected == Some(i);
+            let row_h = sp.control_height.max(40.0);
+            let (rect, row_resp) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), egui::Sense::click());
+            if is_sel || row_resp.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    sp.radius_sm,
+                    if is_sel {
+                        p.accent.gamma_multiply(0.18)
+                    } else {
+                        p.button_hover
+                    },
+                );
+            }
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect.shrink2(Vec2::new(sp.sm, 4.0)))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = sp.sm;
+                    avatar_circle(ui, th, &actor.handle, 28.0);
+                    ui.vertical(|ui| {
+                        if let Some(name) = &actor.display_name {
+                            ui.label(
+                                RichText::new(name)
+                                    .size(th.type_scale.body)
+                                    .color(p.text)
+                                    .strong(),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!("@{}", actor.handle))
+                                .size(th.type_scale.caption)
+                                .color(p.text_secondary),
+                        );
+                    });
+                },
+            );
+            if row_resp.clicked() {
+                picked = Some(actor.handle.clone());
+            }
+            if row_resp.hovered() {
+                hovered = Some(i);
+            }
+        }
+        if let Some(i) = hovered {
+            state.handle_typeahead.selected = Some(i);
+        }
+        if let Some(handle) = picked {
+            state.handle_typeahead.pick(&handle, &mut state.form_handle);
+        }
+    });
 }
 
 /// Banner + destructive clear when a previous Bluesky login is still cached.

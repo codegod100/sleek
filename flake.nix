@@ -25,7 +25,7 @@
       url = "github:codegod100/freeq";
       flake = false;
     };
-    # Convert the Nix sleek package into a distributable .flatpak bundle.
+    # Convert the hermetic host package into a distributable .flatpak bundle.
     nix2flatpak.url = "github:neobrain/nix2flatpak";
   };
 
@@ -131,6 +131,7 @@
               pkgs.lib.cleanSourceFilter path type
               && !(builtins.elem base [
                 ".tangled"
+                ".github"
                 ".devcontainer"
                 ".jj"
                 "docs"
@@ -253,7 +254,7 @@
                   genericName = "Chat";
                   comment = "Freeq chat client — channels, DMs, and calls";
                   exec = "sleek";
-                  # Name-based lookup; postInstall rewrites to an absolute PNG
+                  # Name-based initially; preFixup rewrites to an absolute PNG
                   # path so launchers that skip nix-profile hicolor still work.
                   icon = "uk.nandi.sleek";
                   categories = [
@@ -293,13 +294,22 @@
                 # AppStream metadata (Flatpak / software centers).
                 install -Dm644 ${./assets/uk.nandi.sleek.metainfo.xml} \
                   $out/share/metainfo/uk.nandi.sleek.metainfo.xml
+              '';
 
-                # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
-                # and when the launcher does not merge nix-profile into the theme path.
+              # copyDesktopItems runs as a postInstallHook *after* the postInstall
+              # body above, so the .desktop file is not present yet during
+              # postInstall. Rewrite Icon= here (preFixup) once it has been copied.
+              # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
+              # and when the launcher does not merge nix-profile into the theme path
+              # — bare `Icon=uk.nandi.sleek` name lookup often fails in that case.
+              preFixup = ''
                 if [ -f $out/share/applications/uk.nandi.sleek.desktop ]; then
                   substituteInPlace $out/share/applications/uk.nandi.sleek.desktop \
                     --replace-fail 'Icon=uk.nandi.sleek' \
                     "Icon=$out/share/icons/hicolor/256x256/apps/uk.nandi.sleek.png"
+                else
+                  echo "error: uk.nandi.sleek.desktop missing; copyDesktopItems did not run" >&2
+                  exit 1
                 fi
 
                 # Drop rustc/libclang store paths leaked into the binary/wrapper
@@ -463,18 +473,29 @@
               echo "  linker=$CC_aarch64_linux_android" >&2
 
               pushd sleek/android >/dev/null
-              # cargo-apk rejects workspaces unless a package is selected (-p).
+              # cargo-apk rejects multi-member workspaces unless a package is selected (-p).
               # --release: optimized, no debuginfo — APK stays installable size.
-              # Inject release signing (path is absolute; not committed to Cargo.toml).
+              # Inject release signing before [patch] (path is absolute; not committed).
               if ! grep -q 'signing.release' Cargo.toml; then
-                cat >> Cargo.toml <<EOF
-
+                python3 - "$keystore" <<'PY'
+import pathlib, sys
+keystore = sys.argv[1]
+path = pathlib.Path("Cargo.toml")
+text = path.read_text()
+block = f"""
 [package.metadata.android.signing.release]
-path = "$keystore"
+path = "{keystore}"
 keystore_password = "android"
 key_alias = "androiddebugkey"
 key_password = "android"
-EOF
+"""
+marker = "[patch.crates-io]"
+if marker in text:
+    text = text.replace(marker, block + "\n" + marker, 1)
+else:
+    text = text + block
+path.write_text(text)
+PY
               fi
               cargo apk build --release --target ${androidTarget} -p sleek --lib
 
@@ -843,6 +864,35 @@ EOF
           waydroid-release = run-waydroid-release;
           inherit run-waydroid-release;
           inherit run-host;
+
+          # Distributable Flatpak bundle (uk.nandi.sleek.flatpak) from sleek-host.
+          # Uses GNOME Platform for Wayland/GL/audio; not Flathub-from-source.
+          flatpak = nix2flatpak.lib.${system}.mkFlatpak {
+            appId = "uk.nandi.sleek";
+            appName = "Sleek";
+            developer = "nandi";
+            package = sleek-host;
+            runtime = "org.gnome.Platform/48";
+            command = "sleek";
+            desktopFile = ./assets/uk.nandi.sleek.desktop;
+            icon = ./assets/uk.nandi.sleek.svg;
+            # Chat + AV: network, display, GPU, mic/camera, downloads for file pick.
+            permissions = {
+              share = [
+                "network"
+                "ipc"
+              ];
+              sockets = [
+                "fallback-x11"
+                "wayland"
+                "pulseaudio"
+              ];
+              devices = [ "all" ];
+              filesystems = [ "xdg-download" ];
+            };
+            # egui/Rust + PipeWire stack may trail GNOME runtime libstdc++/glibc.
+            skipAbiChecks = true;
+          };
         }
       );
 
@@ -964,7 +1014,7 @@ EOF
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix run .#waydroid-release | nix run .#deploy-android | nix build .#android"
+                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix build .#android | nix build .#flatpak"
                 fi
               '';
             }

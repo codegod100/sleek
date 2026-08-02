@@ -42,6 +42,32 @@ fn android_app() -> Option<&'static AndroidApp> {
     ANDROID_APP.get()
 }
 
+/// Public handle for other Android modules (camera capture, etc.).
+pub fn android_app_handle() -> Option<&'static AndroidApp> {
+    android_app()
+}
+
+/// Ensure camera access for AV video publish; prompt if needed.
+///
+/// Returns `true` when already granted. `false` means the system dialog was
+/// shown or the permission was denied — caller may still dial audio-only.
+pub fn ensure_camera_permission() -> bool {
+    match request_permissions(&["android.permission.CAMERA"], 0x5_1EE_8) {
+        Ok(true) => {
+            log::debug!("android CAMERA granted");
+            true
+        }
+        Ok(false) => {
+            log::info!("android CAMERA requested (awaiting user)");
+            false
+        }
+        Err(e) => {
+            log::warn!("android CAMERA permission: {e}");
+            false
+        }
+    }
+}
+
 /// System navigation interaction mode (3-button vs gestures).
 ///
 /// Matches Android's internal `config_navBarInteractionMode` / Secure

@@ -79,6 +79,9 @@ pub struct SavedPrefs {
     /// MRU order (most recent first). Defaults: `#general`, `#test`.
     #[serde(default = "default_recent_channels")]
     pub recent_channels: Vec<String>,
+    /// Most recently used Bluesky handle (survives logout, pre-filled on connect).
+    #[serde(default)]
+    pub last_bsky_handle: Option<String>,
 }
 
 impl Default for SavedPrefs {
@@ -91,6 +94,7 @@ impl Default for SavedPrefs {
             av_pref_mic_id: None,
             av_pref_speaker_id: None,
             recent_channels: default_recent_channels(),
+            last_bsky_handle: None,
         }
     }
 }

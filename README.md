@@ -64,7 +64,21 @@ nix run .#install-android -- --launch
 
 # Manual push of an existing out-link:
 just push ./result-android
+
+# Desktop Flatpak bundle (from hermetic .#sleek via nix2flatpak):
+just flatpak                   # → result-flatpak/*.flatpak
+nix build .#flatpak
+# Install: flatpak install --user ./result-flatpak/*.flatpak
 ```
+
+### CI artifacts
+
+On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds:
+
+| Job | Flake attr | Artifact |
+|-----|------------|----------|
+| APK | `.#android` | `sleek-apk` (`sleek.apk`) |
+| Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
 
 ### Spindle (Tangled CI)
 
@@ -77,18 +91,30 @@ just push ./result-android
 
 Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm** engine.
 
-### Cachix (Codespaces)
+### Cachix
 
 Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
 
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
+On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes store paths to the same cache. CI pulls `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
+
 | Secret / env | Purpose |
 |--------------|---------|
-| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) |
+| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch Cachix credentials |
+| `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` so agents can manage Actions secrets |
+| `CACHIX_AUTH_TOKEN` | Write token in OpenBao / Codespaces ([cachix.org](https://app.cachix.org) → codegod100) |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
 | `SLEEK_SKIP_CACHIX=1` | Skip Cachix setup in bootstrap |
+
+```bash
+# Proper gh for agents/CI setup (run where `gh auth status` is your account):
+export OPENBAO_ADDR=https://openbao.boxd.sh
+export OPENBAO_TOKEN=…                 # same value as Cursor env secret
+./scripts/openbao-put-key.sh GH_TOKEN --from-gh
+printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
+```
 
 ```bash
 # Codespace secret → then:
@@ -227,12 +253,14 @@ create a new one from `main` after the Ubuntu+bootstrap config is pushed.
 sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
+  assets/           # desktop entry + icons (Flatpak / host)
   .tangled/         # Spindle CI (Tangled)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
+  .github/workflows # CI: APK + Flatpak artifacts
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake
   justfile
-  flake.nix
+  flake.nix         # .#sleek, .#android, .#flatpak, …
 ```
 
 ## License

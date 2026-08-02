@@ -241,6 +241,55 @@ impl SleekApp {
         apply(ctx, &self.theme());
     }
 
+    /// Fire a scheduled auto-reconnect once its backoff deadline elapses.
+    fn poll_auto_reconnect(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.state.reconnect_at else {
+            return;
+        };
+        // Keep painting so the countdown status updates and the deadline is checked.
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if std::time::Instant::now() < at {
+            let secs = at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .max(1);
+            self.state.status_line = format!("Reconnecting in {secs}s…");
+            return;
+        }
+        if self.state.connection != ConnectionState::Disconnected {
+            self.state.reconnect_at = None;
+            return;
+        }
+        if self.state.intentional_disconnect || self.state.nick.trim().is_empty() {
+            self.state.cancel_auto_reconnect();
+            return;
+        }
+        self.state.reconnect_at = None;
+        self.state.error = None;
+        if self.state.has_saved_session() {
+            self.do_reconnect_session();
+        } else {
+            self.do_connect();
+        }
+    }
+
+    /// Debounced Bluesky handle typeahead while the connect form is visible.
+    fn poll_handle_typeahead(&mut self, ctx: &egui::Context) {
+        if self.state.connection.is_live() || self.state.connect_mode != crate::state::ConnectMode::Bluesky
+        {
+            return;
+        }
+        self.state
+            .handle_typeahead
+            .sync_from_input(&self.state.form_handle);
+        if let Some((request_id, query)) = self.state.handle_typeahead.take_ready_fetch() {
+            self.net.send(NetCmd::SearchHandles { request_id, query });
+        }
+        if self.state.handle_typeahead.needs_repaint() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn poll_net(&mut self, ctx: &egui::Context) {
         for ev in self.net.poll() {
             self.handle_net_event(ev);
@@ -302,6 +351,14 @@ impl SleekApp {
                 self.state.awaiting_oauth = false;
                 if self.state.connection == ConnectionState::Connecting {
                     self.state.connection = ConnectionState::Disconnected;
+                }
+                // A failed reconnect attempt (after EOF etc.) should keep backing off.
+                if !self.state.intentional_disconnect
+                    && self.state.reconnect_attempts > 0
+                    && !self.state.nick.trim().is_empty()
+                    && self.state.reconnect_at.is_none()
+                {
+                    self.state.schedule_auto_reconnect();
                 }
             }
             NetEvent::AuthReady(tokens) => {
@@ -498,6 +555,20 @@ impl SleekApp {
                     _ => {}
                 }
             }
+            NetEvent::HandleSuggestions {
+                request_id,
+                query,
+                actors,
+                error,
+            } => {
+                if error.is_some() {
+                    self.state.handle_typeahead.apply_failed(request_id);
+                } else {
+                    self.state
+                        .handle_typeahead
+                        .apply_results(request_id, query, actors);
+                }
+            }
             NetEvent::Sdk(event) => self.handle_sdk_event(event),
         }
     }
@@ -535,6 +606,7 @@ impl SleekApp {
                 if self.state.did.is_some() && nick.starts_with("Guest") {
                     self.state
                         .show_toast("Guest nick after auth — refreshing broker session…");
+                    self.state.intentional_disconnect = true;
                     self.net.send(NetCmd::Quit);
                     self.state.connection = ConnectionState::Disconnected;
                     if self.state.has_saved_session() {
@@ -547,6 +619,8 @@ impl SleekApp {
                 self.state.form_nick = nick.clone();
                 self.state.status_line = format!("Online as {nick}");
                 self.state.error = None;
+                self.state.cancel_auto_reconnect();
+                self.state.intentional_disconnect = false;
                 self.state.show_toast(format!("Connected as {nick}"));
                 self.state.persist_session();
                 // Seed status buffer
@@ -869,8 +943,29 @@ impl SleekApp {
                 }
             }
             Event::Disconnected { reason } => {
-                self.state.clear_session();
-                if reason != "quit" {
+                let intentional = self.state.intentional_disconnect || reason == "quit";
+                self.state.intentional_disconnect = false;
+
+                // Quit after "Guest nick → refresh session" already kicked off
+                // Connecting — don't clobber that in-flight restore.
+                if intentional {
+                    if self.state.connection == ConnectionState::Connecting {
+                        return;
+                    }
+                    self.state.clear_session();
+                    return;
+                }
+
+                // Unexpected EOF / ping timeout / socket drop — keep buffers and
+                // auto-reconnect with backoff (freeq-android parity).
+                let nick_empty = self.state.nick.trim().is_empty();
+                if crate::reconnect::should_auto_reconnect(false, nick_empty, &reason) {
+                    self.state.mark_disconnected_for_reconnect(&reason);
+                    self.state.error = Some(format!("Disconnected: {reason}"));
+                    self.state.show_toast(format!("Disconnected: {reason}"));
+                    self.state.schedule_auto_reconnect();
+                } else {
+                    self.state.clear_session();
                     self.state.show_toast(format!("Disconnected: {reason}"));
                     self.state.error = Some(reason);
                 }
@@ -1063,8 +1158,8 @@ impl SleekApp {
         }
     }
 
-    /// Dial MoQ media (desktop + Android). Android is audio-only publish for now
-    /// (no CameraX bridge under cargo-apk NativeActivity).
+    /// Dial MoQ media (desktop + Android). Android publishes mic + optional
+    /// Camera2 video (NV12 → H.264) when CAMERA permission is granted.
     ///
     /// Skips dial when the SFU needs a JWT we do not have yet, and skips
     /// re-dial while already Connecting/Live for the same session + token
@@ -1085,11 +1180,20 @@ impl SleekApp {
             );
             return;
         }
-        // Android 6+: RECORD_AUDIO is runtime. Prompt before opening the mic;
+        // Android 6+: RECORD_AUDIO / CAMERA are runtime. Prompt before dial;
         // dial still proceeds so a later retry (after grant) can succeed.
         #[cfg(target_os = "android")]
         {
             let _ = crate::android_media::ensure_record_audio_permission();
+            if self
+                .state
+                .local_call
+                .as_ref()
+                .map(|lc| lc.camera)
+                .unwrap_or(self.state.av_pref_camera)
+            {
+                let _ = crate::android_media::ensure_camera_permission();
+            }
         }
         // Dedup: same session + same token while already up / in flight.
         if let Some(lc) = self.state.local_call.as_ref() {
@@ -1352,6 +1456,8 @@ impl SleekApp {
             return;
         }
         self.state.error = None;
+        self.state.intentional_disconnect = false;
+        self.state.reconnect_at = None;
         self.state.connection = ConnectionState::Connecting;
         self.state.awaiting_oauth = false;
         self.state.nick = nick.clone();
@@ -1374,6 +1480,14 @@ impl SleekApp {
         });
     }
 
+    /// User-initiated disconnect: suppress auto-reconnect for the Quit event.
+    fn do_intentional_disconnect(&mut self) {
+        self.state.intentional_disconnect = true;
+        self.state.cancel_auto_reconnect();
+        self.net.send(NetCmd::Quit);
+        self.state.clear_session();
+    }
+
     fn do_bluesky_login(&mut self, ctx: &egui::Context) {
         let handle = self
             .state
@@ -1386,6 +1500,7 @@ impl SleekApp {
             return;
         }
         self.state.error = None;
+        self.state.handle_typeahead.dismiss();
         self.state.awaiting_oauth = true;
         self.state.connection = ConnectionState::Connecting;
         #[cfg(target_os = "android")]
@@ -1479,6 +1594,8 @@ impl SleekApp {
             return;
         };
         self.state.error = None;
+        self.state.intentional_disconnect = false;
+        self.state.reconnect_at = None;
         self.state.connection = ConnectionState::Connecting;
         self.state.status_line = "Restoring session…".into();
         self.net.send(NetCmd::ReconnectSession {
@@ -1871,6 +1988,8 @@ fn server_time_from_tags(
 impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
+        self.poll_auto_reconnect(ctx);
+        self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
         self.poll_oauth_deep_link(ctx);
@@ -2050,7 +2169,10 @@ impl eframe::App for SleekApp {
                     if landscape && short {
                         ui.horizontal(|ui| {
                             title(ui, &th, "Sleek");
-                            if connected || self.state.connection == ConnectionState::Connecting {
+                            if connected
+                                || self.state.connection == ConnectionState::Connecting
+                                || self.state.reconnect_at.is_some()
+                            {
                                 ui.add_space(sp.sm);
                                 let blurb = if self.state.connection == ConnectionState::Registered
                                 {
@@ -2067,7 +2189,10 @@ impl eframe::App for SleekApp {
                                 title(ui, &th, "Sleek");
                                 // Subtitle only when connected or mid-connect — idle connect
                                 // already has its own form; avoid stacking the same chrome.
-                                if connected || self.state.connection == ConnectionState::Connecting {
+                                if connected
+                                    || self.state.connection == ConnectionState::Connecting
+                                    || self.state.reconnect_at.is_some()
+                                {
                                     ui.add_space(sp.xs + 2.0);
                                     let blurb =
                                         if self.state.connection == ConnectionState::Registered {
@@ -2244,11 +2369,12 @@ impl eframe::App for SleekApp {
                                 match ui::settings_tab(ui, &th, &mut self.state, self.mode) {
                                     SettingsAction::None => {}
                                     SettingsAction::Disconnect => {
-                                        self.net.send(NetCmd::Quit);
-                                        self.state.clear_session();
+                                        self.do_intentional_disconnect();
                                     }
                                     SettingsAction::Logout => {
                                         // Full clear: IRC + disk session → real guest next time.
+                                        self.state.intentional_disconnect = true;
+                                        self.state.cancel_auto_reconnect();
                                         self.net.send(NetCmd::Quit);
                                         self.state.logout();
                                     }
@@ -2264,8 +2390,9 @@ impl eframe::App for SleekApp {
                         }
                     } else if self.state.connection == ConnectionState::Connecting
                         || self.state.connection == ConnectionState::Connected
+                        || self.state.reconnect_at.is_some()
                     {
-                        // Waiting for registration
+                        // Waiting for registration / auto-reconnect backoff
                         ui.vertical_centered(|ui| {
                             ui.add_space(sp.xl * 2.0);
                             title(ui, &th, "Connecting");
@@ -2273,8 +2400,7 @@ impl eframe::App for SleekApp {
                             dim_label(ui, &th, &self.state.status_line);
                             ui.add_space(sp.lg);
                             if button(ui, &th, "Cancel").clicked() {
-                                self.net.send(NetCmd::Quit);
-                                self.state.clear_session();
+                                self.do_intentional_disconnect();
                             }
                         });
                     } else {
@@ -2285,6 +2411,8 @@ impl eframe::App for SleekApp {
                             ConnectAction::ApplyCallback => self.do_apply_callback(),
                             ConnectAction::ReconnectSession => self.do_reconnect_session(),
                             ConnectAction::ClearAccount => {
+                                self.state.intentional_disconnect = true;
+                                self.state.cancel_auto_reconnect();
                                 self.net.send(NetCmd::Quit);
                                 self.state.logout();
                             }
