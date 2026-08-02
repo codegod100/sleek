@@ -25,12 +25,13 @@ dependencies:
 
 environment:
   DEV_TAG: "dev"
-  NIX_CONFIG: "experimental-features = nix-command flakes\naccept-flake-config = true"
 
 steps:
   - name: "Build Android APK"
     command: |
       set -euo pipefail
+      export NIX_CONFIG="experimental-features = nix-command flakes
+      accept-flake-config = true"
       echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
       nix --version
       nix build .#android -L --out-link result-android
@@ -41,6 +42,8 @@ steps:
   - name: "Build Flatpak bundle"
     command: |
       set -euo pipefail
+      export NIX_CONFIG="experimental-features = nix-command flakes
+      accept-flake-config = true"
       nix build .#flatpak -L --out-link result-flatpak
       test -f result-flatpak/uk.nandi.sleek.flatpak
       test -s result-flatpak/uk.nandi.sleek.flatpak
