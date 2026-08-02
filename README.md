@@ -76,7 +76,7 @@ just push ./result-android
 | `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
 | `CACHIX_AUTH_TOKEN` | Optional — push store paths to `codegod100` |
 
-Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`, `CACHIX_CACHE`. Spindle timeout should be ≥ ~60m for cold builds.
+Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`, `CACHIX_CACHE`. Uses the **nixery** engine. Hosted spindle default timeout is ~5m — raise it (or use a longer-timeout spindle) for cold Android/Flatpak builds.
 
 ### Cachix (Codespaces)
 

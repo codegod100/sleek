@@ -3,6 +3,9 @@
 #   nix build .#android  → result-android/sleek.apk
 #   nix build .#flatpak  → result-flatpak/uk.nandi.sleek.flatpak
 #
+# Uses nixery (same engine as this repo's working hello.yml). Pure Nix
+# builds don't need microvm/FHS.
+#
 # On push/manual to main (not PRs), after a successful build:
 #   1. Force-move annotated tag `dev` to this commit
 #   2. Push the tag (needs DEPLOY_KEY — write deploy key)
@@ -12,12 +15,14 @@
 #   DEPLOY_KEY        — SSH private key with write access to this repo
 #   ATP_APP_PASSWORD  — ATProto app password for blob/artifact upload
 #   CACHIX_AUTH_TOKEN — optional; push store paths to codegod100
-# Optional env/secrets:
+# Optional:
 #   ATP_IDENTIFIER    — handle or DID (default: nandi.uk)
 #   ATP_PDS           — PDS host (default: https://bsky.social)
 #   CACHIX_CACHE      — default codegod100
 #
-# Spindle timeout should be ≥ ~60m (engine default is 5m).
+# Hosted spindle default timeout is ~5m — raise
+# SPINDLE_NIXERY_PIPELINES_WORKFLOW_TIMEOUT (or use a longer-timeout
+# spindle) for cold Android/Flatpak builds.
 
 when:
   - event: ["push", "manual"]
@@ -25,8 +30,7 @@ when:
   - event: ["pull_request"]
     branch: ["main"]
 
-engine: microvm
-image: nixos
+engine: nixery
 
 clone:
   skip: false
@@ -34,23 +38,21 @@ clone:
   submodules: false
 
 dependencies:
-  - nix
-  - cachix
-  - git
-  - openssh
-  - coreutils
-  - findutils
-  - file
-  - gnugrep
-  - gnutar
-  - gzip
-  - curl
-  - jq
-  - xxd
-
-caches:
-  https://codegod100.cachix.org: "codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA="
-  https://cache.nixos.org: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+  nixpkgs:
+    - nix
+    - cachix
+    - git
+    - openssh
+    - coreutils
+    - findutils
+    - file
+    - gnugrep
+    - gnutar
+    - gzip
+    - curl
+    - jq
+    - xxd
+    - bash
 
 environment:
   NIX_CONFIG: "experimental-features = nix-command flakes\naccept-flake-config = true"
@@ -60,6 +62,8 @@ steps:
   - name: "Build Android APK"
     command: |
       set -euo pipefail
+      echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?} pwd=$PWD"
+      nix --version
       nix build .#android -L --out-link result-android
       test -f result-android/sleek.apk
       test -s result-android/sleek.apk
@@ -91,7 +95,6 @@ steps:
   - name: "Cut / move annotated tag `dev`"
     command: |
       set -euo pipefail
-      # PRs only need the build; tagging is for main pushes.
       if [[ "${TANGLED_PIPELINE_KIND:-}" == "pull_request" ]]; then
         echo "PR pipeline — skip tagging"
         exit 0
@@ -107,7 +110,6 @@ steps:
       git config user.name "Tangled CI"
       git config user.email "ci@tangled.org"
 
-      # Annotated tag required for sh.tangled.repo.artifact (^{tag} object).
       git tag -fa "$TAG" -m "dev build ${SHA}" "$SHA"
       git rev-parse "$TAG^{tag}" >/dev/null
 
@@ -120,7 +122,6 @@ steps:
 
       git remote set-url origin \
         "git@${TANGLED_REPO_KNOT}:${TANGLED_REPO_DID}/${TANGLED_REPO_NAME}"
-      # skip-ci: avoid a second pipeline if a tag trigger is added later
       GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
         git push --force -o skip-ci origin "refs/tags/${TAG}"
 
@@ -166,7 +167,6 @@ steps:
           -H "Authorization: Bearer $jwt" \
           -H "Content-Type: $ctype" \
           --data-binary @"$path")
-        # putRecord with stable rkey replaces prior `dev` assets of the same name
         record=$(jq -n \
           --arg did "$did" \
           --arg rkey "$rkey" \
