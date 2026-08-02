@@ -32,7 +32,8 @@ pub struct LocalCall {
     pub speaker_muted: bool,
     /// Camera publish enabled (MoQ). False when no camera / toggled off.
     pub camera: bool,
-    /// True when the media plane opened a capture device.
+    /// True when a capture device is available for this call (may be closed
+    /// while `camera` is false — hardware is only held while publishing).
     pub has_camera: bool,
     /// True when a real mic is feeding outbound Opus. False = silence/listen-only.
     pub has_mic: bool,
