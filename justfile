@@ -81,6 +81,12 @@ launch:
 android:
     ./scripts/nix-build-push.sh .#android -L --out-link result-android
 
+# Desktop Flatpak bundle (uk.nandi.sleek.flatpak) via nix2flatpak
+# Opt out of Cachix: SLEEK_CACHIX_PUSH=0 just flatpak
+flatpak:
+    ./scripts/nix-build-push.sh .#flatpak -L --out-link result-flatpak
+
+
 # adb install result of .#android onto a connected phone
 install-android *args:
     nix run .#install-android -- {{args}}
