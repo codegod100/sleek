@@ -199,7 +199,7 @@
                   genericName = "Chat";
                   comment = "Freeq chat client — channels, DMs, and calls";
                   exec = "sleek";
-                  # Name-based lookup; postInstall rewrites to an absolute PNG
+                  # Name-based initially; preFixup rewrites to an absolute PNG
                   # path so launchers that skip nix-profile hicolor still work.
                   icon = "uk.nandi.sleek";
                   categories = [
@@ -235,13 +235,22 @@
                 # Legacy pixmap lookup (some menus only check pixmaps/).
                 install -Dm644 ${./assets/icons}/uk.nandi.sleek-256.png \
                   $out/share/pixmaps/uk.nandi.sleek.png
+              '';
 
-                # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
-                # and when the launcher does not merge nix-profile into the theme path.
+              # copyDesktopItems runs as a postInstallHook *after* the postInstall
+              # body above, so the .desktop file is not present yet during
+              # postInstall. Rewrite Icon= here (preFixup) once it has been copied.
+              # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
+              # and when the launcher does not merge nix-profile into the theme path
+              # — bare `Icon=uk.nandi.sleek` name lookup often fails in that case.
+              preFixup = ''
                 if [ -f $out/share/applications/uk.nandi.sleek.desktop ]; then
                   substituteInPlace $out/share/applications/uk.nandi.sleek.desktop \
                     --replace-fail 'Icon=uk.nandi.sleek' \
                     "Icon=$out/share/icons/hicolor/256x256/apps/uk.nandi.sleek.png"
+                else
+                  echo "error: uk.nandi.sleek.desktop missing; copyDesktopItems did not run" >&2
+                  exit 1
                 fi
               '';
 
