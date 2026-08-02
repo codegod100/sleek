@@ -4,7 +4,7 @@ use eframe::egui::{
     self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Id, Key, Layout,
     Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
-use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
+use vidya::{dim_label, icon_colored, paint_emoji_in, paint_icon_in, title_2, Icon, Theme};
 
 use crate::preview::{self, Embed, UrlSpan};
 use crate::state::{
@@ -189,12 +189,207 @@ fn badge(ui: &mut egui::Ui, th: &Theme, text: &str) {
         });
 }
 
-/// Right-click / long-press menu for a message bubble: React, Edit, Delete.
+/// Compact icon button for message action toolbars / menus.
+fn message_action_icon_btn(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    glyph: MessageActionGlyph,
+    tip: &str,
+    accent: bool,
+) -> egui::Response {
+    let p = &th.palette;
+    let size = (th.type_scale.body * 1.35).max(22.0);
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    response = response
+        .on_hover_text(tip)
+        .on_hover_cursor(CursorIcon::PointingHand);
+
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered() && ui.is_enabled();
+        let active = response.is_pointer_button_down_on();
+        let fill = if active {
+            p.button_active
+        } else if hovered || accent {
+            p.button_hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect(
+                rect,
+                th.spacing.radius_sm,
+                fill,
+                Stroke::NONE,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let icon_rect = rect.shrink(size * 0.18);
+        let color = if accent { p.accent } else { p.text };
+        match glyph {
+            MessageActionGlyph::Icon(icon) => paint_icon_in(ui, icon_rect, icon, color),
+            MessageActionGlyph::Emoji(emoji) => paint_emoji_in(ui, icon_rect, emoji, color),
+        }
+    }
+
+    response
+}
+
+#[derive(Clone, Copy)]
+enum MessageActionGlyph {
+    Icon(Icon),
+    Emoji(&'static str),
+}
+
+/// Shared React / Edit / Delete icon actions (hover toolbar + context menu).
+fn message_action_icons(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if can_react
+            && message_action_icon_btn(
+                ui,
+                th,
+                MessageActionGlyph::Icon(Icon::Laugh),
+                "Add reaction",
+                react_picker_open,
+            )
+            .clicked()
+        {
+            action = Some(if react_picker_open {
+                MessageBubbleAction::CloseReactPicker
+            } else {
+                MessageBubbleAction::OpenReactPicker {
+                    msgid: msg.id.clone(),
+                }
+            });
+        }
+        if can_edit
+            && message_action_icon_btn(
+                ui,
+                th,
+                MessageActionGlyph::Emoji("✏️"),
+                "Edit message",
+                false,
+            )
+            .clicked()
+        {
+            action = Some(MessageBubbleAction::Edit {
+                msgid: msg.id.clone(),
+                text: msg.text.clone(),
+            });
+        }
+        if can_delete
+            && message_action_icon_btn(
+                ui,
+                th,
+                MessageActionGlyph::Emoji("🗑️"),
+                "Delete message",
+                false,
+            )
+            .clicked()
+        {
+            // Server `+draft/delete` names the edit-chain root.
+            let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
+            action = Some(MessageBubbleAction::Delete { msgid: delete_id });
+        }
+    });
+    action
+}
+
+/// Floating icon actions shown while the pointer hovers a message bubble.
+fn message_hover_actions(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    bubble_rect: Rect,
+    hover_id: Id,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    menu_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    if menu_open || (!can_react && !can_edit && !can_delete) {
+        return None;
+    }
+
+    let clipped = bubble_rect.intersect(ui.clip_rect());
+    if !clipped.is_positive() {
+        return None;
+    }
+
+    // Keep the toolbar visible while the pointer is over it (not only the bubble).
+    let over_toolbar = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(hover_id).unwrap_or(false));
+    let over_bubble = ui.rect_contains_pointer(clipped);
+    if !over_bubble && !over_toolbar {
+        ui.ctx().data_mut(|d| d.remove::<bool>(hover_id));
+        return None;
+    }
+
+    let pad = 4.0;
+    let btn = (th.type_scale.body * 1.35).max(22.0);
+    let n = [can_react, can_edit, can_delete]
+        .into_iter()
+        .filter(|v| *v)
+        .count() as f32;
+    let bar_w = n * btn + (n - 1.0).max(0.0) * 2.0 + pad * 2.0;
+    let bar_h = btn + pad * 2.0;
+    let mut pos = Pos2::new(bubble_rect.right() - bar_w - 4.0, bubble_rect.top() - bar_h * 0.45);
+    // Keep inside the current clip when possible.
+    let clip = ui.clip_rect();
+    pos.x = pos.x.clamp(clip.left() + 2.0, (clip.right() - bar_w - 2.0).max(clip.left() + 2.0));
+    pos.y = pos.y.clamp(clip.top() + 2.0, (clip.bottom() - bar_h - 2.0).max(clip.top() + 2.0));
+
+    let p = &th.palette;
+    let mut action = None;
+    let area = egui::Area::new(hover_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(pos)
+        .sense(Sense::hover())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(p.card_bg)
+                .stroke(Stroke::new(1.0_f32, p.border_soft))
+                .corner_radius(th.spacing.radius_md)
+                .inner_margin(egui::Margin::same(pad as i8))
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    action = message_action_icons(
+                        ui,
+                        th,
+                        can_react,
+                        can_edit,
+                        can_delete,
+                        react_picker_open,
+                        msg,
+                    );
+                });
+        });
+    let toolbar_hovered = area.response.hovered() || area.response.contains_pointer();
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(hover_id, toolbar_hovered));
+
+    action
+}
+
+/// Right-click / long-press menu for a message bubble: React, Edit, Delete icons.
 ///
 /// Uses raw secondary-button clicks (not [`Response::context_menu`]) so
 /// selectable body text's drag-sense cannot swallow the right-click.
 fn message_context_menu(
     ui: &mut egui::Ui,
+    th: &Theme,
     bubble_rect: Rect,
     menu_id: Id,
     body_long_touched: bool,
@@ -232,8 +427,9 @@ fn message_context_menu(
         .data(|d| d.get_temp::<MenuPos>(menu_id).map(|p| p.0))
         .unwrap_or_else(|| bubble_rect.left_top());
 
-    let mut action = MessageBubbleAction::None;
+    let mut action = None;
     let mut close = false;
+    let p = &th.palette;
 
     let popup = egui::Area::new(menu_id.with("area"))
         .kind(egui::UiKind::Popup)
@@ -241,41 +437,22 @@ fn message_context_menu(
         .fixed_pos(pos)
         .sense(Sense::click())
         .show(ui.ctx(), |ui| {
-            // Match egui's built-in menu styling.
-            ui.spacing_mut().button_padding = Vec2::new(2.0, 0.0);
-            ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-            ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
-            ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
-            ui.visuals_mut().widgets.active.bg_stroke = Stroke::NONE;
-
-            egui::Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_min_width(120.0);
-                ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
-                    if can_react && ui.button("React").clicked() {
-                        action = if react_picker_open {
-                            MessageBubbleAction::CloseReactPicker
-                        } else {
-                            MessageBubbleAction::OpenReactPicker {
-                                msgid: msg.id.clone(),
-                            }
-                        };
-                        close = true;
-                    }
-                    if can_edit && ui.button("Edit").clicked() {
-                        action = MessageBubbleAction::Edit {
-                            msgid: msg.id.clone(),
-                            text: msg.text.clone(),
-                        };
-                        close = true;
-                    }
-                    if can_delete && ui.button("Delete").clicked() {
-                        // Server `+draft/delete` names the edit-chain root.
-                        let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
-                        action = MessageBubbleAction::Delete { msgid: delete_id };
+            egui::Frame::menu(ui.style())
+                .fill(p.card_bg)
+                .show(ui, |ui| {
+                    if let Some(a) = message_action_icons(
+                        ui,
+                        th,
+                        can_react,
+                        can_edit,
+                        can_delete,
+                        react_picker_open,
+                        msg,
+                    ) {
+                        action = Some(a);
                         close = true;
                     }
                 });
-            });
         });
 
     let escape = ui.input(|i| i.key_pressed(Key::Escape));
@@ -288,17 +465,13 @@ fn message_context_menu(
         ui.ctx().data_mut(|d| d.remove::<MenuPos>(menu_id));
     }
 
-    if matches!(action, MessageBubbleAction::None) {
-        None
-    } else {
-        Some(action)
-    }
+    action
 }
 
 /// Message bubble / row in chat detail (with optional image / OG link embed).
 ///
-/// `react_picker_open` highlights the react control while the modal picker
-/// ([`react_picker_overlay`]) is open for this message.
+/// `react_picker_open` highlights the hover / menu react control while the
+/// modal picker ([`react_picker_overlay`]) is open for this message.
 pub fn message_bubble(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -370,30 +543,6 @@ pub fn message_bubble(
                         .strong(),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if can_react {
-                        let react_size = (th.type_scale.caption * 1.2).max(16.0);
-                        let react_color = if react_picker_open {
-                            p.accent
-                        } else {
-                            p.text_secondary
-                        };
-                        let (r, react_resp) =
-                            ui.allocate_exact_size(Vec2::splat(react_size + 4.0), Sense::click());
-                        paint_emoji_in(ui, r.shrink(2.0), "😂", react_color);
-                        let react_btn = react_resp
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text("Add reaction");
-                        if react_btn.clicked() {
-                            action = if react_picker_open {
-                                MessageBubbleAction::CloseReactPicker
-                            } else {
-                                MessageBubbleAction::OpenReactPicker {
-                                    msgid: msg.id.clone(),
-                                }
-                            };
-                        }
-                        ui.add_space(sp.xs);
-                    }
                     let mut meta = msg.time_label();
                     if msg.is_edited {
                         meta = format!("edited · {meta}");
@@ -406,8 +555,8 @@ pub fn message_bubble(
             });
             ui.add_space(sp.xs);
             // Sense on the body — URL tap opens browser; double-click heart.
-            // Context menu is handled on the whole bubble (below) so selectable
-            // text drag-sense can't swallow right-clicks.
+            // Hover / right-click action icons are handled on the whole bubble
+            // (below) so selectable text drag-sense can't swallow the clicks.
             let url_spans = preview::extract_url_spans(&body_text);
             let mut job = linkify_layout_job(&body_text, &url_spans, th);
             job.wrap.max_width = ui.available_width();
@@ -425,10 +574,10 @@ pub fn message_bubble(
             let tip = if let Some(url) = hovered_url.as_deref() {
                 url.to_string()
             } else if can_edit || can_delete {
-                "Select to copy · right-click / long-press for React, Edit, Delete".to_string()
+                "Select to copy · hover or right-click for React, Edit, Delete".to_string()
             } else if can_react {
                 let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                format!("Select to copy · double-click {heart} · right-click / long-press for React")
+                format!("Select to copy · double-click {heart} · hover or right-click for React")
             } else {
                 "Select to copy".into()
             };
@@ -476,12 +625,30 @@ pub fn message_bubble(
             }
         });
 
-    // Whole-bubble context menu (React / Edit / Delete). Uses raw secondary
-    // clicks so selectable body text doesn't eat the right-click.
+    // Hover icon toolbar + right-click / long-press icon menu (React / Edit /
+    // Delete). Uses raw secondary clicks so selectable body text doesn't eat
+    // the right-click.
+    let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
+    let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
+    if let Some(hover_action) = message_hover_actions(
+        ui,
+        th,
+        frame_resp.response.rect,
+        Id::new(("msg_hover", msg.id.as_str())),
+        can_react,
+        can_edit,
+        can_delete,
+        react_picker_open,
+        menu_open,
+        msg,
+    ) {
+        action = hover_action;
+    }
     if let Some(menu_action) = message_context_menu(
         ui,
+        th,
         frame_resp.response.rect,
-        Id::new(("msg_ctx", msg.id.as_str())),
+        menu_id,
         body_long_touched,
         can_react,
         can_edit,
