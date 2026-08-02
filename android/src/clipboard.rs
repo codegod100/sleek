@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use std::sync::{Mutex, OnceLock};
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
 
 use crate::state::ComposeImage;
 
@@ -11,6 +13,12 @@ use crate::state::ComposeImage;
 const MAX_DIM: u32 = 4096;
 /// Refuse raw RGBA pastes larger than this (~25 MP).
 const MAX_RGBA_BYTES: usize = 100_000_000;
+
+/// How long the UI thread will wait on a clipboard/image helper thread.
+/// Arboard/X11 conversion and file decode must never block egui's immediate
+/// mode loop — a stuck compositor previously froze paste for the whole app.
+#[cfg(not(target_os = "android"))]
+const CLIPBOARD_UI_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// Shared arboard handle (creating one per paste starts an X11 server thread).
 #[cfg(not(target_os = "android"))]
@@ -29,7 +37,8 @@ fn arboard_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
 /// Try to read an image from the system clipboard.
 ///
 /// Returns `None` when the clipboard has no image, the platform does not
-/// support image clipboard, or the read fails.
+/// support image clipboard, the read fails, or the read exceeds the UI
+/// timeout (so text paste can still proceed).
 pub fn try_get_image() -> Option<ComposeImage> {
     #[cfg(not(target_os = "android"))]
     {
@@ -44,22 +53,14 @@ pub fn try_get_image() -> Option<ComposeImage> {
 #[cfg(not(target_os = "android"))]
 fn try_get_image_desktop() -> Option<ComposeImage> {
     // 1) arboard (Wayland data-control when available, else X11 bridge).
-    if let Some(clip) = arboard_clipboard() {
-        if let Ok(mut guard) = clip.lock() {
-            match guard.get_image() {
-                Ok(img) => {
-                    if let Some(composed) = compose_from_arboard(img) {
-                        log::debug!(
-                            "clipboard image via arboard: {}x{}",
-                            composed.width,
-                            composed.height
-                        );
-                        return Some(composed);
-                    }
-                }
-                Err(e) => log::debug!("arboard get_image: {e}"),
-            }
-        }
+    //    Always off the UI thread — `get_image` can block on X11 conversion.
+    if let Some(img) = try_get_image_arboard_timed() {
+        log::debug!(
+            "clipboard image via arboard: {}x{}",
+            img.width,
+            img.height
+        );
+        return Some(img);
     }
 
     // 2) wl-paste: works on GNOME/Wayland even when arboard has no data-control.
@@ -80,8 +81,56 @@ fn try_get_image_desktop() -> Option<ComposeImage> {
     None
 }
 
+/// Owned RGBA snapshot from arboard (safe to move across threads).
 #[cfg(not(target_os = "android"))]
-fn compose_from_arboard(img: arboard::ImageData<'_>) -> Option<ComposeImage> {
+struct OwnedImage {
+    width: usize,
+    height: usize,
+    bytes: Vec<u8>,
+}
+
+#[cfg(not(target_os = "android"))]
+fn try_get_image_arboard_timed() -> Option<ComposeImage> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-clip-img".into())
+        .spawn(move || {
+            let result = (|| {
+                let clip = arboard_clipboard()?;
+                let mut guard = clip.lock().ok()?;
+                let img = guard.get_image().ok()?;
+                if img.width == 0 || img.height == 0 {
+                    return None;
+                }
+                let expected = img.width.checked_mul(img.height)?.checked_mul(4)?;
+                if img.bytes.len() < expected || expected > MAX_RGBA_BYTES {
+                    return None;
+                }
+                Some(OwnedImage {
+                    width: img.width,
+                    height: img.height,
+                    bytes: img.bytes.into_owned(),
+                })
+            })();
+            let _ = tx.send(result);
+        })
+        .ok()?;
+
+    match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
+        Ok(Some(owned)) => compose_from_owned(owned),
+        Ok(None) => None,
+        Err(_) => {
+            log::debug!(
+                "arboard get_image timed out after {}ms — leaving text paste alone",
+                CLIPBOARD_UI_TIMEOUT.as_millis()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn compose_from_owned(img: OwnedImage) -> Option<ComposeImage> {
     if img.width == 0 || img.height == 0 {
         return None;
     }
@@ -96,7 +145,7 @@ fn compose_from_arboard(img: arboard::ImageData<'_>) -> Option<ComposeImage> {
     Some(ComposeImage::from_rgba(
         img.width,
         img.height,
-        Arc::from(img.bytes.into_owned()),
+        Arc::from(img.bytes),
     ))
 }
 
@@ -140,12 +189,19 @@ fn try_get_image_wl_paste() -> Option<ComposeImage> {
 
 #[cfg(not(target_os = "android"))]
 fn wl_paste_list_types() -> Option<Vec<String>> {
-    let out = std::process::Command::new("wl-paste")
-        .args(["--list-types"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("wl-paste")
+            .args(["--list-types"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    let out = match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
+        Ok(Ok(out)) => out,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -173,7 +229,7 @@ fn wl_paste_bytes(mime: &str) -> Option<Vec<u8>> {
             .output();
         let _ = tx.send(out);
     });
-    let out = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+    let out = match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
         Ok(Ok(out)) => out,
         _ => return None,
     };
@@ -190,21 +246,44 @@ fn wl_paste_bytes(mime: &str) -> Option<Vec<u8>> {
 
 #[cfg(not(target_os = "android"))]
 fn try_get_image_from_uri_list() -> Option<ComposeImage> {
-    let clip = arboard_clipboard()?;
-    let mut guard = clip.lock().ok()?;
-    let paths = guard.get().file_list().ok()?;
-    for path in paths {
-        if is_likely_image_path(&path) {
-            match load_image_from_path(&path) {
-                Ok(img) => {
-                    log::debug!("clipboard image from file list: {}", path.display());
-                    return Some(img);
+    // Path list + decode off the UI thread (decode can take hundreds of ms).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-clip-uri".into())
+        .spawn(move || {
+            let result = (|| {
+                let clip = arboard_clipboard()?;
+                let mut guard = clip.lock().ok()?;
+                let paths = guard.get().file_list().ok()?;
+                for path in paths {
+                    if is_likely_image_path(&path) {
+                        match load_image_from_path(&path) {
+                            Ok(img) => {
+                                log::debug!("clipboard image from file list: {}", path.display());
+                                return Some(img);
+                            }
+                            Err(e) => log::debug!("clipboard file {}: {e}", path.display()),
+                        }
+                    }
                 }
-                Err(e) => log::debug!("clipboard file {}: {e}", path.display()),
-            }
+                None
+            })();
+            let _ = tx.send(result);
+        })
+        .ok()?;
+
+    // Decode can take >400ms for large photos; allow longer than raw clipboard I/O.
+    const URI_LIST_TIMEOUT: Duration = Duration::from_secs(2);
+    match rx.recv_timeout(URI_LIST_TIMEOUT) {
+        Ok(img) => img,
+        Err(_) => {
+            log::debug!(
+                "clipboard file-list image timed out after {}ms",
+                URI_LIST_TIMEOUT.as_millis()
+            );
+            None
         }
     }
-    None
 }
 
 fn is_likely_image_path(path: &Path) -> bool {
@@ -334,4 +413,18 @@ pub fn encode_png(image: &ComposeImage) -> Result<Vec<u8>, String> {
         )
         .map_err(|e| format!("PNG encode failed: {e}"))?;
     Ok(buf)
+}
+
+/// Encode on a worker thread so large pastes cannot freeze the egui frame.
+pub fn start_encode_png(
+    image: ComposeImage,
+) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-png-encode".into())
+        .spawn(move || {
+            let _ = tx.send(encode_png(&image));
+        })
+        .expect("spawn png encode thread");
+    rx
 }

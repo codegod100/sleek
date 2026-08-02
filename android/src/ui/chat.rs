@@ -822,24 +822,30 @@ fn compose_image_composer(
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if uploading {
                         ui.spinner();
-                    } else {
-                        let dismiss = ui
-                            .add_sized(
-                                Vec2::splat(28.0),
-                                egui::Button::new(
-                                    RichText::new("✕")
-                                        .size(14.0)
-                                        .color(p.text_secondary),
-                                )
-                                .fill(p.button_bg)
-                                .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
-                                .corner_radius(sp.radius_sm),
+                        ui.add_space(sp.xs);
+                    }
+                    // Always allow dismiss/cancel — a stuck upload used to leave
+                    // the compose bar non-interactive (no paste, no ✕) until restart.
+                    let dismiss = ui
+                        .add_sized(
+                            Vec2::splat(28.0),
+                            egui::Button::new(
+                                RichText::new("✕")
+                                    .size(14.0)
+                                    .color(p.text_secondary),
                             )
-                            .on_hover_text("Remove image")
-                            .on_hover_cursor(CursorIcon::PointingHand);
-                        if dismiss.clicked() {
-                            clear = true;
-                        }
+                            .fill(p.button_bg)
+                            .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
+                            .corner_radius(sp.radius_sm),
+                        )
+                        .on_hover_text(if uploading {
+                            "Cancel upload"
+                        } else {
+                            "Remove image"
+                        })
+                        .on_hover_cursor(CursorIcon::PointingHand);
+                    if dismiss.clicked() {
+                        clear = true;
                     }
                 });
             });
@@ -855,6 +861,8 @@ fn compose_image_composer(
     } else {
         "Replace image (or paste with Ctrl+V)"
     };
+    // Keep the caption field interactive during upload so Ctrl+V / typing are
+    // never wedged by a slow encode or hung HTTP — only Submit is gated.
     let (resp, attach_clicked, send_clicked) = compose_input_row(
         ui,
         th,
@@ -863,13 +871,13 @@ fn compose_image_composer(
         "Submit",
         80.0,
         attach_tip,
-        !uploading,
+        true,
         compose_id,
     );
     if attach_clicked && !uploading && !pick_busy {
         state.start_file_pick();
     }
-    if state.focus_compose && !uploading {
+    if state.focus_compose {
         resp.request_focus();
         state.focus_compose = false;
     }
@@ -881,7 +889,12 @@ fn compose_image_composer(
     }
 
     if clear {
-        state.compose_image = None;
+        if uploading {
+            // Unlock compose; keep the thumb so Submit can retry.
+            state.cancel_compose_upload();
+        } else {
+            state.clear_compose_image();
+        }
     }
 
     if submit {
@@ -1210,7 +1223,13 @@ fn try_nick_tab_complete(
 /// vendored patch re-emits `Key::V` when text is missing so image paste works.
 /// When both text and image are present, a `Paste` event arrives — we prefer
 /// the image and strip the text paste for this frame.
+///
+/// Clipboard image reads run with a short timeout off the UI thread (see
+/// [`clipboard::try_get_image`]) so a stuck X11/Wayland conversion cannot
+/// freeze egui's immediate-mode loop.
 fn try_paste_compose_image(ui: &mut egui::Ui, state: &mut AppState) {
+    // Don't replace the attachment mid-upload; text paste still reaches the
+    // interactive caption field via `Event::Paste`.
     if state.compose_uploading {
         return;
     }
