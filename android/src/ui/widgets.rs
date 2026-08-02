@@ -4,7 +4,9 @@ use eframe::egui::{
     self, text::LayoutJob, text::TextFormat, Align, Align2, Color32, CursorIcon, FontId, Id, Key,
     Layout, Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
-use vidya::{dim_label, icon_colored, paint_emoji_in, paint_icon_in, title_2, Icon, Theme};
+use vidya::{
+    dim_label, icon_colored, paint_emoji_in, paint_icon_in, system_chrome, title_2, Icon, Theme,
+};
 
 use crate::preview::{self, Embed, UrlSpan};
 use crate::state::{
@@ -1554,6 +1556,11 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
         _ => None,
     };
 
+    // Area paints over the full screen (including under system bars). Pad
+    // chrome / image by measured status + nav insets so Close / View original
+    // clear the Android clock / cutout and the image clears the gesture bar.
+    let safe = system_chrome(ctx);
+
     egui::Area::new(egui::Id::new("image_lightbox"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
@@ -1563,18 +1570,21 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
             ui.painter()
                 .rect_filled(full, 0.0, Color32::from_black_alpha(220));
 
-            // Top chrome: Close (left) + View original (right).
+            // Top chrome: Close (left) + View original (right), below status bar.
             let chrome_h = (sp.control_height + sp.md * 2.0).max(48.0);
             let chrome = egui::Rect::from_min_size(
-                full.min + Vec2::new(sp.md, sp.md),
+                full.min + Vec2::new(sp.md, safe.top + sp.md),
                 Vec2::new((full.width() - sp.md * 2.0).max(1.0), chrome_h),
             );
 
-            // Image area: remaining viewport below chrome, with padding.
+            // Image area: remaining viewport below chrome, with padding + nav inset.
             let img_pad = sp.md;
             let img_area = egui::Rect::from_min_max(
                 egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
-                egui::pos2(full.right() - img_pad, full.bottom() - img_pad),
+                egui::pos2(
+                    full.right() - img_pad,
+                    full.bottom() - img_pad - safe.bottom,
+                ),
             );
 
             let mut hit_chrome = false;
