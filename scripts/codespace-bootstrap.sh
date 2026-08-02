@@ -463,6 +463,15 @@ if [[ "${SLEEK_SKIP_CACHIX:-}" != "1" ]]; then
   configure_cachix_push || true
 fi
 
+# ── GitHub CLI: prefer PAT from OpenBao over Cursor integration token ─
+# Store with: OPENBAO_TOKEN=… ./scripts/openbao-put-key.sh GH_TOKEN --from-gh
+if [[ -n "${OPENBAO_TOKEN:-}" && "${SLEEK_SKIP_GH_OPENBAO:-}" != "1" ]]; then
+  if [[ -x "$ROOT/scripts/configure-gh-from-openbao.sh" ]]; then
+    log "configuring gh from OpenBao GH_TOKEN…"
+    bash "$ROOT/scripts/configure-gh-from-openbao.sh" || log "gh OpenBao configure skipped/failed (optional)"
+  fi
+fi
+
 # Apply mode for this process
 if [[ -S "$SOCKET" ]] && nix store ping --store daemon >/dev/null 2>&1; then
   export NIX_REMOTE=daemon
