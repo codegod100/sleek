@@ -31,6 +31,14 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 body(ui, th, "Bluesky handle");
                 ui.add_space(sp.xs);
                 handle_field(ui, th, state, loading);
+                if !state.handle_typeahead.open && !state.recent_handles.is_empty() {
+                    ui.add_space(sp.xs);
+                    let handles = state.recent_handles.clone();
+                    history_chips(ui, th, "Recent", &handles, |picked| {
+                        state.form_handle = picked;
+                        state.handle_typeahead.dismiss();
+                    });
+                }
                 ui.add_space(sp.md);
 
                 if let Some(err) = &state.error {
@@ -109,6 +117,13 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 body(ui, th, "Nickname");
                 ui.add_space(sp.xs);
                 let _ = text_field_singleline(ui, th, &mut state.form_nick);
+                if !state.recent_nicks.is_empty() {
+                    ui.add_space(sp.xs);
+                    let nicks = state.recent_nicks.clone();
+                    history_chips(ui, th, "Recent", &nicks, |picked| {
+                        state.form_nick = picked;
+                    });
+                }
                 if state.has_saved_guest() {
                     ui.add_space(sp.xs);
                     dim_label(ui, th, "Saved guest — reconnects on next launch.");
@@ -182,6 +197,42 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
     });
 
     action
+}
+
+/// Clickable MRU chips under a connect-form field (recent nicks / handles).
+fn history_chips(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    label: &str,
+    items: &[String],
+    mut on_pick: impl FnMut(String),
+) {
+    if items.is_empty() {
+        return;
+    }
+    let sp = &th.spacing;
+    let p = &th.palette;
+    dim_label(ui, th, label);
+    ui.add_space(sp.xs);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(sp.xs, sp.xs);
+        for item in items.iter().take(8) {
+            let resp = ui.add(
+                egui::Button::new(
+                    RichText::new(item)
+                        .size(th.type_scale.caption)
+                        .color(p.text),
+                )
+                .fill(p.button_bg)
+                .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
+                .corner_radius(sp.radius_sm)
+                .min_size(Vec2::new(0.0, sp.control_height * 0.75)),
+            );
+            if resp.clicked() {
+                on_pick(item.clone());
+            }
+        }
+    });
 }
 
 /// Handle text field + AppView typeahead suggestions (debounced in `App`).
