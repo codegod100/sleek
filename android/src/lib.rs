@@ -7,6 +7,7 @@ mod av_media;
 mod clipboard;
 mod net;
 mod preview;
+mod reconnect;
 mod slash;
 mod state;
 mod ui;

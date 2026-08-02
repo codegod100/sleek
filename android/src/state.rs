@@ -1029,6 +1029,13 @@ pub struct AppState {
     /// Recently visited channels (MRU first). Persisted in prefs.json and
     /// auto-rejoined on connect — server membership restore is unreliable.
     pub recent_channels: Vec<String>,
+
+    /// User clicked Disconnect / Cancel / Logout — do not auto-reconnect.
+    pub intentional_disconnect: bool,
+    /// Consecutive unexpected disconnect / failed-reconnect attempts.
+    pub reconnect_attempts: u32,
+    /// When set, fire auto-reconnect once `Instant::now() >=` this deadline.
+    pub reconnect_at: Option<Instant>,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -1136,6 +1143,9 @@ impl AppState {
             av_show_devices: false,
             av_video_height: 220.0,
             recent_channels: normalize_recent_channels(prefs.recent_channels),
+            intentional_disconnect: false,
+            reconnect_attempts: 0,
+            reconnect_at: None,
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -1802,6 +1812,7 @@ impl AppState {
     pub fn clear_session(&mut self) {
         self.connection = ConnectionState::Disconnected;
         self.awaiting_oauth = false;
+        self.cancel_auto_reconnect();
         // Keep did / broker_token so reconnect can re-auth; use clear_auth for logout.
         self.channels.clear();
         self.channel_order.clear();
@@ -1822,6 +1833,29 @@ impl AppState {
         self.local_call = None;
         self.clear_av_media();
         self.status_line = "Disconnected".into();
+    }
+
+    /// Soft disconnect for unexpected EOF / ping timeout: keep chat buffers so
+    /// auto-reconnect can restore without wiping the conversation view.
+    pub fn mark_disconnected_for_reconnect(&mut self, reason: &str) {
+        self.connection = ConnectionState::Disconnected;
+        self.awaiting_oauth = false;
+        self.local_call = None;
+        self.clear_av_media();
+        self.status_line = format!("Disconnected: {reason}");
+    }
+
+    pub fn cancel_auto_reconnect(&mut self) {
+        self.reconnect_at = None;
+        self.reconnect_attempts = 0;
+    }
+
+    /// Schedule the next auto-reconnect attempt (exponential backoff).
+    pub fn schedule_auto_reconnect(&mut self) {
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        let delay = crate::reconnect::delay_secs(self.reconnect_attempts);
+        self.reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+        self.status_line = format!("Reconnecting in {delay}s…");
     }
 
     /// Drop MoQ video store, textures, mic meter, and focus (call ended or media stopped).

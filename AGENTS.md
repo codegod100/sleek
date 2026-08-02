@@ -56,3 +56,17 @@ Launch the host, click **Continue as guest** (defaults: nick `sleekXXXX`, server
 `irc.freeq.at:6697` TLS), which auto-joins `#general` and `#test`; then open a
 channel and send a message. Outbound network to `irc.freeq.at` works in this
 environment.
+
+### Secrets (OpenBao)
+Cursor env secret `OPENBAO_TOKEN` unlocks `https://openbao.boxd.sh` (KV
+`secret/data/ai-api-keys`). Bootstrap runs `scripts/configure-gh-from-openbao.sh`
+when `GH_TOKEN` is present there so `gh` uses a real PAT instead of the limited
+Cursor integration token (needed for Actions secrets, etc.).
+
+```bash
+# One-time, from a machine already logged into gh:
+export OPENBAO_TOKEN=…   # or use Cursor env
+./scripts/openbao-put-key.sh GH_TOKEN --from-gh
+./scripts/configure-gh-from-openbao.sh
+printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
+```
