@@ -1,21 +1,145 @@
-# Probe: microvm+nixos without nixpkgs.nix dependency
+# Spindle CI: build phone APK + desktop Flatpak on new commits.
+#
+# Engine: microvm + nixos (guest already has `nix`). Do NOT add nixpkgs.nix
+# as a nixery dependency — that fails setup on this spindle with no logs.
+#
+#   nix build .#android  → result-android/sleek.apk
+#   nix build .#flatpak  → result-flatpak/uk.nandi.sleek.flatpak
+#
+# On main push/manual (not PRs): force-move annotated tag `dev` and republish
+# Tangled assets (needs DEPLOY_KEY + ATP_APP_PASSWORD secrets).
+#
+# Raise spindle workflow timeout for cold builds (hosted default ~5m).
+
 when:
   - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
     branch: ["main"]
 
 engine: microvm
 image: nixos
 
+clone:
+  skip: false
+  depth: 1
+  submodules: false
+
 dependencies:
   - git
-  - hello
+  - cachix
+  - openssh
+  - curl
+  - jq
+  - xxd
+  - file
+
+caches:
+  https://codegod100.cachix.org: "codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA="
+
+environment:
+  DEV_TAG: "dev"
 
 steps:
-  - name: "Probe"
+  - name: "Build Android APK"
     command: |
-      set -euxo pipefail
-      echo "kind=$TANGLED_PIPELINE_KIND sha=${TANGLED_SHA:-n/a}"
-      hello
-      command -v nix
+      set -euo pipefail
+      export NIX_CONFIG="experimental-features = nix-command flakes
+      accept-flake-config = true"
+      echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
       nix --version
-      echo OK
+      nix build .#android -L --out-link result-android
+      test -f result-android/sleek.apk
+      test -s result-android/sleek.apk
+      file result-android/sleek.apk
+      ls -lah result-android/
+
+  - name: "Build Flatpak bundle"
+    command: |
+      set -euo pipefail
+      export NIX_CONFIG="experimental-features = nix-command flakes
+      accept-flake-config = true"
+      nix build .#flatpak -L --out-link result-flatpak
+      test -f result-flatpak/uk.nandi.sleek.flatpak
+      test -s result-flatpak/uk.nandi.sleek.flatpak
+      file result-flatpak/uk.nandi.sleek.flatpak
+      ls -lah result-flatpak/
+      cat result-flatpak/build-info.json
+
+  - name: "Push to Cachix"
+    command: |
+      set -euo pipefail
+      if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+        echo "CACHIX_AUTH_TOKEN unset — skip"
+        exit 0
+      fi
+      CACHE="${CACHIX_CACHE:-codegod100}"
+      cachix authtoken "$CACHIX_AUTH_TOKEN"
+      cachix push "$CACHE" ./result-android ./result-flatpak
+
+  - name: "Cut / move annotated tag dev"
+    command: |
+      set -euo pipefail
+      if [[ "${TANGLED_PIPELINE_KIND:-}" == "pull_request" ]]; then
+        echo "PR — skip tagging"; exit 0
+      fi
+      if [[ -z "${DEPLOY_KEY:-}" ]]; then
+        echo "DEPLOY_KEY unset — skip"; exit 0
+      fi
+      SHA="${TANGLED_SHA:-$(git rev-parse HEAD)}"
+      TAG="${DEV_TAG:-dev}"
+      git config user.name "Tangled CI"
+      git config user.email "ci@tangled.org"
+      git tag -fa "$TAG" -m "dev build ${SHA}" "$SHA"
+      mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+      KEY="$HOME/.ssh/tangled_deploy"
+      printf '%s\n' "$DEPLOY_KEY" > "$KEY" && chmod 600 "$KEY"
+      ssh-keyscan -t rsa,ed25519,ecdsa "${TANGLED_REPO_KNOT}" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+      git remote set-url origin "git@${TANGLED_REPO_KNOT}:${TANGLED_REPO_DID}/${TANGLED_REPO_NAME}"
+      GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+        git push --force -o skip-ci origin "refs/tags/${TAG}"
+      rm -f "$KEY"
+      echo "ok: tag ${TAG} → ${SHA}"
+
+  - name: "Publish Tangled assets on dev"
+    command: |
+      set -euo pipefail
+      if [[ "${TANGLED_PIPELINE_KIND:-}" == "pull_request" ]]; then
+        echo "PR — skip assets"; exit 0
+      fi
+      if [[ -z "${ATP_APP_PASSWORD:-}" ]]; then
+        echo "ATP_APP_PASSWORD unset — skip"; exit 0
+      fi
+      TAG="${DEV_TAG:-dev}"
+      git rev-parse "$TAG^{tag}" >/dev/null
+      PDS="${ATP_PDS:-https://bsky.social}"
+      IDENTIFIER="${ATP_IDENTIFIER:-nandi.uk}"
+      session=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.server.createSession" \
+        -H "Content-Type: application/json" \
+        -d "{\"identifier\":\"$IDENTIFIER\",\"password\":\"$ATP_APP_PASSWORD\"}")
+      jwt=$(echo "$session" | jq -r .accessJwt)
+      did=$(echo "$session" | jq -r .did)
+      tag_bytes=$(printf '%s' "$(git rev-parse "$TAG^{tag}")" | xxd -r -p | base64 | tr -d '=')
+      created="$(date -Iseconds)"
+      publish() {
+        local path="$1" name="$2" rkey="$3" ctype="$4"
+        blob=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.uploadBlob" \
+          -H "Authorization: Bearer $jwt" -H "Content-Type: $ctype" \
+          --data-binary @"$path")
+        record=$(jq -n \
+          --arg did "$did" --arg rkey "$rkey" --arg tag "$tag_bytes" \
+          --arg name "$name" --arg repo "$TANGLED_REPO_URL" --arg created "$created" \
+          --argjson blob "$(echo "$blob" | jq .blob)" '{
+            repo:$did, collection:"sh.tangled.repo.artifact", rkey:$rkey, validate:false,
+            record:{ "$type":"sh.tangled.repo.artifact", tag:{"$bytes":$tag},
+              name:$name, repo:$repo, artifact:$blob, createdAt:$created }
+          }')
+        curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.putRecord" \
+          -H "Authorization: Bearer $jwt" -H "Content-Type: application/json" \
+          -d "$record" | jq -c '{uri,cid}'
+      }
+      publish result-android/sleek.apk "sleek.apk" "dev-sleek-apk" \
+        "application/vnd.android.package-archive"
+      publish result-flatpak/uk.nandi.sleek.flatpak "uk.nandi.sleek.flatpak" \
+        "dev-sleek-flatpak" "application/octet-stream"
+      echo "ok: assets on ${TAG}"
