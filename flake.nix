@@ -134,6 +134,7 @@
                 ".github"
                 ".devcontainer"
                 ".jj"
+                ".cargo"
                 "docs"
                 "README.md"
                 "AGENTS.md"
@@ -224,9 +225,6 @@
                 makeWrapper
                 copyDesktopItems
                 removeReferencesTo
-                # .cargo/config.toml uses clang -fuse-ld=mold for linux-gnu targets.
-                clang
-                mold
               ]
               ++ buildLibs;
               buildInputs = libs;
@@ -803,8 +801,7 @@ PY
                 rust
                 pkgs.pkg-config
                 pkgs.llvmPackages.libclang
-                # Match .cargo/config.toml (clang -fuse-ld=mold).
-                pkgs.clang
+                # .cargo/config.toml requests -fuse-ld=mold (default `cc` driver).
                 pkgs.mold
               ];
               text = ''
@@ -948,10 +945,8 @@ PY
                 pkgs.cargo-apk
                 pkgs.cachix
                 pkgs.openssl
-                # Faster linking for .cargo/config.toml (-fuse-ld=mold).
-                # clang is already pulled in via llvmPackages.libclang (buildLibs).
+                # Faster linking for in-tree .cargo/config.toml (-fuse-ld=mold).
                 pkgs.mold
-                pkgs.clang
               ]
               ++ buildLibs
               ++ cliTools;
