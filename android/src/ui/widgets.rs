@@ -9,8 +9,7 @@ use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
 use crate::preview::{self, Embed, UrlSpan};
 use crate::state::{
     display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
-    ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
-    QUICK_REACT_EMOJIS,
+    ImageState, LinkMeta, LinkState, MediaCache, EMOJI_SEARCH_LIMIT, QUICK_REACT_EMOJIS,
 };
 
 /// Interaction from a chat message bubble.
@@ -307,8 +306,10 @@ pub fn message_bubble(
                 });
             });
             ui.add_space(sp.xs);
-            // Sense on the body — URL tap opens browser; double-click heart;
-            // right-click / long-press opens the context menu.
+            // Sense on the body — drag to select (+ Ctrl/Cmd+C); URL tap opens
+            // browser; right-click / long-press opens the context menu.
+            // Selection replaces double-click-to-react (word-select owns that
+            // gesture); react remains via the header button / context menu.
             let url_spans = preview::extract_url_spans(&body_text);
             let mut job = linkify_layout_job(&body_text, &url_spans, th);
             job.wrap.max_width = ui.available_width();
@@ -316,7 +317,7 @@ pub fn message_bubble(
             let body_resp = ui.add(
                 egui::Label::new(egui::WidgetText::Galley(galley.clone()))
                     .sense(Sense::click())
-                    .selectable(false),
+                    .selectable(true),
             );
             let galley_origin = body_resp.rect.min;
             let hovered_url = body_resp.hover_pos().and_then(|pos| {
@@ -325,37 +326,24 @@ pub fn message_bubble(
             let tip = if let Some(url) = hovered_url.as_deref() {
                 url.to_string()
             } else if can_edit || can_delete {
-                "Right-click / long-press for edit, delete, react".to_string()
+                "Drag to select · right-click / long-press for edit, delete, react".to_string()
             } else if can_react {
-                let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                format!("Double-click {heart} · right-click / long-press for more")
+                "Drag to select · right-click / long-press for react / copy".into()
             } else {
-                "Right-click / long-press to copy".into()
+                "Drag to select · right-click / long-press to copy".into()
             };
             let mut body_resp = body_resp.on_hover_text(tip);
             if hovered_url.is_some() {
                 body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
             }
-            let mut opened_link = false;
             if body_resp.clicked() {
                 if let Some(pos) = body_resp.interact_pointer_pos() {
                     if let Some(url) =
                         url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
                     {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                        opened_link = true;
                     }
                 }
-            }
-            if can_react
-                && !opened_link
-                && matches!(action, MessageBubbleAction::None)
-                && body_resp.double_clicked()
-            {
-                action = MessageBubbleAction::ToggleReaction {
-                    msgid: msg.id.clone(),
-                    emoji: DEFAULT_REACT_EMOJI.to_string(),
-                };
             }
             body_resp.context_menu(|ui| {
                 if can_react {
