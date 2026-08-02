@@ -344,7 +344,6 @@
             # GNOME Platform indexes ship with nix2flatpak; includes Freedesktop base.
             runtime = "org.gnome.Platform/49";
             command = "sleek";
-            icon = ./assets/uk.nandi.sleek.svg;
             appdata = ./assets/uk.nandi.sleek.metainfo.xml;
             desktopFile = ./assets/uk.nandi.sleek.desktop;
             permissions = {
