@@ -1,6 +1,11 @@
-# Probe: android dry-run (eval + fetch plan, no compile)
+# Install .#flatpak from binary cache (no local compile).
+# Hosted Spindle OOMs/kills real nix builds ~3m with no logs.
+# Warm the cache first:  nix build .#flatpak && cachix push codegod100 ./result-flatpak
+
 when:
   - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
     branch: ["main"]
 
 engine: microvm
@@ -10,10 +15,20 @@ dependencies:
   - git
 
 steps:
-  - name: "Android dry-run"
+  - name: "Substitute Flatpak from cache"
     command: |
-      set -euxo pipefail
+      set -euo pipefail
       export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true"
-      nix build .#android --dry-run 2>&1 | tee /tmp/android-dry.log | tail -n 50
-      echo OK
+      accept-flake-config = true
+      max-jobs = 0"
+      echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
+      nix --version
+      if ! nix build .#flatpak --out-link result-flatpak; then
+        echo "error: .#flatpak not substitutable. Build+push elsewhere:" >&2
+        echo "  nix build .#flatpak --out-link result-flatpak" >&2
+        echo "  cachix push codegod100 ./result-flatpak" >&2
+        exit 1
+      fi
+      test -s result-flatpak/uk.nandi.sleek.flatpak
+      ls -lah result-flatpak/
+      cat result-flatpak/build-info.json

@@ -1,6 +1,11 @@
-# Probe: can microvm complete a real nix build (.#sleek desktop)?
+# Install .#android from binary cache (no local compile).
+# Hosted Spindle OOMs/kills real nix builds ~3m with no logs.
+# Warm the cache first:  nix build .#android && cachix push codegod100 ./result-android
+
 when:
   - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
     branch: ["main"]
 
 engine: microvm
@@ -10,20 +15,20 @@ dependencies:
   - git
 
 steps:
-  - name: "Flake check"
-    command: |
-      set -euxo pipefail
-      export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true"
-      nix eval .#packages.x86_64-linux.sleek.name --no-write-lock-file
-
-  - name: "Build desktop sleek"
+  - name: "Substitute APK from cache"
     command: |
       set -euo pipefail
       export NIX_CONFIG="experimental-features = nix-command flakes
-      accept-flake-config = true"
-      set -o pipefail
-      nix build .#sleek --out-link result-sleek 2>&1 | tee /tmp/sleek-build.log
-      test -x result-sleek/bin/sleek
-      ls -lah result-sleek/bin/
-      echo OK
+      accept-flake-config = true
+      max-jobs = 0"
+      echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
+      nix --version
+      # max-jobs=0 → download only; fail fast if not in codegod100/cache.nixos.org
+      if ! nix build .#android --out-link result-android; then
+        echo "error: .#android not substitutable. Build+push elsewhere:" >&2
+        echo "  nix build .#android --out-link result-android" >&2
+        echo "  cachix push codegod100 ./result-android" >&2
+        exit 1
+      fi
+      test -s result-android/sleek.apk
+      ls -lah result-android/
