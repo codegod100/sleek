@@ -365,18 +365,29 @@
               echo "  linker=$CC_aarch64_linux_android" >&2
 
               pushd sleek/android >/dev/null
-              # cargo-apk rejects workspaces unless a package is selected (-p).
+              # cargo-apk rejects multi-member workspaces unless a package is selected (-p).
               # --release: optimized, no debuginfo — APK stays installable size.
-              # Inject release signing (path is absolute; not committed to Cargo.toml).
+              # Inject release signing before [patch] (path is absolute; not committed).
               if ! grep -q 'signing.release' Cargo.toml; then
-                cat >> Cargo.toml <<EOF
-
+                python3 - "$keystore" <<'PY'
+import pathlib, sys
+keystore = sys.argv[1]
+path = pathlib.Path("Cargo.toml")
+text = path.read_text()
+block = f"""
 [package.metadata.android.signing.release]
-path = "$keystore"
+path = "{keystore}"
 keystore_password = "android"
 key_alias = "androiddebugkey"
 key_password = "android"
-EOF
+"""
+marker = "[patch.crates-io]"
+if marker in text:
+    text = text.replace(marker, block + "\n" + marker, 1)
+else:
+    text = text + block
+path.write_text(text)
+PY
               fi
               cargo apk build --release --target ${androidTarget} -p sleek --lib
 
