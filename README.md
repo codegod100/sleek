@@ -64,15 +64,17 @@ nix run .#install-android -- --launch
 just push ./result-android
 ```
 
-### Cachix (Codespaces)
+### Cachix
 
 Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
 
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
+On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes the resulting store paths to the same cache. Set `CACHIX_AUTH_TOKEN` as a **GitHub Actions** repository secret (in addition to Codespaces, if you use that).
+
 | Secret / env | Purpose |
 |--------------|---------|
-| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) |
+| `CACHIX_AUTH_TOKEN` | Write token ([cachix.org](https://app.cachix.org) → codegod100 → Auth tokens) — Codespaces + Actions |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
 | `SLEEK_SKIP_CACHIX=1` | Skip Cachix setup in bootstrap |
