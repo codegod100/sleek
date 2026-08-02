@@ -400,19 +400,30 @@ impl SleekApp {
                 self.state.awaiting_oauth = false;
                 self.apply_auth_tokens(tokens, /*connect=*/ true);
             }
-            NetEvent::UploadFinished { error, sent } => {
-                self.state.compose_uploading = false;
-                if let Some(err) = error {
-                    self.state.error = Some(err.clone());
-                    self.state.show_toast(err);
-                    // Keep compose_image so the user can retry Send.
-                } else {
-                    self.state.compose_image = None;
-                    self.state.compose.clear();
-                    self.state.compose_nick_tab.clear();
-                    self.state.show_toast("Image sent");
-                    if let Some(media) = sent {
-                        self.do_send_local_echo(&media.target, media.text);
+            NetEvent::UploadFinished {
+                upload_id,
+                error,
+                sent,
+            } => {
+                // Ignore finishes from a cancelled / superseded upload so Cancel
+                // (or a watchdog unlock) cannot wipe a newer compose draft.
+                if upload_id == self.state.compose_upload_id {
+                    self.state.compose_uploading = false;
+                    self.state.compose_upload_started = None;
+                    self.state.compose_encode_rx = None;
+                    self.state.compose_encode_meta = None;
+                    if let Some(err) = error {
+                        self.state.error = Some(err.clone());
+                        self.state.show_toast(err);
+                        // Keep compose_image so the user can retry Send.
+                    } else {
+                        self.state.compose_image = None;
+                        self.state.compose.clear();
+                        self.state.compose_nick_tab.clear();
+                        self.state.show_toast("Image sent");
+                        if let Some(media) = sent {
+                            self.do_send_local_echo(&media.target, media.text);
+                        }
                     }
                 }
             }
@@ -1850,24 +1861,68 @@ impl SleekApp {
             return;
         }
 
-        let bytes = match clipboard::encode_png(&img) {
-            Ok(b) => b,
-            Err(e) => {
-                self.state.show_toast(e);
-                return;
-            }
-        };
-
+        // PNG encode on a worker — large pastes used to freeze the egui frame
+        // (immediate-mode loop) before the upload even started.
+        self.state.compose_upload_id = self.state.compose_upload_id.wrapping_add(1);
+        let upload_id = self.state.compose_upload_id;
         self.state.compose_uploading = true;
-        self.state.show_toast("Uploading image…");
-        self.net.send(NetCmd::UploadAndSend {
+        self.state.compose_upload_started = Some(std::time::Instant::now());
+        self.state.compose_encode_meta = Some(crate::state::ComposeEncodeMeta {
+            upload_id,
             target,
             caption,
-            bytes,
-            content_type: "image/png".into(),
             did,
             api_base: api_base_for_server(&self.state.server),
         });
+        self.state.compose_encode_rx = Some(clipboard::start_encode_png(img));
+        self.state.show_toast("Uploading image…");
+    }
+
+    /// Drain background PNG encode → `UploadAndSend`. Keeps the UI thread free.
+    fn poll_compose_encode(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.state.compose_encode_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(bytes)) => {
+                let meta = self.state.compose_encode_meta.take();
+                self.state.compose_encode_rx = None;
+                let Some(meta) = meta else {
+                    return;
+                };
+                if meta.upload_id != self.state.compose_upload_id {
+                    return;
+                }
+                self.net.send(NetCmd::UploadAndSend {
+                    upload_id: meta.upload_id,
+                    target: meta.target,
+                    caption: meta.caption,
+                    bytes,
+                    content_type: "image/png".into(),
+                    did: meta.did,
+                    api_base: meta.api_base,
+                });
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.state.compose_encode_rx = None;
+                self.state.compose_encode_meta = None;
+                self.state.compose_uploading = false;
+                self.state.compose_upload_started = None;
+                self.state.show_toast(e);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.state.compose_encode_rx = None;
+                self.state.compose_encode_meta = None;
+                self.state.compose_uploading = false;
+                self.state.compose_upload_started = None;
+                self.state
+                    .show_toast("Image encode failed unexpectedly".to_string());
+            }
+        }
     }
 
     fn do_send_local_echo(&mut self, target: &str, text: String) {
@@ -2082,6 +2137,10 @@ impl eframe::App for SleekApp {
         self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
+        self.poll_compose_encode(ctx);
+        if self.state.tick_compose_upload() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         self.poll_oauth_deep_link(ctx);
 
         let th = self.theme();

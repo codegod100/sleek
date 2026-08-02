@@ -695,6 +695,16 @@ pub enum ConnectMode {
     Guest,
 }
 
+/// Params captured when starting a background PNG encode for upload.
+#[derive(Debug, Clone)]
+pub struct ComposeEncodeMeta {
+    pub upload_id: u64,
+    pub target: String,
+    pub caption: String,
+    pub did: String,
+    pub api_base: String,
+}
+
 /// Image attached to the compose bar (clipboard paste).
 #[derive(Clone)]
 pub struct ComposeImage {
@@ -940,6 +950,14 @@ pub struct AppState {
     pub compose_image: Option<ComposeImage>,
     /// True while a pasted image is uploading to freeq.
     pub compose_uploading: bool,
+    /// Monotonic id for the in-flight compose upload (cancel / stale finish).
+    pub compose_upload_id: u64,
+    /// When the current upload (or PNG encode) started — watchdog unlock.
+    pub compose_upload_started: Option<Instant>,
+    /// Background PNG encode for the in-flight upload (keeps egui unblocked).
+    pub compose_encode_rx: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    /// Captured when encode started; used to dispatch [`crate::net::NetCmd::UploadAndSend`].
+    pub compose_encode_meta: Option<ComposeEncodeMeta>,
     /// One-shot: focus the compose / caption TextEdit next frame (after attach).
     pub focus_compose: bool,
     /// Tab-cycle state for compose nick completion (IRC-style).
@@ -1103,6 +1121,10 @@ impl AppState {
             compose: String::new(),
             compose_image: None,
             compose_uploading: false,
+            compose_upload_id: 0,
+            compose_upload_started: None,
+            compose_encode_rx: None,
+            compose_encode_meta: None,
             focus_compose: false,
             compose_nick_tab: NickTabComplete::default(),
             file_pick_rx: None,
@@ -1260,6 +1282,23 @@ impl AppState {
         self.file_pick_started = None;
     }
 
+    /// Drop in-flight upload/encode UI lock (Cancel or watchdog). Does not stop
+    /// the network request; a late finish with a stale `upload_id` is ignored.
+    pub fn cancel_compose_upload(&mut self) {
+        self.compose_uploading = false;
+        self.compose_upload_started = None;
+        self.compose_encode_rx = None;
+        self.compose_encode_meta = None;
+        // Invalidate in-flight work so a late UploadFinished is ignored.
+        self.compose_upload_id = self.compose_upload_id.wrapping_add(1);
+    }
+
+    /// Remove the attached image and unlock compose (✕ / Cancel).
+    pub fn clear_compose_image(&mut self) {
+        self.cancel_compose_upload();
+        self.compose_image = None;
+    }
+
     /// Apply a finished OS file-dialog result. Call once per frame from the app loop.
     ///
     /// Returns `true` if a pick is still in progress (caller should repaint).
@@ -1285,10 +1324,12 @@ impl AppState {
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Safety net slightly past the Android scavenger deadline so a
-                // dead dialog cannot leave attach permanently disabled. Normal
-                // cancel returns in milliseconds via Ok(None).
+                // Desktop portal dialogs that never appear used to leave attach
+                // "busy" for minutes; Android needs longer for the scavenger.
+                #[cfg(target_os = "android")]
                 const PICK_UI_TIMEOUT: Duration = Duration::from_secs(185);
+                #[cfg(not(target_os = "android"))]
+                const PICK_UI_TIMEOUT: Duration = Duration::from_secs(45);
                 if self
                     .file_pick_started
                     .is_some_and(|t| t.elapsed() > PICK_UI_TIMEOUT)
@@ -1306,6 +1347,26 @@ impl AppState {
                 false
             }
         }
+    }
+
+    /// Unlock compose if an upload/encode hangs past the HTTP timeout budget.
+    ///
+    /// Returns `true` when still uploading (caller should keep repainting).
+    pub fn tick_compose_upload(&mut self) -> bool {
+        if !self.compose_uploading {
+            return false;
+        }
+        // HTTP client timeout is 45s; allow encode + a little slack.
+        const UPLOAD_UI_TIMEOUT: Duration = Duration::from_secs(60);
+        if self
+            .compose_upload_started
+            .is_some_and(|t| t.elapsed() > UPLOAD_UI_TIMEOUT)
+        {
+            self.cancel_compose_upload();
+            self.show_toast("Image upload timed out — try again".to_string());
+            return false;
+        }
+        true
     }
 
     pub fn clear_toast(&mut self) {
@@ -1668,8 +1729,7 @@ impl AppState {
         // Switching buffers: drop pending compose so we don't send into the wrong room.
         if self.active_channel.as_deref() != Some(key.as_str()) {
             self.compose.clear();
-            self.compose_image = None;
-            self.compose_uploading = false;
+            self.clear_compose_image();
             self.compose_nick_tab.clear();
             self.cancel_edit();
         }
@@ -1700,8 +1760,7 @@ impl AppState {
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
-        self.compose_image = None;
-        self.compose_uploading = false;
+        self.clear_compose_image();
         self.compose_nick_tab.clear();
         self.cancel_edit();
     }
@@ -1813,7 +1872,7 @@ impl AppState {
     pub fn begin_edit(&mut self, msgid: String, text: String) {
         self.editing_msgid = Some(msgid);
         self.compose = text;
-        self.compose_image = None;
+        self.clear_compose_image();
         self.compose_nick_tab.clear();
         self.focus_compose = true;
         self.close_react_picker();
@@ -1865,8 +1924,7 @@ impl AppState {
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
-        self.compose_image = None;
-        self.compose_uploading = false;
+        self.clear_compose_image();
         self.compose_nick_tab.clear();
         self.local_call = None;
         self.clear_av_media();
@@ -2242,5 +2300,26 @@ mod tests {
         assert_eq!(buf.messages.len(), 1);
         assert!(buf.apply_delete("alice", "orig"));
         assert!(buf.messages.front().unwrap().is_deleted);
+    }
+
+    #[test]
+    fn cancel_compose_upload_unlocks_and_invalidates_id() {
+        let mut state = AppState::new();
+        state.compose_upload_id = 7;
+        state.compose_uploading = true;
+        state.compose_upload_started = Some(Instant::now());
+        state.compose_image = Some(ComposeImage::from_rgba(1, 1, std::sync::Arc::from([0, 0, 0, 255])));
+
+        let before = state.compose_upload_id;
+        state.cancel_compose_upload();
+        assert!(!state.compose_uploading);
+        assert!(state.compose_upload_started.is_none());
+        assert_ne!(state.compose_upload_id, before);
+        // Attachment kept so the user can retry after Cancel upload.
+        assert!(state.compose_image.is_some());
+
+        state.clear_compose_image();
+        assert!(state.compose_image.is_none());
+        assert!(!state.compose_uploading);
     }
 }

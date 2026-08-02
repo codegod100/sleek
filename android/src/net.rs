@@ -48,6 +48,9 @@ pub enum NetCmd {
     Raw(String),
     /// Upload image bytes to freeq `/api/v1/upload`, then PRIVMSG the URL (+ caption).
     UploadAndSend {
+        /// Correlates with [`NetEvent::UploadFinished::upload_id`] so a cancelled
+        /// compose upload cannot clear a newer attachment.
+        upload_id: u64,
         target: String,
         caption: String,
         bytes: Vec<u8>,
@@ -155,6 +158,8 @@ pub enum NetEvent {
     /// Image upload finished; UI should clear compose attachment state.
     /// On success, `sent` is the PRIVMSG body that was just written to the server.
     UploadFinished {
+        /// Correlates with [`NetCmd::UploadAndSend::upload_id`].
+        upload_id: u64,
         /// `None` on success; error message on failure.
         error: Option<String>,
         /// Set when upload+send succeeded (for optimistic local echo).
@@ -578,6 +583,7 @@ async fn apply_cmd(
             }
         }
         NetCmd::UploadAndSend {
+            upload_id,
             target,
             caption,
             bytes,
@@ -587,6 +593,7 @@ async fn apply_cmd(
         } => {
             if handle.is_none() {
                 let _ = event_tx.send(NetEvent::UploadFinished {
+                    upload_id,
                     error: Some("Not connected".into()),
                     sent: None,
                 });
@@ -602,6 +609,7 @@ async fn apply_cmd(
                     if let Some(h) = handle {
                         if let Err(e) = h.privmsg(&target, &text).await {
                             let _ = event_tx.send(NetEvent::UploadFinished {
+                                upload_id,
                                 error: Some(format!("Upload ok, send failed: {e}")),
                                 sent: None,
                             });
@@ -609,12 +617,14 @@ async fn apply_cmd(
                         }
                     }
                     let _ = event_tx.send(NetEvent::UploadFinished {
+                        upload_id,
                         error: None,
                         sent: Some(MediaSent { target, text }),
                     });
                 }
                 Err(e) => {
                     let _ = event_tx.send(NetEvent::UploadFinished {
+                        upload_id,
                         error: Some(e),
                         sent: None,
                     });
