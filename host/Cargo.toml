@@ -8,6 +8,16 @@ publish = false
 
 [workspace]
 
+# Keep in sync with android/Cargo.toml — host is its own workspace root.
+# Dev iteration: default rustc debuginfo=2 makes `sleek` ~800MB and slow to link.
+# Line tables on workspace crates; no debuginfo on deps (biggest link/disk win).
+# Full DWARF: CARGO_PROFILE_DEV_DEBUG=2 cargo build …
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [[bin]]
 name = "sleek"
 path = "src/main.rs"

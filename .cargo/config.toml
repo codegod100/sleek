@@ -1,0 +1,10 @@
+# Build-time defaults for local / nix-develop builds.
+# Override per-invocation with RUSTFLAGS / CARGO_PROFILE_* as needed.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
