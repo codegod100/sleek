@@ -55,6 +55,9 @@
           };
         };
 
+      # Runtime libs for the desktop host (wrapped into LD_LIBRARY_PATH).
+      # Keep bindgen-only deps (libclang, linuxHeaders, pkg-config) out of this
+      # list — they bloat the closure by ~GB and are not needed at runtime.
       eguiLibs =
         pkgs:
         with pkgs;
@@ -62,7 +65,6 @@
           libxkbcommon
           libGL
           vulkan-loader
-          pkg-config
           openssl
         ]
         ++ lib.optionals stdenv.hostPlatform.isLinux [
@@ -77,7 +79,12 @@
           alsa-lib
           # Optional PipeWire backends
           pipewire
-          # v4l2r bindgen (iroh-live capture-camera) needs libclang + videodev2.h
+        ];
+
+      # Build-only extras for v4l2r bindgen (iroh-live capture-camera).
+      eguiBuildLibs =
+        pkgs: with pkgs; [
+          pkg-config
           llvmPackages.libclang
           linuxHeaders
         ];
@@ -110,24 +117,48 @@
       #   parent/freeq/freeq-sdk
       sleekSrcTree =
         pkgs:
+        let
+          # Filter before hashing so CI/docs/flake-only commits do not bust
+          # android/flatpak store paths (and thus Cachix).
+          sleekFiltered = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              let
+                base = baseNameOf path;
+              in
+              # Keep normal cleanSource exclusions, then drop non-build paths.
+              pkgs.lib.cleanSourceFilter path type
+              && !(builtins.elem base [
+                ".tangled"
+                ".devcontainer"
+                ".jj"
+                "docs"
+                "README.md"
+                "AGENTS.md"
+                "justfile"
+                "flake.nix"
+                "flake.lock"
+                "result"
+                "result-android"
+                "result-flatpak"
+                "result-sleek"
+              ]);
+          };
+        in
         pkgs.runCommand "sleek-src-tree"
           {
-            # Avoid .git / target noise from the working tree.
             nativeBuildInputs = [ pkgs.rsync ];
           }
           ''
             mkdir -p $out/{sleek,vidya,freeq}
-            # cleanSource drops .git; keep Cargo.lock under host/
-            cp -a ${pkgs.lib.cleanSource ./.}/. $out/sleek/
+            cp -a ${sleekFiltered}/. $out/sleek/
             cp -a ${vidya}/. $out/vidya/
             cp -a ${freeq}/. $out/freeq/
             chmod -R u+w $out
             # Drop heavy/irrelevant freeq crates so cargo metadata stays lean
             # (path dep only needs freeq-sdk + its workspace graph).
-            # Drop CI/docs/flake metadata so Spindle-only commits do not bust
-            # Cachix store paths (cargo only needs android/host/vendor/…).
-            rm -rf $out/sleek/{.git,host/target,android/target,.tangled,.devcontainer,.jj,docs} \
-              $out/sleek/{README.md,justfile,flake.nix,flake.lock} 2>/dev/null || true
+            rm -rf $out/sleek/{.git,host/target,android/target} 2>/dev/null || true
           '';
 
       androidApiLevel = "28";
@@ -139,6 +170,10 @@
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          buildLibs = eguiBuildLibs pkgs;
+          # Lean toolchain for store packages (no clippy/rustfmt — not needed to compile).
+          rustBuild = pkgs.rust-bin.stable.latest.default;
+          # Full toolchain for iterative `nix run .#host` / cargo workflows.
           rust = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
@@ -159,8 +194,8 @@
             ];
           };
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = rust;
-            rustc = rust;
+            cargo = rustBuild;
+            rustc = rustBuild;
           };
           rustPlatformAndroid = pkgs.makeRustPlatform {
             cargo = rustAndroid;
@@ -185,16 +220,29 @@
               };
 
               nativeBuildInputs = with pkgs; [
-                pkg-config
                 makeWrapper
                 copyDesktopItems
-                llvmPackages.libclang
-              ];
+                removeReferencesTo
+              ]
+              ++ buildLibs;
               buildInputs = libs;
 
               OPENSSL_NO_VENDOR = "1";
               PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
               doCheck = false;
+              # Drop symbols; panic location strings still need remove-references-to.
+              stripAll = true;
+              # Avoid embedding full DWARF from cargo's default release profile.
+              CARGO_PROFILE_RELEASE_DEBUG = "0";
+              CARGO_PROFILE_RELEASE_STRIP = "symbols";
+
+              # rustc/libclang paths get baked into the binary/wrapper; scrub so
+              # the runtime closure (and thus Cachix/CI substitutes) stay small.
+              disallowedReferences = [
+                rustBuild
+                pkgs.llvmPackages.libclang
+                pkgs.llvmPackages.libclang.lib
+              ];
 
               # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
               # Desktop entry + icons for app menus / launchers.
@@ -253,6 +301,14 @@
                     --replace-fail 'Icon=uk.nandi.sleek' \
                     "Icon=$out/share/icons/hicolor/256x256/apps/uk.nandi.sleek.png"
                 fi
+
+                # Drop rustc/libclang store paths leaked into the binary/wrapper
+                # (std panic locations embed rust-src paths even after strip).
+                find "$out" -type f -exec remove-references-to \
+                  -t ${rustBuild} \
+                  -t ${pkgs.llvmPackages.libclang} \
+                  -t ${pkgs.llvmPackages.libclang.lib} \
+                  {} +
               '';
 
               meta = with pkgs.lib; {
@@ -342,6 +398,8 @@
             # Keep the build deterministic: no host ~/.android or ambient SDK.
             strictDeps = true;
             dontUseCmakeConfigure = true;
+            # Output is a plain APK — toolchain must not leak into the closure.
+            disallowedReferences = [ rustAndroid ];
 
             ANDROID_HOME = androidSdkRoot;
             ANDROID_SDK_ROOT = androidSdkRoot;
@@ -704,7 +762,7 @@ EOF
           run-host =
             let
               sleekLibPath = pkgs.lib.makeLibraryPath libs;
-              # pkg-config needs .dev outputs for headers + .pc files.
+              # pkg-config needs .dev outputs for headers + .pc files (runtime libs only).
               pkgConfigPath = pkgs.lib.makeSearchPath "lib/pkgconfig" (
                 map (p: p.dev or p) (
                   libs
@@ -829,6 +887,7 @@ EOF
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          buildLibs = eguiBuildLibs pkgs;
           # Runtime libs for the egui host only — do NOT export as ambient
           # LD_LIBRARY_PATH. On Codespaces/Ubuntu, that makes system
           # git-remote-https load nix openssl/glibc and die with
@@ -861,9 +920,9 @@ EOF
                 pkgs.android-tools
                 pkgs.cargo-apk
                 pkgs.cachix
-                pkgs.pkg-config
                 pkgs.openssl
               ]
+              ++ buildLibs
               ++ cliTools;
               buildInputs = libs;
               OPENSSL_NO_VENDOR = "1";
