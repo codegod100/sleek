@@ -533,7 +533,7 @@ pub fn parse_reactions_tag(raw: &str) -> HashMap<String, HashSet<String>> {
 /// via [`display_emoji`] so egui's NotoEmoji fallback doesn't draw a tofu box for `U+FE0F`.
 pub const QUICK_REACT_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "👎"];
 
-/// Double-click default reaction (freeq-android parity: heavy black heart + VS16).
+/// Default heart reaction glyph (freeq-android parity: heavy black heart + VS16).
 pub const DEFAULT_REACT_EMOJI: &str = "❤️";
 
 /// Category tabs for the full reaction emoji picker (Unicode CLDR groups).
