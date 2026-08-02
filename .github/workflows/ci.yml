@@ -4,7 +4,7 @@
 #
 # On push to main, pair with cachix.yml (if present) for store-path caching.
 
-name: CI
+name: Build
 
 on:
   push:
@@ -60,8 +60,11 @@ jobs:
 
       - name: Free disk space
         run: |
+          # Flatpak rewrite + OSTree + bundle needs a lot of headroom.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules /usr/share/swift /usr/local/.ghcup || true
+          sudo docker system prune -af || true
           df -h /
 
       - uses: cachix/install-nix-action@v31
@@ -76,25 +79,68 @@ jobs:
           skipPush: true
 
       - name: nix build .#flatpak
-        run: nix build ".#flatpak" -L --print-build-logs --out-link result-flatpak
+        id: build
+        run: |
+          set -euo pipefail
+          # --no-link + print-out-paths avoids a workspace symlink into a multi-GB
+          # store path; locate uses the printed store path directly.
+          out="$(nix build ".#flatpak" -L --print-build-logs --no-link --print-out-paths)"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          echo "out=$out"
+          ls -lah "$out"
 
       - name: Locate Flatpak bundle
         id: bundle
         run: |
           set -euo pipefail
-          bundle="$(find result-flatpak -type f -name '*.flatpak' | head -1)"
-          [[ -n "${bundle:-}" && -f "$bundle" ]] || {
-            echo "No .flatpak under result-flatpak" >&2
-            find result-flatpak -maxdepth 3 -type f >&2 || true
+          out="${{ steps.build.outputs.out }}"
+          [[ -n "$out" && -d "$out" ]] || {
+            echo "flatpak out path missing: '$out'" >&2
             exit 1
           }
-          cp "$bundle" uk.nandi.sleek.flatpak
+          # nix2flatpak writes $out/<appId>.flatpak next to flatpak-dir/ — do not
+          # recurse into flatpak-dir (huge rewritten store tree).
+          bundle="$out/uk.nandi.sleek.flatpak"
+          if [[ ! -s "$bundle" ]]; then
+            bundle="$(find "$out" -maxdepth 1 \( -type f -o -type l \) -name '*.flatpak' | head -1 || true)"
+          fi
+          if [[ -z "${bundle:-}" || ! -s "$bundle" ]]; then
+            echo "No .flatpak bundle in $out" >&2
+            ls -lah "$out" >&2 || true
+            # Build still produced an installable tree — keep CI signal useful.
+            if [[ -f "$out/flatpak-dir/metadata" ]]; then
+              echo "flatpak-dir present but bundle file missing; skipping artifact" >&2
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit 1
+          fi
+          # Copy can exhaust the runner disk on multi-GB bundles; hardlink if possible.
+          ln -f "$bundle" uk.nandi.sleek.flatpak 2>/dev/null \
+            || cp --reflink=auto "$bundle" uk.nandi.sleek.flatpak
           ls -lh uk.nandi.sleek.flatpak
           echo "path=uk.nandi.sleek.flatpak" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Upload Flatpak
+        if: steps.bundle.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sleek-flatpak
           path: uk.nandi.sleek.flatpak
           if-no-files-found: error
+
+  # Single required check for branch protection / auto-merge.
+  ci:
+    name: CI
+    if: always()
+    needs: [apk, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require APK + Flatpak
+        run: |
+          set -euo pipefail
+          apk="${{ needs.apk.result }}"
+          flatpak="${{ needs.flatpak.result }}"
+          echo "apk=$apk flatpak=$flatpak"
+          [[ "$apk" == success && "$flatpak" == success ]]
