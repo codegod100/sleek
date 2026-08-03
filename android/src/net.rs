@@ -1010,10 +1010,10 @@ async fn upload_media(
     bytes: Vec<u8>,
 ) -> Result<String, String> {
     if bytes.is_empty() {
-        return Err("Empty image".into());
+        return Err("Empty file".into());
     }
     if bytes.len() > 10 * 1024 * 1024 {
-        return Err("Image is too large (max 10MB)".into());
+        return Err("File is too large (max 10MB)".into());
     }
 
     let base = api_base.trim_end_matches('/');
@@ -1028,6 +1028,10 @@ async fn upload_media(
         "image/jpeg" => "paste.jpg",
         "image/gif" => "paste.gif",
         "image/webp" => "paste.webp",
+        "video/mp4" => "clip.mp4",
+        "video/webm" => "clip.webm",
+        "video/quicktime" => "clip.mov",
+        _ if content_type.starts_with("video/") => "clip.mp4",
         _ => "paste.png",
     };
 
@@ -1057,7 +1061,7 @@ async fn upload_media(
         let short = body.chars().take(120).collect::<String>();
         let msg = match status.as_u16() {
             401 => "Not authorized — stay signed in and connected, then try again".into(),
-            413 => "Image is too large".into(),
+            413 => "File is too large".into(),
             _ => format!("Upload failed ({status}) {short}").trim().to_string(),
         };
         return Err(msg);
