@@ -828,6 +828,10 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
+    let video_url = match &embed {
+        Some(Embed::Video { url }) => Some(url.clone()),
+        _ => None,
+    };
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
@@ -924,26 +928,35 @@ pub fn message_bubble(
                 };
             }
 
-            if let Some(embed) = embed {
-                ui.add_space(sp.sm);
+            if let Some(embed) = embed.as_ref() {
                 match embed {
+                    // Video mounts outside the bubble frame (below) so play
+                    // clicks are not stolen by later bubble interacts.
+                    Embed::Video { .. } => {}
                     Embed::Image { url } => {
-                        if inline_image_preview(ui, th, media, &url) {
-                            action = MessageBubbleAction::OpenImage { url };
+                        ui.add_space(sp.sm);
+                        if inline_image_preview(ui, th, media, url) {
+                            action = MessageBubbleAction::OpenImage {
+                                url: url.clone(),
+                            };
                         }
                     }
-                    Embed::Video { url } => {
-                        inline_video_preview(ui, th, media, &url, &msg.id);
-                    }
                     Embed::Link { url } => {
+                        ui.add_space(sp.sm);
                         let seed = msg.link_meta.clone();
                         // Salt with message id so two bubbles with the same URL
                         // never share an interact / hover widget id.
-                        og_link_preview(ui, th, media, &url, seed.as_ref(), &msg.id);
+                        og_link_preview(ui, th, media, url, seed.as_ref(), &msg.id);
                     }
                 }
             }
         });
+
+    // Video below the bubble — same layering rule as reaction chips.
+    if let Some(url) = video_url {
+        ui.add_space(sp.xs);
+        inline_video_preview(ui, th, media, &url, &msg.id);
+    }
 
     // Hover icon toolbar + right-click / long-press icon menu (React / Edit /
     // Delete). Uses raw secondary clicks so selectable body text doesn't eat

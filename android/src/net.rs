@@ -680,10 +680,11 @@ async fn apply_cmd(
             tokio::spawn(async move {
                 match fetch_video_bytes(&url).await {
                     Ok(bytes) => {
+                        log::info!("video fetch ok {} ({} bytes)", url, bytes.len());
                         let _ = tx.send(NetEvent::VideoFetched { url, bytes });
                     }
                     Err(e) => {
-                        log::debug!("video fetch {url}: {e}");
+                        log::warn!("video fetch {url}: {e}");
                         let _ = tx.send(NetEvent::VideoFetchFailed { url });
                     }
                 }

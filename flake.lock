@@ -132,11 +132,11 @@
     "vidya": {
       "flake": false,
       "locked": {
-        "lastModified": 1785760155,
-        "narHash": "sha256-UCoc+WUBwK5yNEshBqkNdgbiFZkyT7jqMpNQrRfm3GU=",
+        "lastModified": 1785764010,
+        "narHash": "sha256-O+PwGhCXpt5CRkdF9PZSU0Kp7gYQ/cwP545rlINcL6s=",
         "owner": "codegod100",
         "repo": "vidya",
-        "rev": "0dcfc25843c982e58aeacfdfd3ae859b0eb4553f",
+        "rev": "7a24e2f6a340c79c6a7585e9ae092824de248848",
         "type": "github"
       },
       "original": {
