@@ -7,7 +7,7 @@ use vidya::{
 };
 
 use crate::clipboard;
-use crate::state::{AppState, NickTabComplete};
+use crate::state::{AppState, ComposeAttach, NickTabComplete};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
     avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
@@ -461,13 +461,13 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // Ui and shrinks available_height for what follows — so the scroll area
     // always gets the leftover strip. The earlier bottom_up + fixed-rect approach
     // left a huge dead zone under the input (compose sat under the first message).
-    try_paste_compose_image(ui, state);
+    try_paste_compose_attach(ui, state);
 
     let body_w = ui.available_width().max(80.0);
 
-    let has_image = state.compose_image.is_some();
+    let has_attach = state.compose_attach.is_some();
     let uploading = state.compose_uploading;
-    let can_send = !uploading && (!state.compose.trim().is_empty() || has_image);
+    let can_send = !uploading && (!state.compose.trim().is_empty() || has_attach);
     let pick_busy = state.file_pick_busy();
 
     egui::TopBottomPanel::bottom("chat_compose")
@@ -500,8 +500,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 &nick_candidates,
             );
 
-            if has_image {
-                if let Some(send) = compose_image_composer(ui, th, state, compose_id) {
+            if has_attach {
+                if let Some(send) = compose_attach_composer(ui, th, state, compose_id) {
                     action = ChatAction::Send {
                         target: channel.to_string(),
                         text: send,
@@ -535,9 +535,9 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let attach_tip = if pick_busy {
                     "Opening file picker…"
                 } else if cfg!(target_os = "android") {
-                    "Attach image"
+                    "Attach image or video"
                 } else {
-                    "Attach image (or paste with Ctrl+V)"
+                    "Attach image or video (or paste image with Ctrl+V)"
                 };
                 let (hint, action_label, action_w) = if is_editing {
                     ("Edit message…", "Save", 72.0_f32)
@@ -738,10 +738,10 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     action
 }
 
-/// Image attachment preview + caption/submit row (mirrors the normal compose bar).
+/// Media attachment preview + caption/submit row (mirrors the normal compose bar).
 ///
 /// Returns `Some(caption)` when the user submits.
-fn compose_image_composer(
+fn compose_attach_composer(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
@@ -750,36 +750,51 @@ fn compose_image_composer(
     let p = &th.palette;
     let sp = &th.spacing;
 
-    // Snapshot texture / dims first so we don't hold a mut borrow across clicks
-    // that clear `compose_image`.
-    let (tex_id, width, height, uploading) = {
-        let Some(img) = state.compose_image.as_mut() else {
+    enum Thumb {
+        Image {
+            tex_id: egui::TextureId,
+            width: usize,
+            height: usize,
+            dims: String,
+        },
+        Video {
+            filename: String,
+            dims: String,
+        },
+    }
+
+    let (thumb, kind_label, uploading) = {
+        let Some(attach) = state.compose_attach.as_mut() else {
             return None;
         };
-        let tex = img.texture(ui.ctx()).clone();
-        (tex.id(), img.width, img.height, state.compose_uploading)
+        let uploading = state.compose_uploading;
+        let kind = attach.kind_label();
+        let thumb = match attach {
+            ComposeAttach::Image(img) => {
+                let tex = img.texture(ui.ctx()).clone();
+                let kb = (img.width.saturating_mul(img.height).saturating_mul(4) / 1024).max(1);
+                Thumb::Image {
+                    tex_id: tex.id(),
+                    width: img.width,
+                    height: img.height,
+                    dims: format!("{}×{} · ~{kb} KB", img.width, img.height),
+                }
+            }
+            ComposeAttach::Video(video) => Thumb::Video {
+                filename: video.filename.clone(),
+                dims: format!("{} · {}", video.content_type, video.size_label()),
+            },
+        };
+        (thumb, kind, uploading)
     };
 
-    // Compact thumb — keep the bar short so messages stay visible.
     const THUMB: f32 = 48.0;
-    let scale = (THUMB / width.max(1) as f32)
-        .min(THUMB / height.max(1) as f32)
-        .min(1.0);
-    let img_size = Vec2::new(
-        (width as f32 * scale).max(1.0),
-        (height as f32 * scale).max(1.0),
-    );
-
-    let kb = (width.saturating_mul(height).saturating_mul(4) / 1024).max(1);
-    let dims = format!("{width}×{height} · ~{kb} KB");
-
     let mut clear = false;
     let mut submit = false;
     let pick_busy = state.file_pick_busy();
-    let can_send = !uploading; // image alone is enough
+    let can_send = !uploading;
     let bar_w = ui.available_width();
 
-    // Preview card only (caption lives on the shared compose row below).
     egui::Frame::new()
         .fill(p.view_bg)
         .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
@@ -795,30 +810,68 @@ fn compose_image_composer(
                     ui.allocate_exact_size(Vec2::splat(THUMB), Sense::hover());
                 ui.painter()
                     .rect_filled(thumb_rect, sp.radius_sm, p.card_bg);
-                let img_rect = egui::Rect::from_center_size(thumb_rect.center(), img_size);
-                ui.put(
-                    img_rect,
-                    egui::Image::new((tex_id, img_size))
-                        .corner_radius(sp.radius_sm)
-                        .sense(Sense::hover()),
-                );
+                match &thumb {
+                    Thumb::Image {
+                        tex_id,
+                        width,
+                        height,
+                        ..
+                    } => {
+                        let scale = (THUMB / (*width).max(1) as f32)
+                            .min(THUMB / (*height).max(1) as f32)
+                            .min(1.0);
+                        let img_size = Vec2::new(
+                            (*width as f32 * scale).max(1.0),
+                            (*height as f32 * scale).max(1.0),
+                        );
+                        let img_rect = egui::Rect::from_center_size(thumb_rect.center(), img_size);
+                        ui.put(
+                            img_rect,
+                            egui::Image::new((*tex_id, img_size))
+                                .corner_radius(sp.radius_sm)
+                                .sense(Sense::hover()),
+                        );
+                    }
+                    Thumb::Video { .. } => {
+                        // Play glyph stand-in (matches chat video preview).
+                        ui.painter().circle_filled(
+                            thumb_rect.center(),
+                            12.0,
+                            p.accent.gamma_multiply(0.92),
+                        );
+                        let c = thumb_rect.center();
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(c.x + 6.0, c.y),
+                                egui::pos2(c.x - 5.0, c.y + 5.5),
+                                egui::pos2(c.x - 5.0, c.y - 5.5),
+                            ],
+                            egui::Color32::WHITE,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
 
                 ui.add_space(sp.sm);
 
                 let dismiss_w = 32.0_f32;
                 let meta_w = (ui.available_width() - dismiss_w - sp.xs).max(48.0);
+                let dims = match &thumb {
+                    Thumb::Image { dims, .. } | Thumb::Video { dims, .. } => dims.clone(),
+                };
+                let title = match &thumb {
+                    Thumb::Video { filename, .. } if !uploading => filename.clone(),
+                    _ if uploading => "Uploading…".into(),
+                    _ => format!("{kind_label} attached"),
+                };
                 ui.vertical(|ui| {
                     ui.set_width(meta_w);
                     ui.add_space(2.0);
                     ui.label(
-                        RichText::new(if uploading {
-                            "Uploading…"
-                        } else {
-                            "Image attached"
-                        })
-                        .size(th.type_scale.body)
-                        .color(if uploading { p.accent } else { p.text })
-                        .strong(),
+                        RichText::new(title)
+                            .size(th.type_scale.body)
+                            .color(if uploading { p.accent } else { p.text })
+                            .strong(),
                     );
                     ui.add_space(2.0);
                     dim_label(ui, th, &dims);
@@ -829,8 +882,6 @@ fn compose_image_composer(
                         ui.spinner();
                         ui.add_space(sp.xs);
                     }
-                    // Always allow dismiss/cancel — a stuck upload used to leave
-                    // the compose bar non-interactive (no paste, no ✕) until restart.
                     let dismiss = ui
                         .add_sized(
                             Vec2::splat(28.0),
@@ -846,7 +897,7 @@ fn compose_image_composer(
                         .on_hover_text(if uploading {
                             "Cancel upload"
                         } else {
-                            "Remove image"
+                            "Remove attachment"
                         })
                         .on_hover_cursor(CursorIcon::PointingHand);
                     if dismiss.clicked() {
@@ -858,16 +909,13 @@ fn compose_image_composer(
 
     ui.add_space(sp.sm);
 
-    // Same row shape as the no-image compose bar: attach | caption | Submit.
     let attach_tip = if pick_busy {
         "Opening file picker…"
     } else if cfg!(target_os = "android") {
-        "Replace image"
+        "Replace attachment"
     } else {
-        "Replace image (or paste with Ctrl+V)"
+        "Replace attachment (or paste image with Ctrl+V)"
     };
-    // Keep the caption field interactive during upload so Ctrl+V / typing are
-    // never wedged by a slow encode or hung HTTP — only Submit is gated.
     let (resp, attach_clicked, send_clicked) = compose_input_row(
         ui,
         th,
@@ -895,10 +943,9 @@ fn compose_image_composer(
 
     if clear {
         if uploading {
-            // Unlock compose; keep the thumb so Submit can retry.
             state.cancel_compose_upload();
         } else {
-            state.clear_compose_image();
+            state.clear_compose_attach();
         }
     }
 
@@ -1232,7 +1279,7 @@ fn try_nick_tab_complete(
 /// Clipboard image reads run with a short timeout off the UI thread (see
 /// [`clipboard::try_get_image`]) so a stuck X11/Wayland conversion cannot
 /// freeze egui's immediate-mode loop.
-fn try_paste_compose_image(ui: &mut egui::Ui, state: &mut AppState) {
+fn try_paste_compose_attach(ui: &mut egui::Ui, state: &mut AppState) {
     // Don't replace the attachment mid-upload; text paste still reaches the
     // interactive caption field via `Event::Paste`.
     if state.compose_uploading {
@@ -1266,7 +1313,7 @@ fn try_paste_compose_image(ui: &mut egui::Ui, state: &mut AppState) {
         i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
     });
 
-    state.compose_image = Some(img);
+    state.compose_attach = Some(ComposeAttach::Image(img));
     state.focus_compose = true;
 }
 

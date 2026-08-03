@@ -354,6 +354,7 @@ impl SleekApp {
         for req in self.state.media.drain_pending() {
             match req {
                 MediaFetch::Image(url) => self.net.send(NetCmd::FetchImage { url }),
+                MediaFetch::Video(url) => self.net.send(NetCmd::FetchVideo { url }),
                 MediaFetch::LinkPreview(url) => self.net.send(NetCmd::FetchLinkPreview { url }),
             }
         }
@@ -415,12 +416,12 @@ impl SleekApp {
                     if let Some(err) = error {
                         self.state.error = Some(err.clone());
                         self.state.show_toast(err);
-                        // Keep compose_image so the user can retry Send.
+                        // Keep compose_attach so the user can retry Send.
                     } else {
-                        self.state.compose_image = None;
+                        self.state.compose_attach = None;
                         self.state.compose.clear();
                         self.state.compose_nick_tab.clear();
-                        self.state.show_toast("Image sent");
+                        self.state.show_toast("Media sent");
                         if let Some(media) = sent {
                             self.do_send_local_echo(&media.target, media.text);
                         }
@@ -439,6 +440,12 @@ impl SleekApp {
             }
             NetEvent::ImageFetchFailed { url } => {
                 self.state.media.set_image_failed(url);
+            }
+            NetEvent::VideoFetched { url, bytes } => {
+                self.state.media.set_video_ready(url, bytes);
+            }
+            NetEvent::VideoFetchFailed { url } => {
+                self.state.media.set_video_failed(url);
             }
             NetEvent::LinkPreviewFetched {
                 url,
@@ -839,7 +846,7 @@ impl SleekApp {
                             self.state.media.touch_link(url);
                         }
                     }
-                    None => {}
+                    Some(preview::Embed::Video { .. }) | None => {}
                 }
 
                 let reactions = tags
@@ -1767,10 +1774,10 @@ impl SleekApp {
     }
 
     fn do_send(&mut self, target: String, text: String) {
-        // Image attached: upload then PRIVMSG the freeq media URL.
+        // Media attached: upload then PRIVMSG the freeq media URL.
         // Slash commands don't apply when attaching media (caption is plain text).
-        if self.state.compose_image.is_some() {
-            self.do_send_with_image(target, text);
+        if self.state.compose_attach.is_some() {
+            self.do_send_with_attach(target, text);
             return;
         }
 
@@ -1843,40 +1850,61 @@ impl SleekApp {
         }
     }
 
-    fn do_send_with_image(&mut self, target: String, caption: String) {
+    fn do_send_with_attach(&mut self, target: String, caption: String) {
         if self.state.compose_uploading {
             return;
         }
-        let Some(img) = self.state.compose_image.clone() else {
+        let Some(attach) = self.state.compose_attach.clone() else {
             return;
         };
         let Some(did) = self.state.did.clone() else {
             self.state
-                .show_toast("Sign in with Bluesky to send images");
+                .show_toast("Sign in with Bluesky to send media");
             return;
         };
         if self.state.connection != ConnectionState::Registered
             && self.state.connection != ConnectionState::Connected
         {
-            self.state.show_toast("Connect before sending images");
+            self.state.show_toast("Connect before sending media");
             return;
         }
 
-        // PNG encode on a worker — large pastes used to freeze the egui frame
-        // (immediate-mode loop) before the upload even started.
         self.state.compose_upload_id = self.state.compose_upload_id.wrapping_add(1);
         let upload_id = self.state.compose_upload_id;
         self.state.compose_uploading = true;
         self.state.compose_upload_started = Some(std::time::Instant::now());
-        self.state.compose_encode_meta = Some(crate::state::ComposeEncodeMeta {
-            upload_id,
-            target,
-            caption,
-            did,
-            api_base: api_base_for_server(&self.state.server),
-        });
-        self.state.compose_encode_rx = Some(clipboard::start_encode_png(img));
-        self.state.show_toast("Uploading image…");
+
+        match attach {
+            crate::state::ComposeAttach::Image(img) => {
+                // PNG encode on a worker — large pastes used to freeze the egui
+                // frame before the upload even started.
+                self.state.compose_encode_meta = Some(crate::state::ComposeEncodeMeta {
+                    upload_id,
+                    target,
+                    caption,
+                    did,
+                    api_base: api_base_for_server(&self.state.server),
+                });
+                self.state.compose_encode_rx = Some(clipboard::start_encode_png(img));
+                self.state.show_toast("Uploading image…");
+            }
+            crate::state::ComposeAttach::Video(video) => {
+                // Videos keep original bytes — no re-encode.
+                self.state.compose_encode_meta = None;
+                self.state.compose_encode_rx = None;
+                let bytes = video.bytes.as_ref().to_vec();
+                self.net.send(NetCmd::UploadAndSend {
+                    upload_id,
+                    target,
+                    caption,
+                    bytes,
+                    content_type: video.content_type,
+                    did,
+                    api_base: api_base_for_server(&self.state.server),
+                });
+                self.state.show_toast("Uploading video…");
+            }
+        }
     }
 
     /// Drain background PNG encode → `UploadAndSend`. Keeps the UI thread free.

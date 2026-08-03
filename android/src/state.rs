@@ -206,6 +206,13 @@ impl ChatMessage {
             && !self.text.trim().contains(char::is_whitespace)
         {
             "📷 Image".into()
+        } else if matches!(
+            self.resolved_embed(),
+            Some(crate::preview::Embed::Video { .. })
+        ) && self.text.trim().starts_with("http")
+            && !self.text.trim().contains(char::is_whitespace)
+        {
+            "🎬 Video".into()
         } else {
             self.text.clone()
         };
@@ -705,7 +712,7 @@ pub struct ComposeEncodeMeta {
     pub api_base: String,
 }
 
-/// Image attached to the compose bar (clipboard paste).
+/// Image attached to the compose bar (clipboard paste / file pick).
 #[derive(Clone)]
 pub struct ComposeImage {
     pub width: usize,
@@ -749,6 +756,63 @@ impl ComposeImage {
             ));
         }
         self.texture.as_ref().expect("texture just inserted")
+    }
+}
+
+/// Video file attached to the compose bar (original bytes, no re-encode).
+#[derive(Clone)]
+pub struct ComposeVideo {
+    pub bytes: Arc<[u8]>,
+    pub content_type: String,
+    pub filename: String,
+}
+
+impl std::fmt::Debug for ComposeVideo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComposeVideo")
+            .field("content_type", &self.content_type)
+            .field("filename", &self.filename)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl ComposeVideo {
+    pub fn new(bytes: Arc<[u8]>, content_type: impl Into<String>, filename: impl Into<String>) -> Self {
+        Self {
+            bytes,
+            content_type: content_type.into(),
+            filename: filename.into(),
+        }
+    }
+
+    pub fn size_label(&self) -> String {
+        let n = self.bytes.len();
+        if n >= 1024 * 1024 {
+            format!("{:.1} MB", n as f32 / (1024.0 * 1024.0))
+        } else {
+            format!("{} KB", (n / 1024).max(1))
+        }
+    }
+}
+
+/// Pending compose attachment — image (RGBA preview) or video (raw file).
+#[derive(Debug, Clone)]
+pub enum ComposeAttach {
+    Image(ComposeImage),
+    Video(ComposeVideo),
+}
+
+impl ComposeAttach {
+    pub fn is_video(&self) -> bool {
+        matches!(self, Self::Video(_))
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Image(_) => "Image",
+            Self::Video(_) => "Video",
+        }
     }
 }
 
@@ -819,13 +883,35 @@ pub enum LinkState {
 #[derive(Debug, Clone)]
 pub enum MediaFetch {
     Image(String),
+    Video(String),
     LinkPreview(String),
+}
+
+/// Remote video bytes for the vidya preview player.
+#[derive(Clone)]
+pub enum VideoState {
+    Loading,
+    Ready(std::sync::Arc<[u8]>),
+    Failed,
+}
+
+impl std::fmt::Debug for VideoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Loading => write!(f, "Loading"),
+            Self::Ready(b) => write!(f, "Ready({} bytes)", b.len()),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
 }
 
 /// In-memory cache of remote images and Open Graph cards, plus a pending queue.
 #[derive(Debug, Default)]
 pub struct MediaCache {
     pub images: HashMap<String, ImageState>,
+    pub videos: HashMap<String, VideoState>,
+    /// Per-bubble playback widget state (vidya), keyed by `url\\0msgid`.
+    pub video_players: HashMap<String, vidya::VideoPlayerState>,
     pub links: HashMap<String, LinkState>,
     pending: Vec<MediaFetch>,
 }
@@ -841,6 +927,18 @@ impl MediaCache {
             self.pending.push(MediaFetch::Image(url.to_string()));
         }
         self.images.get(url)
+    }
+
+    /// Ensure a video fetch is in flight for muted inline playback.
+    pub fn touch_video(&mut self, url: &str) -> Option<&VideoState> {
+        if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        if !self.videos.contains_key(url) {
+            self.videos.insert(url.to_string(), VideoState::Loading);
+            self.pending.push(MediaFetch::Video(url.to_string()));
+        }
+        self.videos.get(url)
     }
 
     /// Ensure an OG fetch is in flight (unless already seeded).
@@ -881,6 +979,14 @@ impl MediaCache {
         self.images.insert(url, ImageState::Failed);
     }
 
+    pub fn set_video_ready(&mut self, url: String, bytes: std::sync::Arc<[u8]>) {
+        self.videos.insert(url, VideoState::Ready(bytes));
+    }
+
+    pub fn set_video_failed(&mut self, url: String) {
+        self.videos.insert(url, VideoState::Failed);
+    }
+
     pub fn set_link_ready(&mut self, url: String, meta: LinkMeta) {
         if let Some(ref thumb) = meta.thumb_url {
             self.touch_image(thumb);
@@ -899,6 +1005,7 @@ impl MediaCache {
 
     pub fn has_loading(&self) -> bool {
         self.images.values().any(|s| matches!(s, ImageState::Loading))
+            || self.videos.values().any(|s| matches!(s, VideoState::Loading))
             || self.links.values().any(|s| matches!(s, LinkState::Loading))
     }
 }
@@ -946,9 +1053,9 @@ pub struct AppState {
     pub tab: Tab,
 
     pub compose: String,
-    /// Pending image from clipboard paste (shown above the text field).
-    pub compose_image: Option<ComposeImage>,
-    /// True while a pasted image is uploading to freeq.
+    /// Pending image/video attachment (shown above the text field).
+    pub compose_attach: Option<ComposeAttach>,
+    /// True while a pasted image/video is uploading to freeq.
     pub compose_uploading: bool,
     /// Monotonic id for the in-flight compose upload (cancel / stale finish).
     pub compose_upload_id: u64,
@@ -962,8 +1069,8 @@ pub struct AppState {
     pub focus_compose: bool,
     /// Tab-cycle state for compose nick completion (IRC-style).
     pub compose_nick_tab: NickTabComplete,
-    /// In-flight OS image file dialog (attach button). Polled each frame.
-    pub file_pick_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::PickImageResult>>,
+    /// In-flight OS media file dialog (attach button). Polled each frame.
+    pub file_pick_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::PickAttachResult>>,
     /// When `file_pick_rx` was set — used to unlock the compose bar if the OS
     /// dialog dies without a result (e.g. Android cancel with no activity result).
     pub file_pick_started: Option<Instant>,
@@ -1119,7 +1226,7 @@ impl AppState {
             route: Route::Tabs,
             tab: Tab::Chats,
             compose: String::new(),
-            compose_image: None,
+            compose_attach: None,
             compose_uploading: false,
             compose_upload_id: 0,
             compose_upload_started: None,
@@ -1262,17 +1369,17 @@ impl AppState {
         self.toast_until = Some(Instant::now() + TOAST_DURATION);
     }
 
-    /// True while the OS attach-image dialog is open (or a chosen file is decoding).
+    /// True while the OS attach-media dialog is open (or a chosen file is decoding).
     pub fn file_pick_busy(&self) -> bool {
         self.file_pick_rx.is_some()
     }
 
-    /// Launch the OS image file picker (no-op if one is already open).
+    /// Launch the OS image/video file picker (no-op if one is already open).
     pub fn start_file_pick(&mut self) {
         if self.file_pick_rx.is_some() {
             return;
         }
-        self.file_pick_rx = Some(crate::clipboard::start_pick_image_file());
+        self.file_pick_rx = Some(crate::clipboard::start_pick_media_file());
         self.file_pick_started = Some(Instant::now());
     }
 
@@ -1293,10 +1400,10 @@ impl AppState {
         self.compose_upload_id = self.compose_upload_id.wrapping_add(1);
     }
 
-    /// Remove the attached image and unlock compose (✕ / Cancel).
-    pub fn clear_compose_image(&mut self) {
+    /// Remove the attached media and unlock compose (✕ / Cancel).
+    pub fn clear_compose_attach(&mut self) {
         self.cancel_compose_upload();
-        self.compose_image = None;
+        self.compose_attach = None;
     }
 
     /// Apply a finished OS file-dialog result. Call once per frame from the app loop.
@@ -1307,8 +1414,8 @@ impl AppState {
             return false;
         };
         match rx.try_recv() {
-            Ok(Ok(Some(img))) => {
-                self.compose_image = Some(img);
+            Ok(Ok(Some(attach))) => {
+                self.compose_attach = Some(attach);
                 self.focus_compose = true;
                 self.clear_file_pick();
                 false
@@ -1335,7 +1442,7 @@ impl AppState {
                     .is_some_and(|t| t.elapsed() > PICK_UI_TIMEOUT)
                 {
                     self.clear_file_pick();
-                    self.show_toast("Image picker closed".to_string());
+                    self.show_toast("File picker closed".to_string());
                     false
                 } else {
                     true
@@ -1729,7 +1836,7 @@ impl AppState {
         // Switching buffers: drop pending compose so we don't send into the wrong room.
         if self.active_channel.as_deref() != Some(key.as_str()) {
             self.compose.clear();
-            self.clear_compose_image();
+            self.clear_compose_attach();
             self.compose_nick_tab.clear();
             self.cancel_edit();
         }
@@ -1760,7 +1867,7 @@ impl AppState {
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
-        self.clear_compose_image();
+        self.clear_compose_attach();
         self.compose_nick_tab.clear();
         self.cancel_edit();
     }
@@ -1872,7 +1979,7 @@ impl AppState {
     pub fn begin_edit(&mut self, msgid: String, text: String) {
         self.editing_msgid = Some(msgid);
         self.compose = text;
-        self.clear_compose_image();
+        self.clear_compose_attach();
         self.compose_nick_tab.clear();
         self.focus_compose = true;
         self.close_react_picker();
@@ -1924,7 +2031,7 @@ impl AppState {
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
-        self.clear_compose_image();
+        self.clear_compose_attach();
         self.compose_nick_tab.clear();
         self.local_call = None;
         self.clear_av_media();
@@ -2308,7 +2415,11 @@ mod tests {
         state.compose_upload_id = 7;
         state.compose_uploading = true;
         state.compose_upload_started = Some(Instant::now());
-        state.compose_image = Some(ComposeImage::from_rgba(1, 1, std::sync::Arc::from([0, 0, 0, 255])));
+        state.compose_attach = Some(ComposeAttach::Image(ComposeImage::from_rgba(
+            1,
+            1,
+            std::sync::Arc::from([0, 0, 0, 255]),
+        )));
 
         let before = state.compose_upload_id;
         state.cancel_compose_upload();
@@ -2316,10 +2427,10 @@ mod tests {
         assert!(state.compose_upload_started.is_none());
         assert_ne!(state.compose_upload_id, before);
         // Attachment kept so the user can retry after Cancel upload.
-        assert!(state.compose_image.is_some());
+        assert!(state.compose_attach.is_some());
 
-        state.clear_compose_image();
-        assert!(state.compose_image.is_none());
+        state.clear_compose_attach();
+        assert!(state.compose_attach.is_none());
         assert!(!state.compose_uploading);
     }
 }

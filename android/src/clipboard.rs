@@ -1,4 +1,4 @@
-//! Clipboard + file helpers for the compose-bar image attachment.
+//! Clipboard + file helpers for the compose-bar media attachment.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -7,12 +7,14 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
-use crate::state::ComposeImage;
+use crate::state::{ComposeAttach, ComposeImage, ComposeVideo};
 
 /// Max pixel dimension after load (keeps memory / upload reasonable).
 const MAX_DIM: u32 = 4096;
 /// Refuse raw RGBA pastes larger than this (~25 MP).
 const MAX_RGBA_BYTES: usize = 100_000_000;
+/// Server + freeq-app upload cap (also used as a pick-time reject for video).
+pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 /// How long the UI thread will wait on a clipboard/image helper thread.
 /// Arboard/X11 conversion and file decode must never block egui's immediate
@@ -298,22 +300,22 @@ fn is_likely_image_path(path: &Path) -> bool {
     }
 }
 
-/// Result of a native image file dialog (`Ok(None)` = user cancelled).
-pub type PickImageResult = Result<Option<ComposeImage>, String>;
+/// Result of a native media file dialog (`Ok(None)` = user cancelled).
+pub type PickAttachResult = Result<Option<ComposeAttach>, String>;
 
 /// Open the **OS file picker** on a background thread and return a receiver.
 ///
 /// Never call the dialog on the egui UI thread — a modal `block_on` there
 /// freezes the whole app (often until the process is killed). Desktop uses
-/// `rfd` (xdg-desktop-portal). Android uses the system document/photo Intent.
-pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
+/// `rfd` (xdg-desktop-portal). Android uses the system document Intent.
+pub fn start_pick_media_file() -> std::sync::mpsc::Receiver<PickAttachResult> {
     let (tx, rx) = std::sync::mpsc::channel();
     #[cfg(not(target_os = "android"))]
     {
         std::thread::Builder::new()
             .name("sleek-file-pick".into())
             .spawn(move || {
-                let result = pick_image_file_desktop();
+                let result = pick_media_file_desktop();
                 let _ = tx.send(result);
             })
             .expect("spawn file pick thread");
@@ -323,7 +325,7 @@ pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
         std::thread::Builder::new()
             .name("sleek-file-pick".into())
             .spawn(move || {
-                let result = crate::android_media::pick_image_file();
+                let result = crate::android_media::pick_media_file();
                 let _ = tx.send(result);
             })
             .expect("spawn android file pick thread");
@@ -352,7 +354,7 @@ fn rfd_runtime() -> &'static tokio::runtime::Runtime {
 
 /// Desktop: native OS dialog via rfd (portal / platform backend).
 #[cfg(not(target_os = "android"))]
-fn pick_image_file_desktop() -> PickImageResult {
+fn pick_media_file_desktop() -> PickAttachResult {
     // Serialize portal requests: a UI timeout can clear `file_pick_rx` while
     // the first worker is still inside `pick_file`, and two concurrent
     // OpenFileRequests on ashpd's shared connection also hang.
@@ -360,14 +362,19 @@ fn pick_image_file_desktop() -> PickImageResult {
     let _guard = PICK_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| "Image picker lock poisoned".to_string())?;
+        .map_err(|_| "File picker lock poisoned".to_string())?;
 
     // rfd's xdg-portal backend (ashpd → zbus) needs a Tokio reactor. Drive it
     // from this worker thread only — never on the egui UI thread.
     let path = rfd_runtime().block_on(async {
         rfd::AsyncFileDialog::new()
-            .set_title("Attach image")
+            .set_title("Attach image or video")
+            .add_filter(
+                "Media",
+                &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "m4v", "webm", "mov"],
+            )
             .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Videos", &["mp4", "m4v", "webm", "mov"])
             .pick_file()
             .await
             .map(|handle| handle.path().to_path_buf())
@@ -376,16 +383,107 @@ fn pick_image_file_desktop() -> PickImageResult {
     let Some(path) = path else {
         return Ok(None);
     };
-    Ok(Some(load_image_from_path(&path)?))
+    Ok(Some(load_attach_from_path(&path)?))
+}
+
+/// Load an image or video file into a compose attachment.
+pub fn load_attach_from_path(path: &Path) -> Result<ComposeAttach, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read file: {e}"))?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attach")
+        .to_string();
+    load_attach_from_vec(bytes, Some(&name))
 }
 
 /// Load and decode an image file into RGBA for the compose preview / upload.
 pub fn load_image_from_path(path: &Path) -> Result<ComposeImage, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read file: {e}"))?;
-    load_image_from_bytes(&bytes)
+    match load_attach_from_path(path)? {
+        ComposeAttach::Image(img) => Ok(img),
+        ComposeAttach::Video(_) => Err("Not an image file".into()),
+    }
 }
 
-/// Decode image bytes (png/jpeg/gif/webp/bmp) into a compose attachment.
+/// Build a compose attachment from raw bytes + optional filename hint.
+///
+/// Prefer [`load_attach_from_vec`] when you already own the buffer so video
+/// attachments can move into an `Arc` without a second copy.
+pub fn load_attach_from_bytes(bytes: &[u8], filename: Option<&str>) -> Result<ComposeAttach, String> {
+    load_attach_from_vec(bytes.to_vec(), filename)
+}
+
+/// Like [`load_attach_from_bytes`], but takes ownership (no video double-copy).
+pub fn load_attach_from_vec(
+    bytes: Vec<u8>,
+    filename: Option<&str>,
+) -> Result<ComposeAttach, String> {
+    if bytes.is_empty() {
+        return Err("Empty file".into());
+    }
+
+    let name = filename.unwrap_or("attach");
+    let lower = name.to_ascii_lowercase();
+    if let Some(ct) =
+        video_content_type_for_name(&lower).or_else(|| sniff_video_content_type(&bytes))
+    {
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            return Err("Video is too large (max 10MB)".into());
+        }
+        let filename = if lower.ends_with(".mp4")
+            || lower.ends_with(".m4v")
+            || lower.ends_with(".webm")
+            || lower.ends_with(".mov")
+        {
+            name.to_string()
+        } else {
+            default_video_filename(ct)
+        };
+        return Ok(ComposeAttach::Video(ComposeVideo::new(
+            Arc::<[u8]>::from(bytes),
+            ct,
+            filename,
+        )));
+    }
+
+    Ok(ComposeAttach::Image(load_image_from_bytes(&bytes)?))
+}
+
+fn video_content_type_for_name(name: &str) -> Option<&'static str> {
+    let base = name.split('?').next().unwrap_or(name);
+    let base = base.split('#').next().unwrap_or(base);
+    if base.ends_with(".mp4") || base.ends_with(".m4v") {
+        Some("video/mp4")
+    } else if base.ends_with(".webm") {
+        Some("video/webm")
+    } else if base.ends_with(".mov") {
+        Some("video/quicktime")
+    } else {
+        None
+    }
+}
+
+fn sniff_video_content_type(bytes: &[u8]) -> Option<&'static str> {
+    // ISO BMFF (`….ftyp`) — mp4 / m4v / mov.
+    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        return Some("video/mp4");
+    }
+    // EBML / Matroska / WebM
+    if bytes.len() >= 4 && bytes[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return Some("video/webm");
+    }
+    None
+}
+
+fn default_video_filename(content_type: &str) -> String {
+    match content_type {
+        "video/webm" => "clip.webm".into(),
+        "video/quicktime" => "clip.mov".into(),
+        _ => "clip.mp4".into(),
+    }
+}
+
+/// Decode image bytes (png/jpeg/gif/webp/bmp) into a compose attachment image.
 pub fn load_image_from_bytes(bytes: &[u8]) -> Result<ComposeImage, String> {
     if bytes.is_empty() {
         return Err("Empty file".into());
@@ -446,4 +544,33 @@ pub fn start_encode_png(
         })
         .expect("spawn png encode thread");
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_mp4_as_video_attach() {
+        // Minimal ISO BMFF header (ftyp) — enough for sniff + attach.
+        let mut bytes = vec![0u8; 32];
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[8..12].copy_from_slice(b"isom");
+        let attach = load_attach_from_bytes(&bytes, Some("clip.mp4")).unwrap();
+        match attach {
+            ComposeAttach::Video(v) => {
+                assert_eq!(v.content_type, "video/mp4");
+                assert_eq!(v.filename, "clip.mp4");
+            }
+            other => panic!("expected video, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_huge_video() {
+        let mut bytes = vec![0u8; MAX_UPLOAD_BYTES + 1];
+        bytes[4..8].copy_from_slice(b"ftyp");
+        let err = load_attach_from_bytes(&bytes, Some("big.mp4")).unwrap_err();
+        assert!(err.contains("10MB"), "{err}");
+    }
 }

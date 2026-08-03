@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::Context;
 use winit::platform::android::activity::{AndroidApp, WindowManagerFlags};
 
-use crate::clipboard::PickImageResult;
+use crate::clipboard::PickAttachResult;
 
 static ANDROID_APP: OnceLock<AndroidApp> = OnceLock::new();
 
@@ -937,23 +937,23 @@ enum RawPick {
     Failed(String),
 }
 
-/// Open the system image picker and block until the user chooses or cancels.
+/// Open the system image/video picker and block until the user chooses or cancels.
 ///
 /// Designed to run on a **background thread** (never the egui UI thread).
-pub fn pick_image_file() -> PickImageResult {
+pub fn pick_media_file() -> PickAttachResult {
     ensure_read_images_permission();
 
     {
         let mut busy = PICK_BUSY
             .lock()
-            .map_err(|_| "Image picker lock poisoned".to_string())?;
+            .map_err(|_| "File picker lock poisoned".to_string())?;
         if *busy {
-            return Err("An image picker is already open".into());
+            return Err("A file picker is already open".into());
         }
         *busy = true;
     }
 
-    let finish = |outcome: PickImageResult| -> PickImageResult {
+    let finish = |outcome: PickAttachResult| -> PickAttachResult {
         let _ = PICK_BUSY.lock().map(|mut g| *g = false);
         outcome
     };
@@ -983,7 +983,7 @@ pub fn pick_image_file() -> PickImageResult {
         // Primary: helper Fragment statics (set from onActivityResult).
         match poll_fragment_pick_result() {
             Ok(RawPick::Image(bytes)) => {
-                return finish(crate::clipboard::load_image_from_bytes(&bytes).map(Some));
+                return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
             }
             Ok(RawPick::Cancelled) => {
                 return finish(Ok(None));
@@ -1000,7 +1000,7 @@ pub fn pick_image_file() -> PickImageResult {
         if !used_fragment {
             match scavenge_pick_result() {
                 Ok(RawPick::Image(bytes)) => {
-                    return finish(crate::clipboard::load_image_from_bytes(&bytes).map(Some));
+                    return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
                 }
                 Ok(RawPick::Cancelled) => {
                     return finish(Ok(None));
@@ -1082,59 +1082,10 @@ macro_rules! activity_from_raw {
 
 fn build_picker_intent<'a>(
     env: &mut jni::Env<'a>,
-    activity: &jni::objects::JObject<'_>,
+    _activity: &jni::objects::JObject<'_>,
 ) -> Result<jni::objects::JObject<'a>, String> {
-    use jni::objects::JValue;
-    use jni::{jni_sig, jni_str};
-
-    // Prefer modern photo picker (API 33+); fall back to OPEN_DOCUMENT.
-    let action = env
-        .new_string("android.provider.action.PICK_IMAGES")
-        .map_err(|e| format!("{e}"))?;
-    let intent_cls = env
-        .find_class(jni_str!("android/content/Intent"))
-        .map_err(|e| format!("{e}"))?;
-    let trial = env.new_object(
-        &intent_cls,
-        jni_sig!((java.lang.String)),
-        &[JValue::Object(action.as_ref())],
-    );
-
-    if let Ok(trial) = trial {
-        let extra_type = env
-            .new_string("android.provider.extra.PICK_IMAGES_MAX")
-            .map_err(|e| format!("{e}"))?;
-        let _ = env.call_method(
-            &trial,
-            jni_str!("putExtra"),
-            jni_sig!((java.lang.String, jint) -> android.content.Intent),
-            &[JValue::Object(extra_type.as_ref()), JValue::Int(1)],
-        );
-        let pm = env
-            .call_method(
-                activity,
-                jni_str!("getPackageManager"),
-                jni_sig!(() -> android.content.pm.PackageManager),
-                &[],
-            )
-            .map_err(|e| format!("{e}"))?
-            .l()
-            .map_err(|e| format!("{e}"))?;
-        let resolved = env
-            .call_method(
-                &pm,
-                jni_str!("resolveActivity"),
-                jni_sig!((android.content.Intent, jint) -> android.content.pm.ResolveInfo),
-                &[JValue::Object(trial.as_ref()), JValue::Int(0)],
-            )
-            .map_err(|e| format!("{e}"))?
-            .l()
-            .map_err(|e| format!("{e}"))?;
-        if !resolved.is_null() {
-            return Ok(trial);
-        }
-    }
-
+    // Prefer OPEN_DOCUMENT with image + video MIME types. The modern photo
+    // picker (`PICK_IMAGES`) is images-only and would hide `.mp4` / `.webm`.
     build_open_document_intent(env).map_err(|e| format!("{e}"))
 }
 
@@ -1364,7 +1315,7 @@ fn reset_pick_fragment_statics(env: &mut jni::Env<'_>, cls: &jni::objects::JClas
 fn build_open_document_intent<'a>(
     env: &mut jni::Env<'a>,
 ) -> jni::errors::Result<jni::objects::JObject<'a>> {
-    use jni::objects::JValue;
+    use jni::objects::{JObject, JValue};
     use jni::{jni_sig, jni_str};
 
     // Intent.ACTION_OPEN_DOCUMENT
@@ -1385,12 +1336,39 @@ fn build_open_document_intent<'a>(
         &[JValue::Object(cat.as_ref())],
     )?;
 
-    let mime = env.new_string("image/*")?;
+    let mime = env.new_string("*/*")?;
     env.call_method(
         &intent,
         jni_str!("setType"),
         jni_sig!((java.lang.String) -> android.content.Intent),
         &[JValue::Object(mime.as_ref())],
+    )?;
+
+    // EXTRA_MIME_TYPES: images + freeq-allowed videos (mp4/webm/mov).
+    let string_cls = env.find_class(jni_str!("java/lang/String"))?;
+    let arr = env.new_object_array(4, &string_cls, jni::objects::JObject::null())?;
+    let m0 = env.new_string("image/*")?;
+    let m1 = env.new_string("video/mp4")?;
+    let m2 = env.new_string("video/webm")?;
+    let m3 = env.new_string("video/quicktime")?;
+    // Disambiguate `JString: AsRef<_>` (jni has multiple impls) like requestPermissions.
+    let m0_obj: &JObject = m0.as_ref();
+    let m1_obj: &JObject = m1.as_ref();
+    let m2_obj: &JObject = m2.as_ref();
+    let m3_obj: &JObject = m3.as_ref();
+    env.set_object_array_element(&arr, 0, m0_obj)?;
+    env.set_object_array_element(&arr, 1, m1_obj)?;
+    env.set_object_array_element(&arr, 2, m2_obj)?;
+    env.set_object_array_element(&arr, 3, m3_obj)?;
+    let extra = env.new_string("android.intent.extra.MIME_TYPES")?;
+    env.call_method(
+        &intent,
+        jni_str!("putExtra"),
+        jni_sig!((java.lang.String, [java.lang.String]) -> android.content.Intent),
+        &[
+            JValue::Object(extra.as_ref()),
+            JValue::Object(arr.as_ref()),
+        ],
     )?;
 
     Ok(intent)

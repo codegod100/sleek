@@ -755,6 +755,10 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
+    let video_url = match &embed {
+        Some(Embed::Video { url }) => Some(url.clone()),
+        _ => None,
+    };
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
@@ -888,23 +892,35 @@ pub fn message_bubble(
                 };
             }
 
-            if let Some(embed) = embed {
-                ui.add_space(sp.sm);
+            if let Some(embed) = embed.as_ref() {
                 match embed {
+                    // Video mounts outside the bubble frame (below) so play
+                    // clicks are not stolen by later bubble interacts.
+                    Embed::Video { .. } => {}
                     Embed::Image { url } => {
-                        if inline_image_preview(ui, th, media, &url) {
-                            action = MessageBubbleAction::OpenImage { url };
+                        ui.add_space(sp.sm);
+                        if inline_image_preview(ui, th, media, url) {
+                            action = MessageBubbleAction::OpenImage {
+                                url: url.clone(),
+                            };
                         }
                     }
                     Embed::Link { url } => {
+                        ui.add_space(sp.sm);
                         let seed = msg.link_meta.clone();
                         // Salt with message id so two bubbles with the same URL
                         // never share an interact / hover widget id.
-                        og_link_preview(ui, th, media, &url, seed.as_ref(), &msg.id);
+                        og_link_preview(ui, th, media, url, seed.as_ref(), &msg.id);
                     }
                 }
             }
         });
+
+    // Video below the bubble — same layering rule as reaction chips.
+    if let Some(url) = video_url {
+        ui.add_space(sp.xs);
+        inline_video_preview(ui, th, media, &url, &msg.id);
+    }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
     if action_metrics.is_some() {
@@ -1456,6 +1472,139 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                 .on_hover_text("Tap to enlarge");
             resp.clicked()
         }
+    }
+}
+
+/// Inline video card via [`vidya::video_player`] (muted H.264-in-MP4).
+///
+/// Unsupported formats (WebM, etc.) keep the play-card look and open externally.
+fn inline_video_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+) {
+    use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
+
+    media.touch_video(url);
+
+    let sp = &th.spacing;
+    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+
+    match media.videos.get(url) {
+        Some(crate::state::VideoState::Loading) | None => {
+            egui::Frame::new()
+                .fill(th.palette.headerbar_bg)
+                .corner_radius(sp.radius_sm)
+                .inner_margin(egui::Margin::symmetric(12, 16))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(sp.sm);
+                        dim_label(ui, th, "Loading video…");
+                    });
+                });
+            return;
+        }
+        Some(crate::state::VideoState::Failed) => {
+            // Fall back to the open-in-browser card without bytes.
+            video_open_fallback(ui, th, url, id_salt);
+            return;
+        }
+        Some(crate::state::VideoState::Ready(_)) => {}
+    }
+
+    // Clone Arc so we can mutably borrow the player map separately.
+    let bytes = match media.videos.get(url) {
+        Some(crate::state::VideoState::Ready(b)) => b.clone(),
+        _ => return,
+    };
+
+    // Per-bubble player state — same URL in two messages must not share playhead.
+    let player_key = format!("{url}\0{id_salt}");
+    let player = media
+        .video_players
+        .entry(player_key)
+        .or_insert_with(VideoPlayerState::new);
+    player.load_bytes(ui.ctx(), (url, id_salt), bytes);
+
+    let opts = VideoPlayerOpts {
+        max_width: max_w,
+        max_height: EMBED_MAX_H,
+        title: Some(preview::display_filename(url)),
+        open_url_on_unsupported: Some(url.to_string()),
+    };
+    let (_resp, action) = video_player(ui, th, player, &opts);
+    if action == VideoPlayerAction::OpenExternally {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+}
+
+/// Play-card that only opens the URL (fetch/decode failed).
+fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+
+    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
+    let size = Vec2::new(max_w, height);
+    let card_id = ui.id().with("video_fallback").with(id_salt);
+
+    let frame_resp = egui::Frame::new()
+        .fill(Color32::from_rgb(12, 12, 14))
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(sp.radius_sm)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            ui.painter()
+                .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
+            let play_r = (height * 0.18).clamp(16.0, 28.0);
+            let center = rect.center();
+            ui.painter()
+                .circle_filled(center, play_r, p.accent.gamma_multiply(0.92));
+            let tri_w = play_r * 0.7;
+            let tri_h = play_r * 0.85;
+            let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+            let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+            let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip, bot, top],
+                Color32::from_rgb(255, 255, 255),
+                Stroke::NONE,
+            ));
+            let name = preview::display_filename(url);
+            let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
+            let foot = Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - foot_h),
+                rect.right_bottom(),
+            );
+            let r = sp.radius_sm as u8;
+            ui.painter().rect_filled(
+                foot,
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: r,
+                    se: r,
+                },
+                Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+            );
+            ui.painter().text(
+                Pos2::new(foot.left() + 8.0, foot.center().y),
+                Align2::LEFT_CENTER,
+                name,
+                FontId::proportional(th.type_scale.caption),
+                Color32::from_rgb(230, 230, 235),
+            );
+        });
+
+    let resp = ui
+        .interact(frame_resp.response.rect, card_id, Sense::click())
+        .on_hover_text("Open video")
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if resp.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
 }
 
