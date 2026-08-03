@@ -1556,6 +1556,28 @@ impl AppState {
         chans
     }
 
+    /// Bluesky handle for session save / prefs — broker token may omit `handle`.
+    fn effective_bsky_handle(&self) -> String {
+        self.handle
+            .as_deref()
+            .filter(|h| !h.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| normalize_bsky_handle(&self.form_handle))
+    }
+
+    /// Record a Bluesky handle in MRU prefs (survives logout and restart).
+    pub fn remember_bsky_handle(&mut self, handle: &str) {
+        let h = normalize_bsky_handle(handle);
+        if h.is_empty() {
+            return;
+        }
+        let prior = self.recent_handles.clone();
+        push_mru(&mut self.recent_handles, &h, MAX_RECENT_HANDLES);
+        if self.recent_handles != prior {
+            self.persist_prefs();
+        }
+    }
+
     /// Record a successfully visited channel and persist.
     /// Channels only — DMs are not auto-joined. No-op if already listed
     /// (avoids reshuffling order / rewriting prefs on every reconnect join).
@@ -1600,12 +1622,12 @@ impl AppState {
         if let Some(broker_token) = self.broker_token.clone() {
             // Never poison storage with a Guest temp nick while DID-authenticated
             // (freeq-android AuthRecoveryTest).
+            let handle = self.effective_bsky_handle();
             let nick = if self.did.is_some() && self.nick.starts_with("Guest") {
-                self.handle.clone().unwrap_or_default()
+                handle.clone()
             } else {
                 self.nick.clone()
             };
-            let handle = self.handle.clone().unwrap_or_default();
             let session = crate::auth::SavedSession {
                 broker_token,
                 did: self.did.clone().unwrap_or_default(),
@@ -1622,8 +1644,7 @@ impl AppState {
             }
             // Remember handle in prefs (survives logout) + MRU history.
             if !handle.is_empty() {
-                push_mru(&mut self.recent_handles, &handle, MAX_RECENT_HANDLES);
-                self.persist_prefs();
+                self.remember_bsky_handle(&handle);
             }
             return;
         }
@@ -2187,11 +2208,14 @@ fn normalize_recent_nicks(raw: Vec<String>) -> Vec<String> {
     out
 }
 
+fn normalize_bsky_handle(raw: &str) -> String {
+    raw.trim().trim_start_matches('@').trim().to_string()
+}
+
 fn normalize_recent_handles(raw: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     for handle in raw {
-        let h = handle.trim().trim_start_matches('@').trim();
-        push_mru(&mut out, h, MAX_RECENT_HANDLES);
+        push_mru(&mut out, &normalize_bsky_handle(&handle), MAX_RECENT_HANDLES);
     }
     out
 }
@@ -2470,5 +2494,49 @@ mod tests {
         state.clear_compose_attach();
         assert!(state.compose_attach.is_none());
         assert!(!state.compose_uploading);
+    }
+
+    #[test]
+    fn remember_bsky_handle_normalizes_and_dedupes() {
+        let mut state = AppState::new();
+        state.recent_handles.clear();
+        state.remember_bsky_handle("@alice.bsky.social");
+        assert_eq!(state.recent_handles, vec!["alice.bsky.social".to_string()]);
+        state.remember_bsky_handle("  alice.bsky.social ");
+        assert_eq!(state.recent_handles, vec!["alice.bsky.social".to_string()]);
+        state.remember_bsky_handle("bob.bsky.social");
+        assert_eq!(
+            state.recent_handles,
+            vec![
+                "bob.bsky.social".to_string(),
+                "alice.bsky.social".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_bsky_handle_falls_back_to_form_handle() {
+        let mut state = AppState::new();
+        state.handle = None;
+        state.form_handle = "typed.bsky.social".into();
+        assert_eq!(state.effective_bsky_handle(), "typed.bsky.social");
+        state.handle = Some("broker.bsky.social".into());
+        assert_eq!(state.effective_bsky_handle(), "broker.bsky.social");
+    }
+
+    #[test]
+    fn persist_session_uses_form_handle_when_broker_omits_handle() {
+        let mut state = AppState::new();
+        state.recent_handles.clear();
+        state.broker_token = Some("bt".into());
+        state.did = Some("did:plc:test".into());
+        state.nick = "alice".into();
+        state.form_handle = "alice.bsky.social".into();
+        state.persist_session();
+        assert_eq!(
+            state.recent_handles.first().map(String::as_str),
+            Some("alice.bsky.social")
+        );
+        assert_eq!(state.effective_bsky_handle(), "alice.bsky.social");
     }
 }
