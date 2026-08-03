@@ -1,6 +1,6 @@
 # Sleek
 
-Mobile **freeq** client built with **[Vidya](https://tangled.org/nandi.uk/vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](../freeq/freeq-sdk)**.
+Mobile **freeq** client built with **[Vidya](https://tangled.org/nandi.uk/vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](https://github.com/codegod100/freeq/tree/main/freeq-sdk)**.
 
 Layout and flows take cues from the freeq Android app: connect (guest), chats list, chat detail, discover, and settings — with a portrait bottom-tab shell.
 
@@ -25,7 +25,7 @@ Sleek on Waydroid (chat + in-call video):
 ## Stack
 
 - **UI**: [egui](https://github.com/emilk/egui) + [vidya](https://tangled.org/nandi.uk/vidya) theme/widgets + Android safe chrome
-- **Network**: [freeq-sdk](../freeq/freeq-sdk) (guest IRC, TLS / WebSocket)
+- **Network**: [freeq-sdk](https://github.com/codegod100/freeq/tree/main/freeq-sdk) (guest IRC, TLS / WebSocket)
 - **Targets**: desktop host (Wayland/X11) and Android NativeActivity (`cargo-apk` / Waydroid)
 
 ## Run
