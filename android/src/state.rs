@@ -2034,7 +2034,7 @@ impl AppState {
             return;
         }
         self.cancel_edit();
-        self.clear_compose_image();
+        self.clear_compose_attach();
         self.compose_nick_tab.clear();
         self.replying_to = Some(ReplyTarget {
             msgid: msg.id.clone(),
