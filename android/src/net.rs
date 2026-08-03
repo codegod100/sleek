@@ -44,6 +44,12 @@ pub enum NetCmd {
         target: String,
         text: String,
     },
+    /// PRIVMSG with `+reply` — threaded reply to a message.
+    Reply {
+        target: String,
+        msgid: String,
+        text: String,
+    },
     /// Raw IRC line (slash-command fallthrough, NICK, TOPIC, …).
     Raw(String),
     /// Upload image bytes to freeq `/api/v1/upload`, then PRIVMSG the URL (+ caption).
@@ -527,6 +533,19 @@ async fn apply_cmd(
             if let Some(h) = handle {
                 if let Err(e) = h.privmsg(&target, &text).await {
                     let _ = event_tx.send(NetEvent::Failed(format!("Send failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
+        NetCmd::Reply {
+            target,
+            msgid,
+            text,
+        } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.reply(&target, &msgid, &text).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Reply failed: {e}")));
                 }
             } else {
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));

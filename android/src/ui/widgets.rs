@@ -30,6 +30,8 @@ pub enum MessageBubbleAction {
     OpenImage { url: String },
     /// Begin editing this message in the compose bar.
     Edit { msgid: String, text: String },
+    /// Begin replying to this message in the compose bar.
+    Reply { msgid: String },
     /// Soft-delete this message (`+draft/delete`).
     Delete { msgid: String },
 }
@@ -242,6 +244,106 @@ enum MessageActionGlyph {
     Emoji(&'static str),
 }
 
+const SWIPE_REPLY_THRESHOLD: f32 = 60.0;
+
+#[derive(Clone, Default)]
+struct SwipeReplyState {
+    offset: f32,
+    press_origin: Option<Pos2>,
+    armed: bool,
+    triggered: bool,
+}
+
+/// Touch swipe-right on a message bubble (APK). Returns the visual offset and
+/// whether the gesture just crossed the reply threshold.
+fn touch_swipe_reply(
+    ui: &mut egui::Ui,
+    msg_id: &str,
+    bubble_rect: Rect,
+    can_reply: bool,
+) -> (f32, bool) {
+    if !can_reply {
+        return (0.0, false);
+    }
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen());
+    if !touch_ui {
+        return (0.0, false);
+    }
+
+    let id = Id::new(("swipe_reply", msg_id));
+    let max_off = SWIPE_REPLY_THRESHOLD * 1.2;
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let primary_released = ui.input(|i| i.pointer.primary_released());
+    let pos = ui.ctx().pointer_interact_pos();
+    let over = pos.is_some_and(|p| bubble_rect.contains(p));
+
+    let mut st = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<SwipeReplyState>(id).unwrap_or_default());
+
+    if primary_pressed && over {
+        st.press_origin = pos;
+        st.armed = false;
+        st.triggered = false;
+    }
+
+    if primary_down {
+        if let (Some(origin), Some(cur)) = (st.press_origin, pos) {
+            let dx = cur.x - origin.x;
+            let dy = (cur.y - origin.y).abs();
+            if !st.armed && dx > 8.0 && dx > dy {
+                st.armed = true;
+            }
+            if st.armed {
+                st.offset = dx.clamp(0.0, max_off);
+            }
+        }
+    }
+
+    let mut just_triggered = false;
+    if primary_released {
+        if st.armed && st.offset >= SWIPE_REPLY_THRESHOLD {
+            just_triggered = true;
+        }
+        st.offset = 0.0;
+        st.press_origin = None;
+        st.armed = false;
+        st.triggered = false;
+    } else if st.armed && !st.triggered && st.offset >= SWIPE_REPLY_THRESHOLD {
+        st.triggered = true;
+        just_triggered = true;
+    }
+
+    ui.ctx().data_mut(|d| d.insert_temp(id, st.clone()));
+    (st.offset, just_triggered)
+}
+
+fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    ui.horizontal(|ui| {
+        ui.add_space(sp.md);
+        let bar_h = (th.type_scale.caption * 1.2).max(14.0);
+        let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
+        ui.painter().rect_filled(bar_rect, 1.0, p.accent);
+        ui.add_space(4.0);
+        let preview = parent.preview();
+        let label = if parent.from.is_empty() {
+            preview
+        } else {
+            format!("{}: {preview}", parent.from)
+        };
+        ui.label(
+            RichText::new(label)
+                .size(th.type_scale.caption)
+                .color(p.text_secondary),
+        );
+    });
+    ui.add_space(sp.xs);
+}
+
 /// Width / height for the shared hover + context icon bar.
 #[derive(Clone, Copy)]
 struct MessageActionBarMetrics {
@@ -254,12 +356,13 @@ struct MessageActionBarMetrics {
 fn message_action_bar_metrics(
     th: &Theme,
     can_react: bool,
+    can_reply: bool,
     can_edit: bool,
     can_delete: bool,
 ) -> MessageActionBarMetrics {
     let pad = 4.0;
     let btn = (th.type_scale.body * 1.35).max(22.0);
-    let n = [can_react, can_edit, can_delete]
+    let n = [can_react, can_reply, can_edit, can_delete]
         .into_iter()
         .filter(|v| *v)
         .count() as f32;
@@ -312,6 +415,7 @@ fn message_action_icons(
     th: &Theme,
     metrics: MessageActionBarMetrics,
     can_react: bool,
+    can_reply: bool,
     can_edit: bool,
     can_delete: bool,
     react_picker_open: bool,
@@ -323,6 +427,20 @@ fn message_action_icons(
         Layout::left_to_right(Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            if can_reply
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("↩"),
+                    "Reply",
+                    false,
+                )
+                .clicked()
+            {
+                action = Some(MessageBubbleAction::Reply {
+                    msgid: msg.id.clone(),
+                });
+            }
             if can_react
                 && message_action_icon_btn(
                     ui,
@@ -455,6 +573,7 @@ fn message_inline_action_chip(
     metrics: MessageActionBarMetrics,
     opacity: f32,
     can_react: bool,
+    can_reply: bool,
     can_edit: bool,
     can_delete: bool,
     react_picker_open: bool,
@@ -477,6 +596,7 @@ fn message_inline_action_chip(
                 th,
                 metrics,
                 can_react,
+                can_reply,
                 can_edit,
                 can_delete,
                 react_picker_open,
@@ -507,12 +627,13 @@ fn message_context_menu(
     menu_id: Id,
     body_long_touched: bool,
     can_react: bool,
+    can_reply: bool,
     can_edit: bool,
     can_delete: bool,
     react_picker_open: bool,
     msg: &ChatMessage,
 ) -> Option<MessageBubbleAction> {
-    if !can_react && !can_edit && !can_delete {
+    if !can_react && !can_reply && !can_edit && !can_delete {
         return None;
     }
 
@@ -618,7 +739,7 @@ fn message_context_menu(
 
     let mut action = None;
     let mut close = false;
-    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
+    let metrics = message_action_bar_metrics(th, can_react, can_reply, can_edit, can_delete);
 
     let pivot = if anchor.above_finger {
         Align2::CENTER_BOTTOM
@@ -641,6 +762,7 @@ fn message_context_menu(
                         th,
                         metrics,
                         can_react,
+                        can_reply,
                         can_edit,
                         can_delete,
                         react_picker_open,
@@ -712,6 +834,7 @@ pub fn message_bubble(
     ui: &mut egui::Ui,
     th: &Theme,
     msg: &ChatMessage,
+    reply_parent: Option<&ChatMessage>,
     own_nick: &str,
     media: &mut MediaCache,
     react_picker_open: bool,
@@ -762,19 +885,36 @@ pub fn message_bubble(
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
+    let can_reply = can_mutate;
     let can_edit = can_mutate && is_own;
     let can_delete = can_mutate && is_own;
     let mut body_long_touched = false;
     let hover_id = Id::new(("msg_hover", msg.id.as_str()));
     let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
+    let swipe_rect_id = Id::new(("msg_swipe_rect", msg.id.as_str()));
     let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
-    let show_actions = can_react || can_edit || can_delete;
+    let show_actions = can_react || can_reply || can_edit || can_delete;
     let touch_ui =
         cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen());
+    let prev_swipe_rect = ui.ctx().data(|d| d.get_temp::<Rect>(swipe_rect_id));
+    let (swipe_offset, swipe_reply) = prev_swipe_rect
+        .map(|r| touch_swipe_reply(ui, &msg.id, r, can_reply))
+        .unwrap_or((0.0, false));
+    if swipe_reply {
+        action = MessageBubbleAction::Reply {
+            msgid: msg.id.clone(),
+        };
+    }
     // Desktop: reserve header space for the fade-in chip. Touch uses long-press
     // menu only — don't leave a permanent empty gap beside the timestamp.
     let action_metrics = if show_actions && !touch_ui && !menu_open {
-        Some(message_action_bar_metrics(th, can_react, can_edit, can_delete))
+        Some(message_action_bar_metrics(
+            th,
+            can_react,
+            can_reply,
+            can_edit,
+            can_delete,
+        ))
     } else {
         None
     };
@@ -786,7 +926,16 @@ pub fn message_bubble(
 
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
-    let frame_resp = egui::Frame::new()
+    if let Some(parent) = reply_parent {
+        reply_context_preview(ui, th, parent);
+    }
+
+    let mut bubble_rect = Rect::NOTHING;
+    let row_resp = ui.horizontal(|ui| {
+        if swipe_offset > 0.0 {
+            ui.add_space(swipe_offset);
+        }
+        let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
@@ -820,6 +969,7 @@ pub fn message_bubble(
                             metrics,
                             hover_opacity,
                             can_react,
+                            can_reply,
                             can_edit,
                             can_delete,
                             react_picker_open,
@@ -852,9 +1002,11 @@ pub fn message_bubble(
                 url.to_string()
             } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
                 if can_edit || can_delete {
-                    "Long-press for React, Edit, Delete".to_string()
+                    "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
                 } else if can_react {
-                    "Long-press for React".to_string()
+                    "Long-press for React, Reply · swipe right to reply".to_string()
+                } else if can_reply {
+                    "Swipe right to reply".to_string()
                 } else {
                     String::new()
                 }
@@ -915,6 +1067,23 @@ pub fn message_bubble(
                 }
             }
         });
+        bubble_rect = frame_resp.response.rect;
+    })
+    .response;
+
+    if swipe_offset > 0.0 {
+        let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
+        ui.painter().text(
+            Pos2::new(row_resp.rect.left() + 12.0, row_resp.rect.center().y),
+            Align2::LEFT_CENTER,
+            "↩",
+            FontId::proportional(18.0),
+            p.accent.gamma_multiply(alpha),
+        );
+    }
+
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp.rect));
 
     // Video below the bubble — same layering rule as reaction chips.
     if let Some(url) = video_url {
@@ -925,19 +1094,20 @@ pub fn message_bubble(
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
     if action_metrics.is_some() {
         ui.ctx().data_mut(|d| {
-            d.insert_temp(message_hover_rect_id(hover_id), frame_resp.response.rect);
+            d.insert_temp(message_hover_rect_id(hover_id), bubble_rect);
         });
     }
 
-    // Right-click / long-press icon menu (React / Edit / Delete). Uses raw
+    // Right-click / long-press icon menu (React / Reply / Edit / Delete). Uses raw
     // secondary clicks so selectable body text doesn't eat the right-click.
     if let Some(menu_action) = message_context_menu(
         ui,
         th,
-        frame_resp.response.rect,
+        bubble_rect,
         menu_id,
         body_long_touched,
         can_react,
+        can_reply,
         can_edit,
         can_delete,
         react_picker_open,

@@ -84,6 +84,16 @@ fn apply_message_bubble_action(
         MessageBubbleAction::Edit { msgid, text } => {
             state.begin_edit(msgid, text);
         }
+        MessageBubbleAction::Reply { msgid } => {
+            let reply_msg = state
+                .channels
+                .get(channel)
+                .and_then(|b| b.messages.iter().find(|m| m.id == msgid))
+                .cloned();
+            if let Some(msg) = reply_msg {
+                state.begin_reply(&msg);
+            }
+        }
         MessageBubbleAction::Delete { msgid } => {
             *action = ChatAction::Delete {
                 target: channel.to_string(),
@@ -509,6 +519,37 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 }
             } else {
                 let is_editing = state.editing_msgid.is_some();
+                let is_replying = state.replying_to.is_some();
+                if is_replying {
+                    if let Some(reply) = state.replying_to.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Replying to {}", reply.from))
+                                    .size(th.type_scale.caption)
+                                    .color(p.accent)
+                                    .strong(),
+                            );
+                            ui.label(
+                                RichText::new(reply.preview)
+                                    .size(th.type_scale.caption)
+                                    .color(p.text_secondary),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .small_button("Cancel")
+                                    .on_hover_text("Cancel reply (Esc)")
+                                    .clicked()
+                                {
+                                    state.cancel_reply();
+                                }
+                            });
+                        });
+                        ui.add_space(sp.xs);
+                        if state.react_picker_msg.is_none() && consume_escape(ui) {
+                            state.cancel_reply();
+                        }
+                    }
+                }
                 if is_editing {
                     ui.horizontal(|ui| {
                         ui.label(
@@ -541,6 +582,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 };
                 let (hint, action_label, action_w) = if is_editing {
                     ("Edit message…", "Save", 72.0_f32)
+                } else if is_replying {
+                    ("Reply…", "Send", 72.0_f32)
                 } else {
                     ("Message…", "Send", 72.0_f32)
                 };
@@ -555,7 +598,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     true,
                     compose_id,
                 );
-                if attach_clicked && !pick_busy && !is_editing {
+                if attach_clicked && !pick_busy && !is_editing && !is_replying {
                     state.start_file_pick();
                 }
                 if state.focus_compose {
@@ -621,6 +664,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let highlight_id = state.highlight_msgid.clone();
                 let mut did_scroll = false;
                 let mut target_in_view = false;
+                let msg_by_id: std::collections::HashMap<&str, &crate::state::ChatMessage> =
+                    messages.iter().map(|m| (m.id.as_str(), m)).collect();
                 for msg in &messages {
                     let highlighted = highlight_id.as_ref().is_some_and(|id| id == &msg.id);
                     let picker_open = state
@@ -628,12 +673,17 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         .as_ref()
                         .is_some_and(|id| id == &msg.id);
                     let want_scroll = scroll_target.as_ref().is_some_and(|id| id == &msg.id);
+                    let reply_parent = msg
+                        .reply_to
+                        .as_deref()
+                        .and_then(|id| msg_by_id.get(id).copied());
                     let outer = ui.push_id(("chat_msg", msg.id.as_str()), |ui| {
                         apply_message_bubble_action(
                             message_bubble(
                                 ui,
                                 th,
                                 msg,
+                                reply_parent,
                                 &own_nick,
                                 &mut state.media,
                                 picker_open,
