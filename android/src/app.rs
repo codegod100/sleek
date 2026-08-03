@@ -354,6 +354,7 @@ impl SleekApp {
         for req in self.state.media.drain_pending() {
             match req {
                 MediaFetch::Image(url) => self.net.send(NetCmd::FetchImage { url }),
+                MediaFetch::Video(url) => self.net.send(NetCmd::FetchVideo { url }),
                 MediaFetch::LinkPreview(url) => self.net.send(NetCmd::FetchLinkPreview { url }),
             }
         }
@@ -439,6 +440,12 @@ impl SleekApp {
             }
             NetEvent::ImageFetchFailed { url } => {
                 self.state.media.set_image_failed(url);
+            }
+            NetEvent::VideoFetched { url, bytes } => {
+                self.state.media.set_video_ready(url, bytes);
+            }
+            NetEvent::VideoFetchFailed { url } => {
+                self.state.media.set_video_failed(url);
             }
             NetEvent::LinkPreviewFetched {
                 url,

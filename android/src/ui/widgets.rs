@@ -933,7 +933,7 @@ pub fn message_bubble(
                         }
                     }
                     Embed::Video { url } => {
-                        inline_video_preview(ui, th, &url, &msg.id);
+                        inline_video_preview(ui, th, media, &url, &msg.id);
                     }
                     Embed::Link { url } => {
                         let seed = msg.link_meta.clone();
@@ -1506,19 +1506,79 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
     }
 }
 
-/// Inline video card (freeq-app / freeq-macos parity for `.mp4`/`.webm`/…).
+/// Inline video card via [`vidya::video_player`] (muted H.264-in-MP4).
 ///
-/// egui has no native `<video>` element, so we render a 16:9 play surface and
-/// open the URL in the system browser / media handler on tap.
-fn inline_video_preview(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) {
+/// Unsupported formats (WebM, etc.) keep the play-card look and open externally.
+fn inline_video_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+) {
+    use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
+
+    media.touch_video(url);
+
+    let sp = &th.spacing;
+    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+
+    match media.videos.get(url) {
+        Some(crate::state::VideoState::Loading) | None => {
+            egui::Frame::new()
+                .fill(th.palette.headerbar_bg)
+                .corner_radius(sp.radius_sm)
+                .inner_margin(egui::Margin::symmetric(12, 16))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(sp.sm);
+                        dim_label(ui, th, "Loading video…");
+                    });
+                });
+            return;
+        }
+        Some(crate::state::VideoState::Failed) => {
+            // Fall back to the open-in-browser card without bytes.
+            video_open_fallback(ui, th, url, id_salt);
+            return;
+        }
+        Some(crate::state::VideoState::Ready(_)) => {}
+    }
+
+    // Clone Arc so we can mutably borrow the player map separately.
+    let bytes = match media.videos.get(url) {
+        Some(crate::state::VideoState::Ready(b)) => b.clone(),
+        _ => return,
+    };
+
+    let player = media
+        .video_players
+        .entry(url.to_string())
+        .or_insert_with(VideoPlayerState::new);
+    player.load_bytes(ui.ctx(), (url, id_salt), bytes);
+
+    let opts = VideoPlayerOpts {
+        max_width: max_w,
+        max_height: EMBED_MAX_H,
+        title: Some(preview::display_filename(url)),
+        open_url_on_unsupported: Some(url.to_string()),
+    };
+    let (_resp, action) = video_player(ui, th, player, &opts);
+    if action == VideoPlayerAction::OpenExternally {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+}
+
+/// Play-card that only opens the URL (fetch/decode failed).
+fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) {
     let p = &th.palette;
     let sp = &th.spacing;
 
     let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
-    // ~16:9 surface, capped like freeq-app `max-h-72`.
     let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
     let size = Vec2::new(max_w, height);
-    let card_id = ui.id().with("video").with(id_salt);
+    let card_id = ui.id().with("video_fallback").with(id_salt);
 
     let frame_resp = egui::Frame::new()
         .fill(Color32::from_rgb(12, 12, 14))
@@ -1526,23 +1586,12 @@ fn inline_video_preview(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str)
         .corner_radius(sp.radius_sm)
         .show(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-
-            // Soft vignette so the play control reads against any theme.
-            ui.painter().rect_filled(
-                rect,
-                sp.radius_sm,
-                Color32::from_rgb(18, 18, 22),
-            );
-
-            // Play button circle.
+            ui.painter()
+                .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
             let play_r = (height * 0.18).clamp(16.0, 28.0);
             let center = rect.center();
-            ui.painter().circle_filled(
-                center,
-                play_r,
-                p.accent.gamma_multiply(0.92),
-            );
-            // Equilateral-ish play triangle pointing right.
+            ui.painter()
+                .circle_filled(center, play_r, p.accent.gamma_multiply(0.92));
             let tri_w = play_r * 0.7;
             let tri_h = play_r * 0.85;
             let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
@@ -1553,8 +1602,6 @@ fn inline_video_preview(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str)
                 Color32::from_rgb(255, 255, 255),
                 Stroke::NONE,
             ));
-
-            // Filename / host footer strip.
             let name = preview::display_filename(url);
             let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
             let foot = Rect::from_min_max(

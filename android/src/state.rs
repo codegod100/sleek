@@ -883,13 +883,35 @@ pub enum LinkState {
 #[derive(Debug, Clone)]
 pub enum MediaFetch {
     Image(String),
+    Video(String),
     LinkPreview(String),
+}
+
+/// Remote video bytes for the vidya preview player.
+#[derive(Clone)]
+pub enum VideoState {
+    Loading,
+    Ready(std::sync::Arc<[u8]>),
+    Failed,
+}
+
+impl std::fmt::Debug for VideoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Loading => write!(f, "Loading"),
+            Self::Ready(b) => write!(f, "Ready({} bytes)", b.len()),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
 }
 
 /// In-memory cache of remote images and Open Graph cards, plus a pending queue.
 #[derive(Debug, Default)]
 pub struct MediaCache {
     pub images: HashMap<String, ImageState>,
+    pub videos: HashMap<String, VideoState>,
+    /// Per-URL playback widget state (vidya).
+    pub video_players: HashMap<String, vidya::VideoPlayerState>,
     pub links: HashMap<String, LinkState>,
     pending: Vec<MediaFetch>,
 }
@@ -905,6 +927,18 @@ impl MediaCache {
             self.pending.push(MediaFetch::Image(url.to_string()));
         }
         self.images.get(url)
+    }
+
+    /// Ensure a video fetch is in flight for muted inline playback.
+    pub fn touch_video(&mut self, url: &str) -> Option<&VideoState> {
+        if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        if !self.videos.contains_key(url) {
+            self.videos.insert(url.to_string(), VideoState::Loading);
+            self.pending.push(MediaFetch::Video(url.to_string()));
+        }
+        self.videos.get(url)
     }
 
     /// Ensure an OG fetch is in flight (unless already seeded).
@@ -945,6 +979,14 @@ impl MediaCache {
         self.images.insert(url, ImageState::Failed);
     }
 
+    pub fn set_video_ready(&mut self, url: String, bytes: std::sync::Arc<[u8]>) {
+        self.videos.insert(url, VideoState::Ready(bytes));
+    }
+
+    pub fn set_video_failed(&mut self, url: String) {
+        self.videos.insert(url, VideoState::Failed);
+    }
+
     pub fn set_link_ready(&mut self, url: String, meta: LinkMeta) {
         if let Some(ref thumb) = meta.thumb_url {
             self.touch_image(thumb);
@@ -963,6 +1005,7 @@ impl MediaCache {
 
     pub fn has_loading(&self) -> bool {
         self.images.values().any(|s| matches!(s, ImageState::Loading))
+            || self.videos.values().any(|s| matches!(s, VideoState::Loading))
             || self.links.values().any(|s| matches!(s, LinkState::Loading))
     }
 }

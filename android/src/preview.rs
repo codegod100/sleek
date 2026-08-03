@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 /// Max image download size (bytes).
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Chat video preview download cap (muted H.264 MP4 decode in vidya).
+pub const MAX_VIDEO_BYTES: usize = 25 * 1024 * 1024;
 /// Downscale long edge for chat thumbs (pixels).
 pub const MAX_IMAGE_DIM: u32 = 720;
 

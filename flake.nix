@@ -17,8 +17,9 @@
     };
     # Path deps in Cargo.toml are ../../vidya and ../../freeq/freeq-sdk —
     # pin them as flake inputs so `nix build` works without a monorepo checkout.
+    # GitHub mirror of tangled.org/nandi.uk/vidya (includes video_player).
     vidya = {
-      url = "git+https://tangled.org/nandi.uk/vidya";
+      url = "github:codegod100/vidya";
       flake = false;
     };
     freeq = {

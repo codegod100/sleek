@@ -70,6 +70,8 @@ pub enum NetCmd {
     },
     /// Download an image for inline chat preview.
     FetchImage { url: String },
+    /// Download a video for muted inline playback (vidya player).
+    FetchVideo { url: String },
     /// Fetch Open Graph metadata for a link card.
     FetchLinkPreview { url: String },
     /// Open a freeq AV call in `channel` (sends `av-start`).
@@ -173,6 +175,14 @@ pub enum NetEvent {
         rgba: std::sync::Arc<[u8]>,
     },
     ImageFetchFailed {
+        url: String,
+    },
+    /// Remote video bytes for muted inline playback (vidya player).
+    VideoFetched {
+        url: String,
+        bytes: std::sync::Arc<[u8]>,
+    },
+    VideoFetchFailed {
         url: String,
     },
     /// Open Graph metadata for a link card.
@@ -665,6 +675,20 @@ async fn apply_cmd(
                 }
             });
         }
+        NetCmd::FetchVideo { url } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_video_bytes(&url).await {
+                    Ok(bytes) => {
+                        let _ = tx.send(NetEvent::VideoFetched { url, bytes });
+                    }
+                    Err(e) => {
+                        log::debug!("video fetch {url}: {e}");
+                        let _ = tx.send(NetEvent::VideoFetchFailed { url });
+                    }
+                }
+            });
+        }
         NetCmd::FetchLinkPreview { url } => {
             let tx = event_tx.clone();
             tokio::spawn(async move {
@@ -1141,4 +1165,60 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     let width = rgba.width() as usize;
     let height = rgba.height() as usize;
     Ok((width, height, std::sync::Arc::from(rgba.into_raw())))
+}
+
+/// Fetch remote video bytes for chat inline playback (SSRF-safe).
+async fn fetch_video_bytes(url: &str) -> Result<std::sync::Arc<[u8]>, String> {
+    use crate::preview::MAX_VIDEO_BYTES;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) video URLs".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("Bad URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?
+        .to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+
+    let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
+        .await
+        .map_err(|e| format!("SSRF check: {e}"))?;
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder.build().map_err(|e| format!("HTTP client: {e}"))?;
+
+    let resp = client
+        .get(url)
+        .header("Accept", "video/*,*/*;q=0.8")
+        .header("User-Agent", "Sleek/0.1 (chat video preview)")
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("HTTP error: {e}"))?;
+
+    if let Some(len) = resp.content_length() {
+        if len > MAX_VIDEO_BYTES as u64 {
+            return Err("Video too large".into());
+        }
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Body: {e}"))?;
+    if bytes.len() > MAX_VIDEO_BYTES {
+        return Err("Video too large".into());
+    }
+
+    Ok(std::sync::Arc::from(bytes.as_ref()))
 }
