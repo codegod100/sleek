@@ -394,7 +394,7 @@ pub fn load_attach_from_path(path: &Path) -> Result<ComposeAttach, String> {
         .and_then(|s| s.to_str())
         .unwrap_or("attach")
         .to_string();
-    load_attach_from_bytes(&bytes, Some(&name))
+    load_attach_from_vec(bytes, Some(&name))
 }
 
 /// Load and decode an image file into RGBA for the compose preview / upload.
@@ -406,14 +406,26 @@ pub fn load_image_from_path(path: &Path) -> Result<ComposeImage, String> {
 }
 
 /// Build a compose attachment from raw bytes + optional filename hint.
+///
+/// Prefer [`load_attach_from_vec`] when you already own the buffer so video
+/// attachments can move into an `Arc` without a second copy.
 pub fn load_attach_from_bytes(bytes: &[u8], filename: Option<&str>) -> Result<ComposeAttach, String> {
+    load_attach_from_vec(bytes.to_vec(), filename)
+}
+
+/// Like [`load_attach_from_bytes`], but takes ownership (no video double-copy).
+pub fn load_attach_from_vec(
+    bytes: Vec<u8>,
+    filename: Option<&str>,
+) -> Result<ComposeAttach, String> {
     if bytes.is_empty() {
         return Err("Empty file".into());
     }
 
     let name = filename.unwrap_or("attach");
     let lower = name.to_ascii_lowercase();
-    if let Some(ct) = video_content_type_for_name(&lower).or_else(|| sniff_video_content_type(bytes))
+    if let Some(ct) =
+        video_content_type_for_name(&lower).or_else(|| sniff_video_content_type(&bytes))
     {
         if bytes.len() > MAX_UPLOAD_BYTES {
             return Err("Video is too large (max 10MB)".into());
@@ -428,13 +440,13 @@ pub fn load_attach_from_bytes(bytes: &[u8], filename: Option<&str>) -> Result<Co
             default_video_filename(ct)
         };
         return Ok(ComposeAttach::Video(ComposeVideo::new(
-            Arc::from(bytes.to_vec()),
+            Arc::<[u8]>::from(bytes),
             ct,
             filename,
         )));
     }
 
-    Ok(ComposeAttach::Image(load_image_from_bytes(bytes)?))
+    Ok(ComposeAttach::Image(load_image_from_bytes(&bytes)?))
 }
 
 fn video_content_type_for_name(name: &str) -> Option<&'static str> {

@@ -910,7 +910,7 @@ impl std::fmt::Debug for VideoState {
 pub struct MediaCache {
     pub images: HashMap<String, ImageState>,
     pub videos: HashMap<String, VideoState>,
-    /// Per-URL playback widget state (vidya).
+    /// Per-bubble playback widget state (vidya), keyed by `url\\0msgid`.
     pub video_players: HashMap<String, vidya::VideoPlayerState>,
     pub links: HashMap<String, LinkState>,
     pending: Vec<MediaFetch>,

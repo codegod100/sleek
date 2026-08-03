@@ -983,9 +983,7 @@ pub fn pick_media_file() -> PickAttachResult {
         // Primary: helper Fragment statics (set from onActivityResult).
         match poll_fragment_pick_result() {
             Ok(RawPick::Image(bytes)) => {
-                return finish(
-                    crate::clipboard::load_attach_from_bytes(&bytes, None).map(Some),
-                );
+                return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
             }
             Ok(RawPick::Cancelled) => {
                 return finish(Ok(None));
@@ -1002,9 +1000,7 @@ pub fn pick_media_file() -> PickAttachResult {
         if !used_fragment {
             match scavenge_pick_result() {
                 Ok(RawPick::Image(bytes)) => {
-                    return finish(
-                        crate::clipboard::load_attach_from_bytes(&bytes, None).map(Some),
-                    );
+                    return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
                 }
                 Ok(RawPick::Cancelled) => {
                     return finish(Ok(None));
@@ -1319,7 +1315,7 @@ fn reset_pick_fragment_statics(env: &mut jni::Env<'_>, cls: &jni::objects::JClas
 fn build_open_document_intent<'a>(
     env: &mut jni::Env<'a>,
 ) -> jni::errors::Result<jni::objects::JObject<'a>> {
-    use jni::objects::JValue;
+    use jni::objects::{JObject, JValue};
     use jni::{jni_sig, jni_str};
 
     // Intent.ACTION_OPEN_DOCUMENT
@@ -1348,15 +1344,22 @@ fn build_open_document_intent<'a>(
         &[JValue::Object(mime.as_ref())],
     )?;
 
-    // EXTRA_MIME_TYPES: images + freeq-allowed videos.
+    // EXTRA_MIME_TYPES: images + freeq-allowed videos (mp4/webm/mov).
     let string_cls = env.find_class(jni_str!("java/lang/String"))?;
-    let arr = env.new_object_array(3, &string_cls, jni::objects::JObject::null())?;
+    let arr = env.new_object_array(4, &string_cls, jni::objects::JObject::null())?;
     let m0 = env.new_string("image/*")?;
     let m1 = env.new_string("video/mp4")?;
     let m2 = env.new_string("video/webm")?;
-    env.set_object_array_element(&arr, 0, m0.as_ref())?;
-    env.set_object_array_element(&arr, 1, m1.as_ref())?;
-    env.set_object_array_element(&arr, 2, m2.as_ref())?;
+    let m3 = env.new_string("video/quicktime")?;
+    // Disambiguate `JString: AsRef<_>` (jni has multiple impls) like requestPermissions.
+    let m0_obj: &JObject = m0.as_ref();
+    let m1_obj: &JObject = m1.as_ref();
+    let m2_obj: &JObject = m2.as_ref();
+    let m3_obj: &JObject = m3.as_ref();
+    env.set_object_array_element(&arr, 0, m0_obj)?;
+    env.set_object_array_element(&arr, 1, m1_obj)?;
+    env.set_object_array_element(&arr, 2, m2_obj)?;
+    env.set_object_array_element(&arr, 3, m3_obj)?;
     let extra = env.new_string("android.intent.extra.MIME_TYPES")?;
     env.call_method(
         &intent,

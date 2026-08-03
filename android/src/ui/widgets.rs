@@ -1521,9 +1521,11 @@ fn inline_video_preview(
         _ => return,
     };
 
+    // Per-bubble player state — same URL in two messages must not share playhead.
+    let player_key = format!("{url}\0{id_salt}");
     let player = media
         .video_players
-        .entry(url.to_string())
+        .entry(player_key)
         .or_insert_with(VideoPlayerState::new);
     player.load_bytes(ui.ctx(), (url, id_salt), bytes);
 
