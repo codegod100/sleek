@@ -425,17 +425,13 @@
               mkdir -p "$HOME/.android"
 
               # cargo-apk --release requires [package.metadata.android.signing.release].
-              # Generate a local install keystore (same defaults as Android debug).
-              keystore="$HOME/.android/sleek-release.keystore"
-              if [[ ! -f "$keystore" ]]; then
-                keytool -genkeypair -v \
-                  -keystore "$keystore" \
-                  -storepass android \
-                  -alias androiddebugkey \
-                  -keypass android \
-                  -keyalg RSA -keysize 2048 -validity 10000 \
-                  -dname "CN=Sleek Local,O=Sleek,C=US"
-              fi
+              # Use the committed CI keystore so every build shares one signature
+              # (ephemeral keys break adb/phone upgrades with "App not installed").
+              keystore="$(pwd)/sleek/android/ci.keystore"
+              [[ -f "$keystore" ]] || {
+                echo "missing CI keystore at $keystore" >&2
+                exit 1
+              }
 
               ndk="$ANDROID_NDK_HOME"
               if [[ ! -d "$ndk" ]]; then
@@ -501,9 +497,19 @@ PY
               cargo apk build --release --target ${androidTarget} -p sleek --lib
 
               # Inject SleekActivity as classes.dex so freeq:// OAuth deep links work.
-              apk="$(find target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              # Prefer the final signed package; never inject into *-unaligned leftovers.
+              apk=""
+              for cand in \
+                target/release/apk/sleek.apk \
+                target/sleek.apk \
+                target/release/apk/sleek-release.apk; do
+                if [[ -f "$cand" ]]; then
+                  apk="$cand"
+                  break
+                fi
+              done
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find target -type f -name 'sleek.apk' -o -name '*-release.apk' | head -1 || true)"
+                apk="$(find target -type f -path '*/release/apk/*.apk' ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               [[ -n "''${apk:-}" && -f "$apk" ]] || {
                 echo "APK not found for dex inject under sleek/android/target" >&2
@@ -523,13 +529,22 @@ PY
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              # Prefer release APK (cargo-apk writes target/*/release/apk/ or target/release/apk/).
-              apk="$(find sleek/android/target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              # Prefer the final signed package (same rules as deploy-android.sh).
+              apk=""
+              for cand in \
+                sleek/android/target/release/apk/sleek.apk \
+                sleek/android/target/sleek.apk \
+                sleek/android/target/release/apk/sleek-release.apk; do
+                if [[ -f "$cand" ]]; then
+                  apk="$cand"
+                  break
+                fi
+              done
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-release.apk' -o -name '*-debug.apk' \) | head -1 || true)"
+                apk="$(find sleek/android/target -type f -path '*/release/apk/*.apk' ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find sleek/android/target -type f -name '*.apk' | head -1 || true)"
+                apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-release.apk' \) ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               [[ -n "''${apk:-}" && -f "$apk" ]] || {
                 echo "APK not found under sleek/android/target" >&2
@@ -537,6 +552,9 @@ PY
                 exit 1
               }
               cp "$apk" $out/sleek.apk
+              apksigner="$(echo "$ANDROID_HOME"/build-tools/*/apksigner | awk '{print $NF}')"
+              "$apksigner" verify --verbose "$out/sleek.apk"
+              "$apksigner" verify --print-certs "$out/sleek.apk" | grep -q 'CN=Sleek CI'
               # Convenience symlink for tools that look for a generic name.
               ln -s sleek.apk $out/app.apk
               cat > $out/metadata.txt <<EOF

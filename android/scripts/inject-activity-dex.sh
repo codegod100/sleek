@@ -28,8 +28,15 @@ APKSIGNER="$(echo "$SDK"/build-tools/*/apksigner | awk '{print $NF}')"
 [[ -x "$APKSIGNER" || -f "$APKSIGNER" ]] || { echo "apksigner not found under $SDK" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required to rewrite APK zip" >&2; exit 1; }
 
-# Prefer explicit env, then cargo-apk debug defaults, then sleek release keystore.
-KEYSTORE="${SLEEK_KEYSTORE:-${CARGO_APK_RELEASE_KEYSTORE:-${CARGO_APK_DEV_KEYSTORE:-$HOME/.android/debug.keystore}}}"
+# Prefer explicit env, then committed CI keystore (stable across builds), then
+# cargo-apk debug defaults, then a local release keystore.
+KEYSTORE="${SLEEK_KEYSTORE:-}"
+if [[ -z "$KEYSTORE" && -f "$ROOT/ci.keystore" ]]; then
+  KEYSTORE="$ROOT/ci.keystore"
+fi
+if [[ -z "$KEYSTORE" ]]; then
+  KEYSTORE="${CARGO_APK_RELEASE_KEYSTORE:-${CARGO_APK_DEV_KEYSTORE:-$HOME/.android/debug.keystore}}"
+fi
 if [[ ! -f "$KEYSTORE" ]]; then
   KEYSTORE="$HOME/.android/sleek-release.keystore"
 fi
@@ -78,6 +85,8 @@ PY
 
 "$ZIPALIGN" -f 4 "$WORKDIR/unsigned.apk" "$WORKDIR/aligned.apk"
 "$APKSIGNER" sign \
+  --v1-signing-enabled true \
+  --v2-signing-enabled true \
   --ks "$KEYSTORE" \
   --ks-pass "pass:$STOREPASS" \
   --ks-key-alias "$ALIAS" \

@@ -260,7 +260,10 @@ find_apk() {
 
 ensure_release_signing() {
   mkdir -p "$HOME/.android"
-  local keystore="$HOME/.android/sleek-release.keystore"
+  local keystore="$APP/ci.keystore"
+  if [[ ! -f "$keystore" ]]; then
+    keystore="$HOME/.android/sleek-release.keystore"
+  fi
   if [[ ! -f "$keystore" ]]; then
     need keytool
     echo "generating release keystore at $keystore" >&2
