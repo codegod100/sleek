@@ -80,6 +80,8 @@ On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds:
 | APK | `.#android` | `sleek-apk` (`sleek.apk`) |
 | Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
 
+CI APKs are signed with the committed `android/ci.keystore` (password `android`, alias `androiddebugkey`) so successive installs upgrade cleanly. If you previously installed a build signed with a different key (e.g. an older CI artifact or a local `deploy-android` keystore), uninstall Sleek first — Android shows that as “Something went wrong / App not installed”.
+
 ### Spindle (Tangled CI)
 
 [`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs). Hosted Spindle cannot compile these — warm the cache locally with `just android` / `just flatpak` first. On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
