@@ -291,6 +291,14 @@ fn message_hover_frame_id() -> Id {
     Id::new("msg_hover_frame")
 }
 
+fn message_hover_enter_id(hover_id: Id) -> Id {
+    hover_id.with("enter")
+}
+
+fn message_hover_seen_id(hover_id: Id) -> Id {
+    hover_id.with("seen")
+}
+
 /// Per-message hover state collected during bubble layout, flushed after the list.
 #[derive(Clone)]
 struct MessageHoverEntry {
@@ -436,11 +444,15 @@ fn message_hover_register(
         .pointer_interact_pos()
         .is_some_and(|p| hit_zone.contains(p));
 
-    let last_seen_id = hover_id.with("seen");
-    let time = ui.input(|i| i.time);
+    // Stamp enter time on first frame in-zone; flush waits a tick before show.
     if in_hit_zone {
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(last_seen_id, time));
+        let enter_id = message_hover_enter_id(hover_id);
+        let time = ui.input(|i| i.time);
+        ui.ctx().data_mut(|d| {
+            if d.get_temp::<f64>(enter_id).is_none() {
+                d.insert_temp(enter_id, time);
+            }
+        });
     }
 
     ui.ctx().data_mut(|d| {
@@ -460,7 +472,8 @@ fn message_hover_register(
 
 /// Render deferred hover toolbars after all messages have registered hit zones.
 ///
-/// Grace period applies only while the pointer is not over a *different*
+/// Opens only after the pointer has stayed in the hit zone for at least one
+/// tick. Grace period applies only while the pointer is not over a *different*
 /// message's hover zone (bubble ∪ toolbar).
 pub fn message_hover_flush_toolbars(
     ui: &mut egui::Ui,
@@ -482,17 +495,38 @@ pub fn message_hover_flush_toolbars(
 
     let mut action = None;
     for entry in entries {
-        let last_seen_id = entry.hover_id.with("seen");
-        let last_seen = ui
-            .ctx()
-            .data(|d| d.get_temp::<f64>(last_seen_id).unwrap_or(0.0));
+        let enter_id = message_hover_enter_id(entry.hover_id);
+        let last_seen_id = message_hover_seen_id(entry.hover_id);
+        let (entered_at, last_seen) = ui.ctx().data(|d| {
+            (
+                d.get_temp::<f64>(enter_id).unwrap_or(0.0),
+                d.get_temp::<f64>(last_seen_id).unwrap_or(0.0),
+            )
+        });
+        // One-tick dwell: enter is stamped this frame; show only after time moves.
+        let dwell_ok = entered_at > 0.0 && time > entered_at;
+        if entry.in_hit_zone && !dwell_ok {
+            // Wake the next frame so the toolbar can open without more pointer motion.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        if entry.in_hit_zone && dwell_ok {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(last_seen_id, time));
+        }
         let within_grace =
             last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_TOOLBAR_GRACE_SECS;
-        let show = entry.in_hit_zone
+        let show = (entry.in_hit_zone && dwell_ok)
             || (within_grace && !pointer_owner.is_some_and(|owner| owner != entry.hover_id));
         if !show {
-            if !within_grace && !entry.in_hit_zone {
-                ui.ctx().data_mut(|d| d.remove::<f64>(last_seen_id));
+            if !entry.in_hit_zone && !within_grace {
+                ui.ctx().data_mut(|d| {
+                    d.remove::<f64>(last_seen_id);
+                    d.remove::<f64>(enter_id);
+                });
+            } else if !entry.in_hit_zone {
+                // Left before/while grace — drop enter so re-entry re-dwells.
+                ui.ctx().data_mut(|d| d.remove::<f64>(enter_id));
             }
             continue;
         }
