@@ -121,6 +121,14 @@ pub struct MessageSearchHit {
     pub message: ChatMessage,
 }
 
+/// Compose-bar reply context (mirrors freeq-android `replyingTo`).
+#[derive(Debug, Clone)]
+pub struct ReplyTarget {
+    pub msgid: String,
+    pub from: String,
+    pub preview: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub id: String,
@@ -996,6 +1004,8 @@ pub struct AppState {
     pub image_lightbox: Option<String>,
     /// msgid currently being edited in the compose bar (`None` = normal send).
     pub editing_msgid: Option<String>,
+    /// Message being replied to in the compose bar (`None` = normal send).
+    pub replying_to: Option<ReplyTarget>,
 
     /// Connect form fields (editable while disconnected).
     pub connect_mode: ConnectMode,
@@ -1145,6 +1155,7 @@ impl AppState {
             react_picker_group: EmojiPickerGroup::default(),
             image_lightbox: None,
             editing_msgid: None,
+            replying_to: None,
             connect_mode: ConnectMode::Bluesky,
             form_handle: String::new(),
             form_callback: String::new(),
@@ -1732,6 +1743,7 @@ impl AppState {
             self.clear_compose_image();
             self.compose_nick_tab.clear();
             self.cancel_edit();
+            self.cancel_reply();
         }
         self.ensure_buffer(&key);
         self.active_channel = Some(key.clone());
@@ -1763,6 +1775,7 @@ impl AppState {
         self.clear_compose_image();
         self.compose_nick_tab.clear();
         self.cancel_edit();
+        self.cancel_reply();
     }
 
     /// Open the full-screen image lightbox for a chat embed URL.
@@ -1870,6 +1883,7 @@ impl AppState {
 
     /// Start editing an existing message in the compose bar.
     pub fn begin_edit(&mut self, msgid: String, text: String) {
+        self.cancel_reply();
         self.editing_msgid = Some(msgid);
         self.compose = text;
         self.clear_compose_image();
@@ -1884,6 +1898,28 @@ impl AppState {
             self.compose.clear();
             self.compose_nick_tab.clear();
         }
+    }
+
+    /// Start replying to a message in the compose bar (slide-to-reply / menu).
+    pub fn begin_reply(&mut self, msg: &ChatMessage) {
+        if msg.is_system || msg.is_deleted || msg.id.is_empty() || msg.id.starts_with("local-") {
+            return;
+        }
+        self.cancel_edit();
+        self.clear_compose_image();
+        self.compose_nick_tab.clear();
+        self.replying_to = Some(ReplyTarget {
+            msgid: msg.id.clone(),
+            from: msg.from.clone(),
+            preview: msg.preview(),
+        });
+        self.focus_compose = true;
+        self.close_react_picker();
+    }
+
+    /// Cancel an in-progress compose reply.
+    pub fn cancel_reply(&mut self) {
+        self.replying_to = None;
     }
 
     pub fn sorted_conversations(&self) -> Vec<&Buffer> {
@@ -1926,6 +1962,8 @@ impl AppState {
         self.compose.clear();
         self.clear_compose_image();
         self.compose_nick_tab.clear();
+        self.cancel_edit();
+        self.cancel_reply();
         self.local_call = None;
         self.clear_av_media();
         self.status_line = "Disconnected".into();

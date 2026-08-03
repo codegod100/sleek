@@ -422,7 +422,7 @@ impl SleekApp {
                         self.state.compose_nick_tab.clear();
                         self.state.show_toast("Image sent");
                         if let Some(media) = sent {
-                            self.do_send_local_echo(&media.target, media.text);
+                            self.do_send_local_echo(&media.target, media.text, None);
                         }
                     }
                 }
@@ -1778,6 +1778,7 @@ impl SleekApp {
         if text.is_empty() {
             return;
         }
+        let reply_to = self.state.replying_to.take().map(|r| r.msgid);
         self.state.compose.clear();
         self.state.compose_nick_tab.clear();
 
@@ -1786,8 +1787,16 @@ impl SleekApp {
             return;
         }
 
-        self.do_send_local_echo(&target, text.clone());
-        self.net.send(NetCmd::Privmsg { target, text });
+        self.do_send_local_echo(&target, text.clone(), reply_to.clone());
+        if let Some(msgid) = reply_to {
+            self.net.send(NetCmd::Reply {
+                target,
+                msgid,
+                text,
+            });
+        } else {
+            self.net.send(NetCmd::Privmsg { target, text });
+        }
     }
 
     /// Dispatch `/join`, `/me`, `/msg`, … — mirrors freeq-android ComposeBar.
@@ -1811,7 +1820,7 @@ impl SleekApp {
                 });
             }
             crate::slash::SlashCommand::Msg { target, text } => {
-                self.do_send_local_echo(&target, text.clone());
+                self.do_send_local_echo(&target, text.clone(), None);
                 self.net.send(NetCmd::Privmsg { target, text });
             }
             crate::slash::SlashCommand::Topic(topic) => {
@@ -1926,15 +1935,21 @@ impl SleekApp {
         }
     }
 
-    fn do_send_local_echo(&mut self, target: &str, text: String) {
-        self.do_send_local_echo_inner(target, text, false);
+    fn do_send_local_echo(&mut self, target: &str, text: String, reply_to: Option<String>) {
+        self.do_send_local_echo_inner(target, text, false, reply_to);
     }
 
     fn do_send_local_echo_action(&mut self, target: &str, text: String) {
-        self.do_send_local_echo_inner(target, text, true);
+        self.do_send_local_echo_inner(target, text, true, None);
     }
 
-    fn do_send_local_echo_inner(&mut self, target: &str, text: String, is_action: bool) {
+    fn do_send_local_echo_inner(
+        &mut self,
+        target: &str,
+        text: String,
+        is_action: bool,
+        reply_to: Option<String>,
+    ) {
         // Optimistic local echo for snappy UI. When the server echoes the
         // PRIVMSG back (echo-message), Buffer::append drops this local-* row
         // and keeps the real msgid / signed copy — so the user never sees
@@ -1962,7 +1977,7 @@ impl SleekApp {
             is_edited: false,
             is_deleted: false,
             timestamp: chrono::Local::now(),
-            reply_to: None,
+            reply_to,
             edit_of: None,
             is_signed: false,
             embed,
