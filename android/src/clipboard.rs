@@ -331,19 +331,40 @@ pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
     rx
 }
 
+/// Process-lifetime Tokio runtime for rfd's xdg-desktop-portal backend.
+///
+/// ashpd caches a single `zbus::Connection` in a static `OnceLock`. That
+/// connection is driven by the runtime that created it — if we build+drop a
+/// runtime per pick (as we used to), cancel works once, then the next open
+/// reuses the dead connection and hangs forever.
+#[cfg(not(target_os = "android"))]
+fn rfd_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("sleek-rfd")
+            .build()
+            .expect("sleek-rfd tokio runtime")
+    })
+}
+
 /// Desktop: native OS dialog via rfd (portal / platform backend).
 #[cfg(not(target_os = "android"))]
 fn pick_image_file_desktop() -> PickImageResult {
-    // rfd's xdg-portal backend (ashpd → zbus) needs a Tokio reactor. Run it on
-    // this worker thread only — never on the egui UI thread.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .thread_name("sleek-rfd")
-        .build()
-        .map_err(|e| format!("Could not start file dialog runtime: {e}"))?;
+    // Serialize portal requests: a UI timeout can clear `file_pick_rx` while
+    // the first worker is still inside `pick_file`, and two concurrent
+    // OpenFileRequests on ashpd's shared connection also hang.
+    static PICK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = PICK_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Image picker lock poisoned".to_string())?;
 
-    let path = rt.block_on(async {
+    // rfd's xdg-portal backend (ashpd → zbus) needs a Tokio reactor. Drive it
+    // from this worker thread only — never on the egui UI thread.
+    let path = rfd_runtime().block_on(async {
         rfd::AsyncFileDialog::new()
             .set_title("Attach image")
             .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
@@ -351,8 +372,6 @@ fn pick_image_file_desktop() -> PickImageResult {
             .await
             .map(|handle| handle.path().to_path_buf())
     });
-    // Drop the runtime before heavy decode so worker threads go away promptly.
-    drop(rt);
 
     let Some(path) = path else {
         return Ok(None);
