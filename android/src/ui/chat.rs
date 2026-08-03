@@ -10,7 +10,8 @@ use crate::clipboard;
 use crate::state::{AppState, NickTabComplete};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
-    avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
+    avatar_circle, empty_state, message_bubble, message_hover_begin_frame,
+    message_hover_flush_toolbars, react_picker_overlay, MessageBubbleAction,
 };
 
 pub enum ChatAction {
@@ -54,6 +55,43 @@ pub enum ChatAction {
     },
     /// Soft-delete a message (`+draft/delete`).
     Delete { target: String, msgid: String },
+}
+
+fn apply_message_bubble_action(
+    bubble: MessageBubbleAction,
+    state: &mut AppState,
+    channel: &str,
+    action: &mut ChatAction,
+) {
+    match bubble {
+        MessageBubbleAction::None => {}
+        MessageBubbleAction::ToggleReaction { msgid, emoji } => {
+            state.close_react_picker();
+            *action = ChatAction::React {
+                target: channel.to_string(),
+                msgid,
+                emoji,
+            };
+        }
+        MessageBubbleAction::OpenReactPicker { msgid } => {
+            state.open_react_picker(msgid);
+        }
+        MessageBubbleAction::CloseReactPicker => {
+            state.close_react_picker();
+        }
+        MessageBubbleAction::OpenImage { url } => {
+            state.open_image_lightbox(url);
+        }
+        MessageBubbleAction::Edit { msgid, text } => {
+            state.begin_edit(msgid, text);
+        }
+        MessageBubbleAction::Delete { msgid } => {
+            *action = ChatAction::Delete {
+                target: channel.to_string(),
+                msgid,
+            };
+        }
+    }
 }
 
 pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel: &str) -> ChatAction {
@@ -584,6 +622,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let highlight_id = state.highlight_msgid.clone();
                 let mut did_scroll = false;
                 let mut target_in_view = false;
+                message_hover_begin_frame(ui.ctx());
                 for msg in &messages {
                     let highlighted = highlight_id.as_ref().is_some_and(|id| id == &msg.id);
                     let picker_open = state
@@ -592,43 +631,20 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         .is_some_and(|id| id == &msg.id);
                     let want_scroll = scroll_target.as_ref().is_some_and(|id| id == &msg.id);
                     let outer = ui.push_id(("chat_msg", msg.id.as_str()), |ui| {
-                        match message_bubble(
-                            ui,
-                            th,
-                            msg,
-                            &own_nick,
-                            &mut state.media,
-                            picker_open,
-                            highlighted,
-                        ) {
-                            MessageBubbleAction::None => {}
-                            MessageBubbleAction::ToggleReaction { msgid, emoji } => {
-                                state.close_react_picker();
-                                action = ChatAction::React {
-                                    target: channel.to_string(),
-                                    msgid,
-                                    emoji,
-                                };
-                            }
-                            MessageBubbleAction::OpenReactPicker { msgid } => {
-                                state.open_react_picker(msgid);
-                            }
-                            MessageBubbleAction::CloseReactPicker => {
-                                state.close_react_picker();
-                            }
-                            MessageBubbleAction::OpenImage { url } => {
-                                state.open_image_lightbox(url);
-                            }
-                            MessageBubbleAction::Edit { msgid, text } => {
-                                state.begin_edit(msgid, text);
-                            }
-                            MessageBubbleAction::Delete { msgid } => {
-                                action = ChatAction::Delete {
-                                    target: channel.to_string(),
-                                    msgid,
-                                };
-                            }
-                        }
+                        apply_message_bubble_action(
+                            message_bubble(
+                                ui,
+                                th,
+                                msg,
+                                &own_nick,
+                                &mut state.media,
+                                picker_open,
+                                highlighted,
+                            ),
+                            state,
+                            channel,
+                            &mut action,
+                        );
                     });
                     if want_scroll {
                         // Keep requesting until the bubble intersects the viewport;
@@ -646,6 +662,9 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         ui.ctx().request_repaint();
                     }
                     ui.add_space(sp.sm);
+                }
+                if let Some(hover_action) = message_hover_flush_toolbars(ui, th, &messages) {
+                    apply_message_bubble_action(hover_action, state, channel, &mut action);
                 }
                 // Only consume once the hit is on-screen (or missing from buffer).
                 if scroll_target.is_some() {

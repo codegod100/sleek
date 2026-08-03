@@ -287,6 +287,30 @@ fn message_action_bar_frame(th: &Theme, pad: f32) -> egui::Frame {
 /// bubble/toolbar zone so the user can cross the gap to the icons.
 const MESSAGE_HOVER_TOOLBAR_GRACE_SECS: f64 = 0.35;
 
+fn message_hover_frame_id() -> Id {
+    Id::new("msg_hover_frame")
+}
+
+/// Per-message hover state collected during bubble layout, flushed after the list.
+#[derive(Clone)]
+struct MessageHoverEntry {
+    hover_id: Id,
+    msg_id: String,
+    bubble_rect: Rect,
+    in_hit_zone: bool,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+}
+
+/// Reset deferred hover toolbar state at the start of a message list frame.
+pub fn message_hover_begin_frame(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.insert_temp(message_hover_frame_id(), Vec::<MessageHoverEntry>::new());
+    });
+}
+
 /// Screen rect for the floating hover toolbar (shared by hit-testing + layout).
 fn message_hover_toolbar_rect(
     bubble_rect: Rect,
@@ -377,32 +401,30 @@ fn message_action_icons(
     action
 }
 
-/// Floating icon actions shown while the pointer hovers a message bubble.
-///
-/// Desktop / mouse only — touch screens use long-press → context menu instead.
-fn message_hover_actions(
+/// Record hover hit-test state for a message bubble (toolbar rendered later).
+fn message_hover_register(
     ui: &mut egui::Ui,
     th: &Theme,
     bubble_rect: Rect,
     hover_id: Id,
+    msg_id: &str,
     can_react: bool,
     can_edit: bool,
     can_delete: bool,
     react_picker_open: bool,
     menu_open: bool,
-    msg: &ChatMessage,
-) -> Option<MessageBubbleAction> {
+) {
     // APK / touch: no hover; long-press opens the icon context menu.
     if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
-        return None;
+        return;
     }
     if menu_open || (!can_react && !can_edit && !can_delete) {
-        return None;
+        return;
     }
 
     let clipped = bubble_rect.intersect(ui.clip_rect());
     if !clipped.is_positive() {
-        return None;
+        return;
     }
 
     let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
@@ -420,15 +442,96 @@ fn message_hover_actions(
         ui.ctx()
             .data_mut(|d| d.insert_temp(last_seen_id, time));
     }
-    let last_seen = ui
+
+    ui.ctx().data_mut(|d| {
+        d.get_temp_mut_or_insert_with(message_hover_frame_id(), Vec::new)
+            .push(MessageHoverEntry {
+                hover_id,
+                msg_id: msg_id.to_string(),
+                bubble_rect,
+                in_hit_zone,
+                can_react,
+                can_edit,
+                can_delete,
+                react_picker_open,
+            });
+    });
+}
+
+/// Render deferred hover toolbars after all messages have registered hit zones.
+///
+/// Grace period applies only while the pointer is not over a *different*
+/// message's hover zone (bubble ∪ toolbar).
+pub fn message_hover_flush_toolbars(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    messages: &[ChatMessage],
+) -> Option<MessageBubbleAction> {
+    let entries: Vec<MessageHoverEntry> = ui
         .ctx()
-        .data(|d| d.get_temp::<f64>(last_seen_id).unwrap_or(0.0));
-    let within_grace =
-        last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_TOOLBAR_GRACE_SECS;
-    if !in_hit_zone && !within_grace {
-        ui.ctx().data_mut(|d| d.remove::<f64>(last_seen_id));
+        .data(|d| d.get_temp(message_hover_frame_id()).unwrap_or_default());
+    if entries.is_empty() {
         return None;
     }
+
+    let time = ui.input(|i| i.time);
+    let pointer_owner = entries
+        .iter()
+        .find(|entry| entry.in_hit_zone)
+        .map(|entry| entry.hover_id);
+
+    let mut action = None;
+    for entry in entries {
+        let last_seen_id = entry.hover_id.with("seen");
+        let last_seen = ui
+            .ctx()
+            .data(|d| d.get_temp::<f64>(last_seen_id).unwrap_or(0.0));
+        let within_grace =
+            last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_TOOLBAR_GRACE_SECS;
+        let show = entry.in_hit_zone
+            || (within_grace && !pointer_owner.is_some_and(|owner| owner != entry.hover_id));
+        if !show {
+            if !within_grace && !entry.in_hit_zone {
+                ui.ctx().data_mut(|d| d.remove::<f64>(last_seen_id));
+            }
+            continue;
+        }
+
+        let Some(msg) = messages.iter().find(|m| m.id == entry.msg_id) else {
+            continue;
+        };
+        if let Some(clicked) = message_hover_render_toolbar(
+            ui,
+            th,
+            entry.bubble_rect,
+            entry.hover_id,
+            entry.can_react,
+            entry.can_edit,
+            entry.can_delete,
+            entry.react_picker_open,
+            msg,
+        ) {
+            action = Some(clicked);
+        }
+    }
+
+    action
+}
+
+/// Draw the floating hover toolbar for one message.
+fn message_hover_render_toolbar(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    bubble_rect: Rect,
+    hover_id: Id,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
+    let toolbar_rect = message_hover_toolbar_rect(bubble_rect, metrics, ui.clip_rect());
 
     let mut action = None;
     egui::Area::new(hover_id.with("area"))
@@ -844,20 +947,18 @@ pub fn message_bubble(
     // the right-click.
     let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
     let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
-    if let Some(hover_action) = message_hover_actions(
+    message_hover_register(
         ui,
         th,
         frame_resp.response.rect,
         Id::new(("msg_hover", msg.id.as_str())),
+        &msg.id,
         can_react,
         can_edit,
         can_delete,
         react_picker_open,
         menu_open,
-        msg,
-    ) {
-        action = hover_action;
-    }
+    );
     if let Some(menu_action) = message_context_menu(
         ui,
         th,
