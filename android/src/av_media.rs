@@ -1473,9 +1473,21 @@ fn release_local_camera(
     >,
 ) {
     *preview_keepalive = None;
+    // Pump exits when publish is off (or the preview track closes). Join briefly
+    // so we don't leave a detached thread holding a VideoTrack across clear().
     if let Some(h) = preview_pump.take() {
-        // Track drop closes the pump; don't wait forever.
-        let _ = h;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if h.is_finished() {
+                let _ = h.join();
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                log::warn!("av-media: local preview pump did not exit in 500ms; detaching");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     broadcast.video().clear();
     #[cfg(target_os = "android")]
@@ -1502,6 +1514,7 @@ fn attach_desktop_camera(
         enabled: camera_enabled.clone(),
         preview: video_store,
         frame_count: local_frame_count,
+        streaming: false,
     };
     broadcast
         .video()
@@ -1752,10 +1765,14 @@ fn spawn_local_preview_pump(
             let mut pump_waited_ms = 0u64;
             let mut warned_no_frames = false;
             loop {
+                // Exit on mute so we drop the preview VideoTrack and let
+                // release_local_camera clear the SharedVideoSource promptly.
+                // Spinning here used to keep a subscriber alive across "camera
+                // off" and leave V4L2 STREAMON / Camera2 repeating (LED on).
                 if !enabled.load(Ordering::Relaxed) {
                     store.remove(LOCAL_PREVIEW_KEY);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    continue;
+                    log::info!("av-media: local preview pump exit (publish off)");
+                    break;
                 }
                 if let Some(frame) = track.try_recv() {
                     let (w, h) = (frame.width(), frame.height());
@@ -1851,6 +1868,7 @@ fn open_android_camera(
         enabled: camera_enabled.clone(),
         preview: video_store,
         frame_count: local_frame_count,
+        streaming: false,
     };
     if let Err(e) = broadcast
         .video()
@@ -1872,9 +1890,12 @@ fn open_android_camera(
 }
 
 /// Wraps camera capture while hardware is held. Publish/self-view are gated by
-/// `enabled`; the media task releases the device entirely when the camera is
-/// toggled off (see [`release_local_camera`]) so the privacy LED goes dark.
-/// This gate remains as a race-safe belt for brief disable→clear windows.
+/// `enabled`. When publish flips off we **stop the inner capturer immediately**
+/// (V4L2 `STREAMOFF` / close) so the privacy LED goes dark without waiting for
+/// the media task's `release_local_camera` clear — the old gate still called
+/// `inner.pop_frame()` first, which kept STREAMON alive while discarding frames.
+/// `release_local_camera` remains the steady-state teardown (drop source +
+/// Camera2 guard).
 ///
 /// Always tees enabled frames into `__local__` for self-view (requires a
 /// SharedVideoSource subscriber — we hold `broadcast.preview()` as keepalive).
@@ -1888,6 +1909,9 @@ struct GatedCameraSource {
     enabled: Arc<AtomicBool>,
     preview: VideoFrameStore,
     frame_count: Arc<AtomicU64>,
+    /// Whether `inner.start()` is live. Cleared on gate-off / `stop()` so mute
+    /// can streamoff without waiting for SharedVideoSource teardown.
+    streaming: bool,
 }
 
 impl VideoSource for GatedCameraSource {
@@ -1900,16 +1924,59 @@ impl VideoSource for GatedCameraSource {
     }
 
     fn start(&mut self) -> anyhow::Result<()> {
-        self.inner.start()
+        let r = self.inner.start();
+        if r.is_ok() {
+            self.streaming = true;
+        }
+        r
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
+        self.streaming = false;
         self.inner.stop()
     }
 
     fn pop_frame(
         &mut self,
     ) -> anyhow::Result<Option<iroh_live::media::format::VideoFrame>> {
+        // Check publish flag *before* capturing. The previous order (dqbuf then
+        // discard) left V4L2 STREAMON / the privacy LED on for the whole mute.
+        if !self.enabled.load(Ordering::Relaxed) {
+            if self.streaming {
+                if let Err(e) = self.inner.stop() {
+                    log::warn!(
+                        "av-media: camera {} stop on mute failed: {e:#}",
+                        self.inner.name()
+                    );
+                } else {
+                    log::info!(
+                        "av-media: camera {} hardware stopped (publish off; privacy light off)",
+                        self.inner.name()
+                    );
+                }
+                self.streaming = false;
+                // Android PushCameraSource::stop only clears the frame cell —
+                // Camera2 stays open until stop_capture / guard drop.
+                #[cfg(target_os = "android")]
+                crate::android_camera::stop_capture();
+            }
+            self.preview.remove(LOCAL_PREVIEW_KEY);
+            // SharedVideoSource spins on Ok(None); back off while gated.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            return Ok(None);
+        }
+        if !self.streaming {
+            self.inner.start().map_err(|e| {
+                log::warn!(
+                    "av-media: camera {} restart after mute failed: {e:#}",
+                    self.inner.name()
+                );
+                e
+            })?;
+            self.streaming = true;
+            // Android Camera2 is restarted by open_android_camera after
+            // release_local_camera clears the guard — not from this gate.
+        }
         let frame = match self.inner.pop_frame() {
             Ok(f) => f,
             Err(e) => {
@@ -1936,20 +2003,10 @@ impl VideoSource for GatedCameraSource {
                     }
                 );
                 self.preview.remove(LOCAL_PREVIEW_KEY);
+                self.streaming = false;
                 return Err(e);
             }
         };
-        if !self.enabled.load(Ordering::Relaxed) {
-            // Brief disable→clear race: drain so the capture pipeline doesn't
-            // back up; hide self-view. Steady-state "camera off" releases the
-            // device entirely via release_local_camera.
-            self.preview.remove(LOCAL_PREVIEW_KEY);
-            let n = self.frame_count.load(Ordering::Relaxed);
-            if n > 0 && n % 300 == 0 {
-                log::debug!("av-media: camera gated off (awaiting release), drained={n}");
-            }
-            return Ok(None);
-        }
         if let Some(ref f) = frame {
             let (w, h) = (f.width(), f.height());
             // Best-effort local preview — never fail the encode path.
@@ -2615,6 +2672,85 @@ mod tests {
     fn camera_hardware_claimed_only_when_publish_enabled() {
         assert!(should_claim_camera_hardware(true));
         assert!(!should_claim_camera_hardware(false));
+    }
+
+    /// Mute must stop the inner capturer (streamoff) — not merely discard
+    /// frames after dqbuf, which left the privacy LED on.
+    #[test]
+    fn gated_camera_stops_inner_when_publish_off() {
+        use iroh_live::media::format::{PixelFormat, VideoFormat, VideoFrame};
+        use iroh_live::media::traits::VideoSource;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingCam {
+            stops: Arc<AtomicUsize>,
+            starts: Arc<AtomicUsize>,
+            pops: Arc<AtomicUsize>,
+        }
+        impl VideoSource for CountingCam {
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn format(&self) -> VideoFormat {
+                VideoFormat {
+                    pixel_format: PixelFormat::Rgba,
+                    dimensions: [2, 2],
+                }
+            }
+            fn start(&mut self) -> anyhow::Result<()> {
+                self.starts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn stop(&mut self) -> anyhow::Result<()> {
+                self.stops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn pop_frame(&mut self) -> anyhow::Result<Option<VideoFrame>> {
+                self.pops.fetch_add(1, Ordering::Relaxed);
+                // Frame payload unused — we only assert stop/pop ordering.
+                Ok(None)
+            }
+        }
+
+        let stops = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let pops = Arc::new(AtomicUsize::new(0));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut gated = GatedCameraSource {
+            inner: Box::new(CountingCam {
+                stops: stops.clone(),
+                starts: starts.clone(),
+                pops: pops.clone(),
+            }),
+            enabled: enabled.clone(),
+            preview: VideoFrameStore::new(),
+            frame_count: Arc::new(AtomicU64::new(0)),
+            streaming: false,
+        };
+
+        gated.start().expect("start");
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        assert!(gated.pop_frame().expect("pop").is_none());
+        assert_eq!(pops.load(Ordering::Relaxed), 1);
+        assert_eq!(stops.load(Ordering::Relaxed), 0);
+
+        enabled.store(false, Ordering::Relaxed);
+        assert!(gated.pop_frame().expect("gated pop").is_none());
+        assert_eq!(
+            stops.load(Ordering::Relaxed),
+            1,
+            "mute must call inner.stop() so STREAMON / privacy LED ends"
+        );
+        assert_eq!(
+            pops.load(Ordering::Relaxed),
+            1,
+            "must not dqbuf/pop after publish off"
+        );
+
+        // Further gated polls must not re-stop or capture.
+        assert!(gated.pop_frame().expect("gated pop 2").is_none());
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+        assert_eq!(pops.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
