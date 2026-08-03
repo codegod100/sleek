@@ -242,10 +242,77 @@ enum MessageActionGlyph {
     Emoji(&'static str),
 }
 
+/// Width / height for the shared hover + context icon bar.
+#[derive(Clone, Copy)]
+struct MessageActionBarMetrics {
+    pad: f32,
+    btn: f32,
+    row_w: f32,
+    bar_w: f32,
+    bar_h: f32,
+}
+
+fn message_action_bar_metrics(
+    th: &Theme,
+    can_react: bool,
+    can_edit: bool,
+    can_delete: bool,
+) -> MessageActionBarMetrics {
+    let pad = 4.0;
+    let btn = (th.type_scale.body * 1.35).max(22.0);
+    let n = [can_react, can_edit, can_delete]
+        .into_iter()
+        .filter(|v| *v)
+        .count() as f32;
+    let row_w = n * btn + (n - 1.0).max(0.0) * 2.0;
+    MessageActionBarMetrics {
+        pad,
+        btn,
+        row_w,
+        bar_w: row_w + pad * 2.0,
+        bar_h: btn + pad * 2.0,
+    }
+}
+
+fn message_action_bar_frame(th: &Theme, pad: f32) -> egui::Frame {
+    let p = &th.palette;
+    egui::Frame::new()
+        .fill(p.card_bg)
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(th.spacing.radius_md)
+        .inner_margin(egui::Margin::same(pad as i8))
+}
+
+/// Keep the hover toolbar visible briefly after the pointer leaves the combined
+/// bubble/toolbar zone so the user can cross the gap to the icons.
+const MESSAGE_HOVER_TOOLBAR_GRACE_SECS: f64 = 0.35;
+
+/// Screen rect for the floating hover toolbar (shared by hit-testing + layout).
+fn message_hover_toolbar_rect(
+    bubble_rect: Rect,
+    metrics: MessageActionBarMetrics,
+    clip: Rect,
+) -> Rect {
+    let mut pos = Pos2::new(
+        bubble_rect.right() - metrics.bar_w - 4.0,
+        bubble_rect.top() - metrics.bar_h * 0.45,
+    );
+    pos.x = pos.x.clamp(
+        clip.left() + 2.0,
+        (clip.right() - metrics.bar_w - 2.0).max(clip.left() + 2.0),
+    );
+    pos.y = pos.y.clamp(
+        clip.top() + 2.0,
+        (clip.bottom() - metrics.bar_h - 2.0).max(clip.top() + 2.0),
+    );
+    Rect::from_min_size(pos, Vec2::new(metrics.bar_w, metrics.bar_h))
+}
+
 /// Shared React / Edit / Delete icon actions (hover toolbar + context menu).
 fn message_action_icons(
     ui: &mut egui::Ui,
     th: &Theme,
+    metrics: MessageActionBarMetrics,
     can_react: bool,
     can_edit: bool,
     can_delete: bool,
@@ -253,56 +320,60 @@ fn message_action_icons(
     msg: &ChatMessage,
 ) -> Option<MessageBubbleAction> {
     let mut action = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if can_react
-            && message_action_icon_btn(
-                ui,
-                th,
-                MessageActionGlyph::Icon(Icon::Laugh),
-                "Add reaction",
-                react_picker_open,
-            )
-            .clicked()
-        {
-            action = Some(if react_picker_open {
-                MessageBubbleAction::CloseReactPicker
-            } else {
-                MessageBubbleAction::OpenReactPicker {
+    ui.allocate_ui_with_layout(
+        Vec2::new(metrics.row_w, metrics.btn),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if can_react
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Icon(Icon::Laugh),
+                    "Add reaction",
+                    react_picker_open,
+                )
+                .clicked()
+            {
+                action = Some(if react_picker_open {
+                    MessageBubbleAction::CloseReactPicker
+                } else {
+                    MessageBubbleAction::OpenReactPicker {
+                        msgid: msg.id.clone(),
+                    }
+                });
+            }
+            if can_edit
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("✏️"),
+                    "Edit message",
+                    false,
+                )
+                .clicked()
+            {
+                action = Some(MessageBubbleAction::Edit {
                     msgid: msg.id.clone(),
-                }
-            });
-        }
-        if can_edit
-            && message_action_icon_btn(
-                ui,
-                th,
-                MessageActionGlyph::Emoji("✏️"),
-                "Edit message",
-                false,
-            )
-            .clicked()
-        {
-            action = Some(MessageBubbleAction::Edit {
-                msgid: msg.id.clone(),
-                text: msg.text.clone(),
-            });
-        }
-        if can_delete
-            && message_action_icon_btn(
-                ui,
-                th,
-                MessageActionGlyph::Emoji("🗑️"),
-                "Delete message",
-                false,
-            )
-            .clicked()
-        {
-            // Server `+draft/delete` names the edit-chain root.
-            let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
-            action = Some(MessageBubbleAction::Delete { msgid: delete_id });
-        }
-    });
+                    text: msg.text.clone(),
+                });
+            }
+            if can_delete
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("🗑️"),
+                    "Delete message",
+                    false,
+                )
+                .clicked()
+            {
+                // Server `+draft/delete` names the edit-chain root.
+                let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
+                action = Some(MessageBubbleAction::Delete { msgid: delete_id });
+            }
+        },
+    );
     action
 }
 
@@ -334,48 +405,46 @@ fn message_hover_actions(
         return None;
     }
 
-    // Keep the toolbar visible while the pointer is over it (not only the bubble).
-    let over_toolbar = ui
+    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
+    let toolbar_rect = message_hover_toolbar_rect(bubble_rect, metrics, ui.clip_rect());
+    // Union + padding covers bubble, toolbar, and the L-shaped gap between them.
+    let hit_zone = clipped.union(toolbar_rect).expand(8.0);
+    let in_hit_zone = ui
         .ctx()
-        .data(|d| d.get_temp::<bool>(hover_id).unwrap_or(false));
-    let over_bubble = ui.rect_contains_pointer(clipped);
-    if !over_bubble && !over_toolbar {
-        ui.ctx().data_mut(|d| d.remove::<bool>(hover_id));
+        .pointer_interact_pos()
+        .is_some_and(|p| hit_zone.contains(p));
+
+    let last_seen_id = hover_id.with("seen");
+    let time = ui.input(|i| i.time);
+    if in_hit_zone {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(last_seen_id, time));
+    }
+    let last_seen = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(last_seen_id).unwrap_or(0.0));
+    let within_grace =
+        last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_TOOLBAR_GRACE_SECS;
+    if !in_hit_zone && !within_grace {
+        ui.ctx().data_mut(|d| d.remove::<f64>(last_seen_id));
         return None;
     }
 
-    let pad = 4.0;
-    let btn = (th.type_scale.body * 1.35).max(22.0);
-    let n = [can_react, can_edit, can_delete]
-        .into_iter()
-        .filter(|v| *v)
-        .count() as f32;
-    let bar_w = n * btn + (n - 1.0).max(0.0) * 2.0 + pad * 2.0;
-    let bar_h = btn + pad * 2.0;
-    let mut pos = Pos2::new(bubble_rect.right() - bar_w - 4.0, bubble_rect.top() - bar_h * 0.45);
-    // Keep inside the current clip when possible.
-    let clip = ui.clip_rect();
-    pos.x = pos.x.clamp(clip.left() + 2.0, (clip.right() - bar_w - 2.0).max(clip.left() + 2.0));
-    pos.y = pos.y.clamp(clip.top() + 2.0, (clip.bottom() - bar_h - 2.0).max(clip.top() + 2.0));
-
-    let p = &th.palette;
     let mut action = None;
-    let area = egui::Area::new(hover_id.with("area"))
+    egui::Area::new(hover_id.with("area"))
         .kind(egui::UiKind::Popup)
         .order(Order::Foreground)
-        .fixed_pos(pos)
+        .fixed_pos(toolbar_rect.min)
+        .default_width(metrics.bar_w)
         .sense(Sense::hover())
         .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(p.card_bg)
-                .stroke(Stroke::new(1.0_f32, p.border_soft))
-                .corner_radius(th.spacing.radius_md)
-                .inner_margin(egui::Margin::same(pad as i8))
+            message_action_bar_frame(th, metrics.pad)
                 .shadow(ui.style().visuals.popup_shadow)
                 .show(ui, |ui| {
                     action = message_action_icons(
                         ui,
                         th,
+                        metrics,
                         can_react,
                         can_edit,
                         can_delete,
@@ -384,9 +453,6 @@ fn message_hover_actions(
                     );
                 });
         });
-    let toolbar_hovered = area.response.hovered() || area.response.contains_pointer();
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(hover_id, toolbar_hovered));
 
     action
 }
@@ -522,7 +588,7 @@ fn message_context_menu(
 
     let mut action = None;
     let mut close = false;
-    let p = &th.palette;
+    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
 
     let pivot = if anchor.above_finger {
         Align2::CENTER_BOTTOM
@@ -534,14 +600,16 @@ fn message_context_menu(
         .order(Order::Foreground)
         .fixed_pos(anchor.pos)
         .pivot(pivot)
+        .default_width(metrics.bar_w)
         .sense(Sense::click())
         .show(ui.ctx(), |ui| {
-            egui::Frame::menu(ui.style())
-                .fill(p.card_bg)
+            message_action_bar_frame(th, metrics.pad)
+                .shadow(ui.style().visuals.popup_shadow)
                 .show(ui, |ui| {
                     if let Some(a) = message_action_icons(
                         ui,
                         th,
+                        metrics,
                         can_react,
                         can_edit,
                         can_delete,
