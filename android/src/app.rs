@@ -646,6 +646,9 @@ impl SleekApp {
         if !tokens.handle.is_empty() {
             self.state.handle = Some(tokens.handle.clone());
             self.state.form_handle = tokens.handle.clone();
+        } else if !self.state.form_handle.is_empty() {
+            let handle = self.state.form_handle.clone();
+            self.state.handle = Some(handle);
         }
         if !tokens.nick.is_empty() {
             self.state.nick = tokens.nick.clone();
@@ -1608,6 +1611,8 @@ impl SleekApp {
             self.state.error = Some("Enter your Bluesky handle".into());
             return;
         }
+        self.state.form_handle = handle.clone();
+        self.state.remember_bsky_handle(&handle);
         self.state.error = None;
         self.state.handle_typeahead.dismiss();
         self.state.awaiting_oauth = true;
