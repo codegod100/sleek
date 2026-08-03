@@ -10,8 +10,7 @@ use crate::clipboard;
 use crate::state::{AppState, NickTabComplete};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
-    avatar_circle, empty_state, message_bubble, message_hover_begin_frame,
-    message_hover_flush_toolbars, react_picker_overlay, MessageBubbleAction,
+    avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
 };
 
 pub enum ChatAction {
@@ -622,7 +621,6 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let highlight_id = state.highlight_msgid.clone();
                 let mut did_scroll = false;
                 let mut target_in_view = false;
-                message_hover_begin_frame(ui.ctx());
                 for msg in &messages {
                     let highlighted = highlight_id.as_ref().is_some_and(|id| id == &msg.id);
                     let picker_open = state
@@ -662,9 +660,6 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         ui.ctx().request_repaint();
                     }
                     ui.add_space(sp.sm);
-                }
-                if let Some(hover_action) = message_hover_flush_toolbars(ui, th, &messages) {
-                    apply_message_bubble_action(hover_action, state, channel, &mut action);
                 }
                 // Only consume once the hit is on-screen (or missing from buffer).
                 if scroll_target.is_some() {

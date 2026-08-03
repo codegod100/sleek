@@ -249,7 +249,6 @@ struct MessageActionBarMetrics {
     btn: f32,
     row_w: f32,
     bar_w: f32,
-    bar_h: f32,
 }
 
 fn message_action_bar_metrics(
@@ -270,7 +269,6 @@ fn message_action_bar_metrics(
         btn,
         row_w,
         bar_w: row_w + pad * 2.0,
-        bar_h: btn + pad * 2.0,
     }
 }
 
@@ -283,13 +281,14 @@ fn message_action_bar_frame(th: &Theme, pad: f32) -> egui::Frame {
         .inner_margin(egui::Margin::same(pad as i8))
 }
 
-/// Keep the hover toolbar visible briefly after the pointer leaves the combined
-/// bubble/toolbar zone so the user can cross the gap to the icons.
-const MESSAGE_HOVER_TOOLBAR_GRACE_SECS: f64 = 0.35;
+/// Pointer must stay on the bubble this long before the inline actions fade in.
+const MESSAGE_HOVER_DWELL_SECS: f64 = 0.30;
 
-fn message_hover_frame_id() -> Id {
-    Id::new("msg_hover_frame")
-}
+/// Fade duration for the per-message inline action chip.
+const MESSAGE_HOVER_FADE_SECS: f32 = 0.18;
+
+/// Keep actions visible briefly after leave so a small pointer slip doesn't flash.
+const MESSAGE_HOVER_GRACE_SECS: f64 = 0.20;
 
 fn message_hover_enter_id(hover_id: Id) -> Id {
     hover_id.with("enter")
@@ -299,48 +298,15 @@ fn message_hover_seen_id(hover_id: Id) -> Id {
     hover_id.with("seen")
 }
 
-/// Per-message hover state collected during bubble layout, flushed after the list.
-#[derive(Clone)]
-struct MessageHoverEntry {
-    hover_id: Id,
-    msg_id: String,
-    bubble_rect: Rect,
-    in_hit_zone: bool,
-    can_react: bool,
-    can_edit: bool,
-    can_delete: bool,
-    react_picker_open: bool,
+fn message_hover_rect_id(hover_id: Id) -> Id {
+    hover_id.with("rect")
 }
 
-/// Reset deferred hover toolbar state at the start of a message list frame.
-pub fn message_hover_begin_frame(ctx: &egui::Context) {
-    ctx.data_mut(|d| {
-        d.insert_temp(message_hover_frame_id(), Vec::<MessageHoverEntry>::new());
-    });
+fn message_hover_fade_id(hover_id: Id) -> Id {
+    hover_id.with("fade")
 }
 
-/// Screen rect for the floating hover toolbar (shared by hit-testing + layout).
-fn message_hover_toolbar_rect(
-    bubble_rect: Rect,
-    metrics: MessageActionBarMetrics,
-    clip: Rect,
-) -> Rect {
-    let mut pos = Pos2::new(
-        bubble_rect.right() - metrics.bar_w - 4.0,
-        bubble_rect.top() - metrics.bar_h * 0.45,
-    );
-    pos.x = pos.x.clamp(
-        clip.left() + 2.0,
-        (clip.right() - metrics.bar_w - 2.0).max(clip.left() + 2.0),
-    );
-    pos.y = pos.y.clamp(
-        clip.top() + 2.0,
-        (clip.bottom() - metrics.bar_h - 2.0).max(clip.top() + 2.0),
-    );
-    Rect::from_min_size(pos, Vec2::new(metrics.bar_w, metrics.bar_h))
-}
-
-/// Shared React / Edit / Delete icon actions (hover toolbar + context menu).
+/// Shared React / Edit / Delete icon actions (inline hover chip + context menu).
 fn message_action_icons(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -409,45 +375,33 @@ fn message_action_icons(
     action
 }
 
-/// Record hover hit-test state for a message bubble (toolbar rendered later).
-fn message_hover_register(
-    ui: &mut egui::Ui,
-    th: &Theme,
-    bubble_rect: Rect,
-    hover_id: Id,
-    msg_id: &str,
-    can_react: bool,
-    can_edit: bool,
-    can_delete: bool,
-    react_picker_open: bool,
-    menu_open: bool,
-) {
-    // APK / touch: no hover; long-press opens the icon context menu.
+/// Fade opacity for the inline action chip (0 = reserved but invisible, 1 = shown).
+///
+/// Hit-tests last frame's bubble rect so the chip can live inside the message
+/// frame without a floating overlay. Space stays reserved; only opacity changes.
+fn message_inline_hover_opacity(ui: &egui::Ui, hover_id: Id, force_show: bool) -> f32 {
+    // APK / touch: no hover chip; long-press opens the icon context menu.
     if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
-        return;
-    }
-    if menu_open || (!can_react && !can_edit && !can_delete) {
-        return;
+        return if force_show { 1.0 } else { 0.0 };
     }
 
-    let clipped = bubble_rect.intersect(ui.clip_rect());
-    if !clipped.is_positive() {
-        return;
-    }
-
-    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
-    let toolbar_rect = message_hover_toolbar_rect(bubble_rect, metrics, ui.clip_rect());
-    // Union + padding covers bubble, toolbar, and the L-shaped gap between them.
-    let hit_zone = clipped.union(toolbar_rect).expand(8.0);
-    let in_hit_zone = ui
+    let time = ui.input(|i| i.time);
+    let prev_rect: Option<Rect> = ui
         .ctx()
-        .pointer_interact_pos()
-        .is_some_and(|p| hit_zone.contains(p));
+        .data(|d| d.get_temp(message_hover_rect_id(hover_id)));
+    let in_hit_zone = prev_rect.is_some_and(|r| {
+        let clipped = r.intersect(ui.clip_rect());
+        clipped.is_positive()
+            && ui
+                .ctx()
+                .pointer_interact_pos()
+                .is_some_and(|p| clipped.expand(4.0).contains(p))
+    });
 
-    // Stamp enter time on first frame in-zone; flush waits a tick before show.
+    let enter_id = message_hover_enter_id(hover_id);
+    let last_seen_id = message_hover_seen_id(hover_id);
+
     if in_hit_zone {
-        let enter_id = message_hover_enter_id(hover_id);
-        let time = ui.input(|i| i.time);
         ui.ctx().data_mut(|d| {
             if d.get_temp::<f64>(enter_id).is_none() {
                 d.insert_temp(enter_id, time);
@@ -455,142 +409,80 @@ fn message_hover_register(
         });
     }
 
-    ui.ctx().data_mut(|d| {
-        d.get_temp_mut_or_insert_with(message_hover_frame_id(), Vec::new)
-            .push(MessageHoverEntry {
-                hover_id,
-                msg_id: msg_id.to_string(),
-                bubble_rect,
-                in_hit_zone,
-                can_react,
-                can_edit,
-                can_delete,
-                react_picker_open,
-            });
+    let (entered_at, last_seen) = ui.ctx().data(|d| {
+        (
+            d.get_temp::<f64>(enter_id).unwrap_or(0.0),
+            d.get_temp::<f64>(last_seen_id).unwrap_or(0.0),
+        )
     });
-}
 
-/// Render deferred hover toolbars after all messages have registered hit zones.
-///
-/// Opens only after the pointer has stayed in the hit zone for at least one
-/// tick. Grace period applies only while the pointer is not over a *different*
-/// message's hover zone (bubble ∪ toolbar).
-pub fn message_hover_flush_toolbars(
-    ui: &mut egui::Ui,
-    th: &Theme,
-    messages: &[ChatMessage],
-) -> Option<MessageBubbleAction> {
-    let entries: Vec<MessageHoverEntry> = ui
-        .ctx()
-        .data(|d| d.get_temp(message_hover_frame_id()).unwrap_or_default());
-    if entries.is_empty() {
-        return None;
+    let dwell_ok = entered_at > 0.0 && time - entered_at >= MESSAGE_HOVER_DWELL_SECS;
+    if in_hit_zone && !dwell_ok && entered_at > 0.0 {
+        let remaining_ms =
+            ((MESSAGE_HOVER_DWELL_SECS - (time - entered_at)).max(0.0) * 1000.0).ceil() as u64;
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(remaining_ms.max(16)));
+    }
+    if in_hit_zone && dwell_ok {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(last_seen_id, time));
     }
 
-    let time = ui.input(|i| i.time);
-    let pointer_owner = entries
-        .iter()
-        .find(|entry| entry.in_hit_zone)
-        .map(|entry| entry.hover_id);
+    let within_grace = last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_GRACE_SECS;
+    let want_show = force_show || (in_hit_zone && dwell_ok) || within_grace;
 
-    let mut action = None;
-    for entry in entries {
-        let enter_id = message_hover_enter_id(entry.hover_id);
-        let last_seen_id = message_hover_seen_id(entry.hover_id);
-        let (entered_at, last_seen) = ui.ctx().data(|d| {
-            (
-                d.get_temp::<f64>(enter_id).unwrap_or(0.0),
-                d.get_temp::<f64>(last_seen_id).unwrap_or(0.0),
-            )
-        });
-        // One-tick dwell: enter is stamped this frame; show only after time moves.
-        let dwell_ok = entered_at > 0.0 && time > entered_at;
-        if entry.in_hit_zone && !dwell_ok {
-            // Wake the next frame so the toolbar can open without more pointer motion.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
-        }
-        if entry.in_hit_zone && dwell_ok {
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(last_seen_id, time));
-        }
-        let within_grace =
-            last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_TOOLBAR_GRACE_SECS;
-        let show = (entry.in_hit_zone && dwell_ok)
-            || (within_grace && !pointer_owner.is_some_and(|owner| owner != entry.hover_id));
-        if !show {
-            if !entry.in_hit_zone && !within_grace {
-                ui.ctx().data_mut(|d| {
-                    d.remove::<f64>(last_seen_id);
-                    d.remove::<f64>(enter_id);
-                });
-            } else if !entry.in_hit_zone {
-                // Left before/while grace — drop enter so re-entry re-dwells.
-                ui.ctx().data_mut(|d| d.remove::<f64>(enter_id));
+    if !in_hit_zone {
+        ui.ctx().data_mut(|d| {
+            d.remove::<f64>(enter_id);
+            if !within_grace && !force_show {
+                d.remove::<f64>(last_seen_id);
             }
-            continue;
-        }
-
-        let Some(msg) = messages.iter().find(|m| m.id == entry.msg_id) else {
-            continue;
-        };
-        if let Some(clicked) = message_hover_render_toolbar(
-            ui,
-            th,
-            entry.bubble_rect,
-            entry.hover_id,
-            entry.can_react,
-            entry.can_edit,
-            entry.can_delete,
-            entry.react_picker_open,
-            msg,
-        ) {
-            action = Some(clicked);
-        }
+        });
     }
 
-    action
+    ui.ctx().animate_bool_with_time(
+        message_hover_fade_id(hover_id),
+        want_show,
+        MESSAGE_HOVER_FADE_SECS,
+    )
 }
 
-/// Draw the floating hover toolbar for one message.
-fn message_hover_render_toolbar(
+/// Reserve header space for React / Edit / Delete; fade icons in on hover.
+fn message_inline_action_chip(
     ui: &mut egui::Ui,
     th: &Theme,
-    bubble_rect: Rect,
-    hover_id: Id,
+    metrics: MessageActionBarMetrics,
+    opacity: f32,
     can_react: bool,
     can_edit: bool,
     can_delete: bool,
     react_picker_open: bool,
     msg: &ChatMessage,
 ) -> Option<MessageBubbleAction> {
-    let metrics = message_action_bar_metrics(th, can_react, can_edit, can_delete);
-    let toolbar_rect = message_hover_toolbar_rect(bubble_rect, metrics, ui.clip_rect());
+    let size = Vec2::new(metrics.row_w, metrics.btn);
+    if opacity <= 0.001 {
+        // Keep layout stable — bubble shape does not jump when actions appear.
+        ui.allocate_exact_size(size, Sense::hover());
+        return None;
+    }
 
+    let interactive = opacity > 0.85;
     let mut action = None;
-    egui::Area::new(hover_id.with("area"))
-        .kind(egui::UiKind::Popup)
-        .order(Order::Foreground)
-        .fixed_pos(toolbar_rect.min)
-        .default_width(metrics.bar_w)
-        .sense(Sense::hover())
-        .show(ui.ctx(), |ui| {
-            message_action_bar_frame(th, metrics.pad)
-                .shadow(ui.style().visuals.popup_shadow)
-                .show(ui, |ui| {
-                    action = message_action_icons(
-                        ui,
-                        th,
-                        metrics,
-                        can_react,
-                        can_edit,
-                        can_delete,
-                        react_picker_open,
-                        msg,
-                    );
-                });
+    ui.scope(|ui| {
+        ui.multiply_opacity(opacity);
+        ui.add_enabled_ui(interactive, |ui| {
+            action = message_action_icons(
+                ui,
+                th,
+                metrics,
+                can_react,
+                can_edit,
+                can_delete,
+                react_picker_open,
+                msg,
+            );
         });
-
+    });
     action
 }
 
@@ -868,6 +760,24 @@ pub fn message_bubble(
     let can_edit = can_mutate && is_own;
     let can_delete = can_mutate && is_own;
     let mut body_long_touched = false;
+    let hover_id = Id::new(("msg_hover", msg.id.as_str()));
+    let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
+    let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
+    let show_actions = can_react || can_edit || can_delete;
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen());
+    // Desktop: reserve header space for the fade-in chip. Touch uses long-press
+    // menu only — don't leave a permanent empty gap beside the timestamp.
+    let action_metrics = if show_actions && !touch_ui && !menu_open {
+        Some(message_action_bar_metrics(th, can_react, can_edit, can_delete))
+    } else {
+        None
+    };
+    let hover_opacity = if action_metrics.is_some() {
+        message_inline_hover_opacity(ui, hover_id, react_picker_open)
+    } else {
+        0.0
+    };
 
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
@@ -886,6 +796,7 @@ pub fn message_bubble(
                         .strong(),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Meta first in RTL → far right; action chip sits to its left.
                     let mut meta = msg.time_label();
                     if msg.is_edited {
                         meta = format!("edited · {meta}");
@@ -894,6 +805,24 @@ pub fn message_bubble(
                         meta = format!("✓ {meta}");
                     }
                     dim_label(ui, th, &meta);
+                    // Inline action chip: always reserves space inside the bubble
+                    // so hover fades in rather than shifting layout.
+                    if let Some(metrics) = action_metrics {
+                        ui.add_space(4.0);
+                        if let Some(a) = message_inline_action_chip(
+                            ui,
+                            th,
+                            metrics,
+                            hover_opacity,
+                            can_react,
+                            can_edit,
+                            can_delete,
+                            react_picker_open,
+                            msg,
+                        ) {
+                            action = a;
+                        }
+                    }
                 });
             });
             ui.add_space(sp.xs);
@@ -976,23 +905,15 @@ pub fn message_bubble(
             }
         });
 
-    // Hover icon toolbar + right-click / long-press icon menu (React / Edit /
-    // Delete). Uses raw secondary clicks so selectable body text doesn't eat
-    // the right-click.
-    let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
-    let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
-    message_hover_register(
-        ui,
-        th,
-        frame_resp.response.rect,
-        Id::new(("msg_hover", msg.id.as_str())),
-        &msg.id,
-        can_react,
-        can_edit,
-        can_delete,
-        react_picker_open,
-        menu_open,
-    );
+    // Store bubble rect for next-frame hover hit-testing (inline chip fade).
+    if action_metrics.is_some() {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(message_hover_rect_id(hover_id), frame_resp.response.rect);
+        });
+    }
+
+    // Right-click / long-press icon menu (React / Edit / Delete). Uses raw
+    // secondary clicks so selectable body text doesn't eat the right-click.
     if let Some(menu_action) = message_context_menu(
         ui,
         th,
