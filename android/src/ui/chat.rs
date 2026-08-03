@@ -272,10 +272,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // ── AV call banner (start / join only; active call chrome is global) ─
     // The MoQ section for an open call lives in the app-level top panel so it
     // stays visible on every route — only idle/join controls stay here.
-    // Mic/camera prefs live on the banner so they can be set before joining.
-    // When already in a call (this channel or another), skip entirely: the
-    // global panel has mute/camera/leave/open — a second "In call on …" strip
-    // was redundant.
+    // Idle is a single compact row; join is a short accent strip. When already
+    // in a call, skip entirely: the global panel has mute/camera/leave/open.
     if is_channel && joined && state.local_call.is_none() {
         let prev_muted = state.av_pref_muted;
         let prev_speaker_muted = state.av_pref_speaker_muted;
@@ -283,13 +281,6 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
         let prev_cam_id = state.av_pref_camera_id.clone();
         let prev_mic = state.av_pref_mic_id.clone();
         let prev_spk = state.av_pref_speaker_id.clone();
-        // Refresh device lists when the pre-call banner is shown (cheap).
-        if state.av_device_cameras.is_empty()
-            && state.av_device_mics.is_empty()
-            && state.av_device_speakers.is_empty()
-        {
-            state.refresh_av_devices();
-        }
         if let Some(act) = av_call_banner(ui, th, channel, channel_call.as_ref(), state) {
             action = act;
         }
@@ -1361,16 +1352,7 @@ fn active_call_panel_body(
         }
 
         if state.av_show_devices {
-            if state.av_device_cameras.is_empty()
-                && state.av_device_mics.is_empty()
-                && state.av_device_speakers.is_empty()
-            {
-                state.refresh_av_devices();
-            }
-            ui.add_space(sp.xs);
-            if let Some(act) = av_device_selectors(ui, th, state, /*in_call=*/ true) {
-                action = Some(act);
-            }
+            av_devices_expanded(ui, th, state, /*in_call=*/ true, &mut action);
         }
     });
 
@@ -1934,6 +1916,9 @@ fn av_device_combo_row_selected(
 /// Per-channel call strip when we are not in any local call:
 /// start (idle) or join (session present on this channel).
 /// Active-call chrome is global (`active_call_panel`); do not duplicate it here.
+///
+/// Idle stays a single compact row so chat keeps vertical space; join gets a
+/// short accent strip (title + Join + prefs) without stacking empty chrome.
 fn av_call_banner(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -1945,19 +1930,23 @@ fn av_call_banner(
     let p = &th.palette;
     let mut action = None;
 
-    // Idle: offer start. One call at a time is enforced when starting.
+    // Idle: one row — Call + mic/speaker/camera + Devices. No subtitle block.
     if channel_call.is_none() {
-        ui.horizontal(|ui| {
-            if button(ui, th, "📞 Call").clicked() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = sp.sm;
+            if button(ui, th, "📞 Call")
+                .on_hover_text("Start voice & video call")
+                .clicked()
+            {
                 action = Some(ChatAction::AvStart(channel.to_string()));
             }
-            dim_label(ui, th, "Voice & video over MoQ");
+            av_media_prefs_row(ui, th, state);
+            av_devices_toggle_button(ui, th, state);
         });
-        ui.add_space(sp.xs);
-        av_media_prefs_row(ui, th, state);
-        // Device pickers stay behind Devices so Cam/Mic/Out don't dominate idle chat.
-        ui.add_space(sp.xs);
-        av_devices_disclosure(ui, th, state, /*in_call=*/ false, &mut action);
+        // Pickers expand below the strip so they don't fight the wrap layout.
+        if state.av_show_devices {
+            av_devices_expanded(ui, th, state, /*in_call=*/ false, &mut action);
+        }
         return action;
     }
 
@@ -1976,65 +1965,57 @@ fn av_call_banner(
         .fill(p.accent.gamma_multiply(0.14))
         .stroke(egui::Stroke::new(1.0_f32, p.accent.gamma_multiply(0.45)))
         .corner_radius(sp.radius_md)
-        .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8));
+        .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.xs as i8));
 
     frame.show(ui, |ui| {
-        // Stack title + count (same pattern as active_call_panel) so long
-        // stream.place names don't paint over "N in call".
         let panel_w = ui.available_width();
         ui.set_width(panel_w);
-        ui.spacing_mut().item_spacing.y = 2.0;
 
-        let title_h = th.type_scale.body * 1.35;
-        ui.allocate_ui_with_layout(
-            Vec2::new(panel_w, title_h),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.set_min_width(panel_w);
-                ui.set_max_width(panel_w);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("📞 {title}"))
-                            .size(th.type_scale.body)
-                            .color(p.text)
-                            .strong(),
-                    )
-                    .truncate(),
-                );
-            },
-        );
-        dim_label(ui, th, &format!("{n} in call"));
-
-        ui.add_space(sp.sm);
+        // Title · count on one line, then Join + prefs on the next.
         ui.horizontal(|ui| {
+            ui.set_min_width(panel_w);
+            ui.set_max_width(panel_w);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("📞 {title}"))
+                        .size(th.type_scale.body)
+                        .color(p.text)
+                        .strong(),
+                )
+                .truncate(),
+            );
+            ui.add_space(sp.sm);
+            dim_label(ui, th, &format!("{n} in call"));
+        });
+
+        ui.add_space(sp.xs);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = sp.sm;
             if primary_button(ui, th, "Join call").clicked() {
                 action = Some(ChatAction::AvJoin {
                     channel: channel.to_string(),
                     session_id: call.session_id.clone(),
                 });
             }
+            av_media_prefs_row(ui, th, state);
+            av_devices_toggle_button(ui, th, state);
         });
-        ui.add_space(sp.xs);
-        av_media_prefs_row(ui, th, state);
-        ui.add_space(sp.xs);
-        av_devices_disclosure(ui, th, state, /*in_call=*/ false, &mut action);
+        if state.av_show_devices {
+            av_devices_expanded(ui, th, state, /*in_call=*/ false, &mut action);
+        }
     });
 
     action
 }
 
-/// Devices ▾ toggle + stacked Cam/Mic/Out rows when open.
-fn av_devices_disclosure(
+/// Stacked Cam/Mic/Out rows (call after the Devices toggle when open).
+fn av_devices_expanded(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
     in_call: bool,
     action: &mut Option<ChatAction>,
 ) {
-    av_devices_toggle_button(ui, th, state);
-    if !state.av_show_devices {
-        return;
-    }
     if state.av_device_cameras.is_empty()
         && state.av_device_mics.is_empty()
         && state.av_device_speakers.is_empty()
