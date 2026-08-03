@@ -546,12 +546,13 @@ impl SleekApp {
                         // camera off after a failed open, so a later re-dial opened
                         // the device but published no frames (gated off).
                         //
-                        // Skip sync while awaiting Android CAMERA grant — enabling
-                        // now would fail open and flap Live status updates.
-                        if has_camera && !lc.camera_awaiting_permission {
-                            // Hardware present — keep join/pre-call intent; re-sync
-                            // the media plane in case AtomicBool drifted.
-                            sync_camera = Some(lc.camera);
+                        // Only re-assert *publish on* when the UI still wants
+                        // camera. Never sync `enabled: false` from Live — mute
+                        // already sends AvCamera{false}, and a Live emitted by
+                        // release_local_camera must not fight mid-toggle races.
+                        // Skip while awaiting Android CAMERA grant.
+                        if has_camera && lc.camera && !lc.camera_awaiting_permission {
+                            sync_camera = Some(true);
                         }
                     }
                     if matches!(
