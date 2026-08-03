@@ -838,7 +838,7 @@ impl SleekApp {
                             self.state.media.touch_link(url);
                         }
                     }
-                    None => {}
+                    Some(preview::Embed::Video { .. }) | None => {}
                 }
 
                 let reactions = tags

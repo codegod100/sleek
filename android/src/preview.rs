@@ -1,7 +1,8 @@
 //! URL detection and media/link-preview helpers for chat messages.
 //!
-//! Mirrors freeq-android `MessageContent` patterns: image URLs show as inline
-//! thumbs; other http(s) links get an Open Graph card (title/description/thumb).
+//! Mirrors freeq-app / freeq-macos patterns: image URLs show as inline thumbs;
+//! video URLs (`.mp4`/`.webm`/…) get an inline video card; other http(s) links
+//! get an Open Graph card (title/description/thumb).
 
 use freeq_sdk::media::{LinkPreview, MediaAttachment};
 use std::collections::HashMap;
@@ -16,7 +17,9 @@ pub const MAX_IMAGE_DIM: u32 = 720;
 pub enum Embed {
     /// Direct image URL (or IRCv3 media attachment).
     Image { url: String },
-    /// Non-image http(s) link — fetch Open Graph metadata.
+    /// Direct video URL (or IRCv3 `video/*` media attachment).
+    Video { url: String },
+    /// Non-media http(s) link — fetch Open Graph metadata.
     Link { url: String },
 }
 
@@ -26,7 +29,10 @@ pub fn embed_for_message(text: &str, tags: &HashMap<String, String>) -> Option<E
         if media.is_image() {
             return Some(Embed::Image { url: media.url });
         }
-        // Non-image media still gets a link card on the media URL.
+        if media.is_video() {
+            return Some(Embed::Video { url: media.url });
+        }
+        // Audio / other media still gets a link card on the media URL.
         return Some(Embed::Link { url: media.url });
     }
     if let Some(lp) = LinkPreview::from_tags(tags) {
@@ -35,18 +41,27 @@ pub fn embed_for_message(text: &str, tags: &HashMap<String, String>) -> Option<E
     embed_from_text(text)
 }
 
-/// Scan plain message text for the first image or generic link.
+/// Scan plain message text for the first image, video, or generic link.
 pub fn embed_from_text(text: &str) -> Option<Embed> {
+    let mut first_video: Option<String> = None;
     let mut first_link: Option<String> = None;
     for url in extract_urls(text) {
         if is_image_url(&url) {
             return Some(Embed::Image { url });
         }
+        if is_video_url(&url) {
+            if first_video.is_none() {
+                first_video = Some(url);
+            }
+            continue;
+        }
         if first_link.is_none() {
             first_link = Some(url);
         }
     }
-    first_link.map(|url| Embed::Link { url })
+    first_video
+        .map(|url| Embed::Video { url })
+        .or_else(|| first_link.map(|url| Embed::Link { url }))
 }
 
 /// A http(s) URL found in free-form text, with its byte range in the source.
@@ -128,6 +143,31 @@ pub fn is_image_url(url: &str) -> bool {
     has_image_ext(file)
 }
 
+/// True for URLs that look like videos (extension, freeq media path, blob proxy mime).
+///
+/// Mirrors freeq-app `VIDEO_URL_RE` / `PROXY_VIDEO_RE` and freeq-macos video
+/// extensions (`.mp4` / `.m4v` / `.mov` / `.webm`).
+pub fn is_video_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    // freeq blob proxy with an explicit video MIME hint.
+    if lower.contains("/api/v1/blob?") && lower.contains("mime=video%2f") {
+        return true;
+    }
+    // freeq private media: `/api/v1/media/{id}/{sig}/{filename}`
+    if let Some(path) = url_path(&lower) {
+        if path.contains("/api/v1/media/") {
+            if let Some(name) = path.rsplit('/').next() {
+                if has_video_ext(name) {
+                    return true;
+                }
+            }
+        }
+    }
+    let path = url_path(&lower).unwrap_or(lower.as_str());
+    let file = path.rsplit('/').next().unwrap_or(path);
+    has_video_ext(file)
+}
+
 fn has_image_ext(name: &str) -> bool {
     // Strip query fragment already handled; allow `foo.png` or `foo.png.1` rarely —
     // stick to standard suffixes.
@@ -139,6 +179,29 @@ fn has_image_ext(name: &str) -> bool {
         || base.ends_with(".gif")
         || base.ends_with(".webp")
         || base.ends_with(".bmp")
+}
+
+fn has_video_ext(name: &str) -> bool {
+    let base = name.split('?').next().unwrap_or(name);
+    let base = base.split('#').next().unwrap_or(base);
+    base.ends_with(".mp4")
+        || base.ends_with(".m4v")
+        || base.ends_with(".mov")
+        || base.ends_with(".webm")
+}
+
+/// Filename (or last path segment) for video/media cards.
+pub fn display_filename(url: &str) -> String {
+    let path = display_path(url);
+    if path.is_empty() {
+        return display_host(url);
+    }
+    let name = path.rsplit('/').next().unwrap_or(path.as_str());
+    if name.is_empty() || name == "…" {
+        display_host(url)
+    } else {
+        name.to_string()
+    }
 }
 
 fn url_path(url: &str) -> Option<&str> {
@@ -216,6 +279,23 @@ mod tests {
             "https://irc.freeq.at/api/v1/media/abc/sig/paste.png"
         ));
         assert!(!is_image_url("https://example.com/page"));
+        assert!(!is_image_url("https://ex.com/clip.mp4"));
+    }
+
+    #[test]
+    fn detects_video_urls() {
+        assert!(is_video_url("https://ex.com/clip.MP4?x=1"));
+        assert!(is_video_url("https://ex.com/a.webm"));
+        assert!(is_video_url("https://ex.com/a.mov"));
+        assert!(is_video_url("https://ex.com/a.m4v"));
+        assert!(is_video_url(
+            "https://irc.freeq.at/api/v1/media/abc/sig/paste.mp4"
+        ));
+        assert!(is_video_url(
+            "https://irc.freeq.at/api/v1/blob?url=https%3A%2F%2Fx&mime=video%2Fmp4"
+        ));
+        assert!(!is_video_url("https://example.com/page"));
+        assert!(!is_video_url("https://ex.com/a.png"));
     }
 
     #[test]
@@ -223,6 +303,33 @@ mod tests {
         match embed_from_text("hi https://ex.com/a.png and https://ex.com/doc") {
             Some(Embed::Image { url }) => assert!(url.ends_with("a.png")),
             other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefers_video_over_generic_link() {
+        match embed_from_text("hi https://ex.com/clip.mp4 and https://ex.com/doc") {
+            Some(Embed::Video { url }) => assert!(url.ends_with("clip.mp4")),
+            other => panic!("expected video, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefers_image_over_video() {
+        match embed_from_text("https://ex.com/a.png https://ex.com/a.mp4") {
+            Some(Embed::Image { url }) => assert!(url.ends_with("a.png")),
+            other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn media_attachment_video_tag() {
+        let mut tags = HashMap::new();
+        tags.insert("content-type".into(), "video/mp4".into());
+        tags.insert("media-url".into(), "https://ex.com/v.mp4".into());
+        match embed_for_message("https://ex.com/v.mp4", &tags) {
+            Some(Embed::Video { url }) => assert_eq!(url, "https://ex.com/v.mp4"),
+            other => panic!("expected video, got {other:?}"),
         }
     }
 }

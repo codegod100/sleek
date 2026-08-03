@@ -932,6 +932,9 @@ pub fn message_bubble(
                             action = MessageBubbleAction::OpenImage { url };
                         }
                     }
+                    Embed::Video { url } => {
+                        inline_video_preview(ui, th, &url, &msg.id);
+                    }
                     Embed::Link { url } => {
                         let seed = msg.link_meta.clone();
                         // Salt with message id so two bubbles with the same URL
@@ -1500,6 +1503,90 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                 .on_hover_text("Tap to enlarge");
             resp.clicked()
         }
+    }
+}
+
+/// Inline video card (freeq-app / freeq-macos parity for `.mp4`/`.webm`/…).
+///
+/// egui has no native `<video>` element, so we render a 16:9 play surface and
+/// open the URL in the system browser / media handler on tap.
+fn inline_video_preview(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+
+    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+    // ~16:9 surface, capped like freeq-app `max-h-72`.
+    let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
+    let size = Vec2::new(max_w, height);
+    let card_id = ui.id().with("video").with(id_salt);
+
+    let frame_resp = egui::Frame::new()
+        .fill(Color32::from_rgb(12, 12, 14))
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(sp.radius_sm)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+
+            // Soft vignette so the play control reads against any theme.
+            ui.painter().rect_filled(
+                rect,
+                sp.radius_sm,
+                Color32::from_rgb(18, 18, 22),
+            );
+
+            // Play button circle.
+            let play_r = (height * 0.18).clamp(16.0, 28.0);
+            let center = rect.center();
+            ui.painter().circle_filled(
+                center,
+                play_r,
+                p.accent.gamma_multiply(0.92),
+            );
+            // Equilateral-ish play triangle pointing right.
+            let tri_w = play_r * 0.7;
+            let tri_h = play_r * 0.85;
+            let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+            let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+            let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip, bot, top],
+                Color32::from_rgb(255, 255, 255),
+                Stroke::NONE,
+            ));
+
+            // Filename / host footer strip.
+            let name = preview::display_filename(url);
+            let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
+            let foot = Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - foot_h),
+                rect.right_bottom(),
+            );
+            let r = sp.radius_sm as u8;
+            ui.painter().rect_filled(
+                foot,
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: r,
+                    se: r,
+                },
+                Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+            );
+            ui.painter().text(
+                Pos2::new(foot.left() + 8.0, foot.center().y),
+                Align2::LEFT_CENTER,
+                name,
+                FontId::proportional(th.type_scale.caption),
+                Color32::from_rgb(230, 230, 235),
+            );
+        });
+
+    let resp = ui
+        .interact(frame_resp.response.rect, card_id, Sense::click())
+        .on_hover_text("Open video")
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if resp.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
 }
 

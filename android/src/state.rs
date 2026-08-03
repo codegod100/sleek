@@ -206,6 +206,13 @@ impl ChatMessage {
             && !self.text.trim().contains(char::is_whitespace)
         {
             "📷 Image".into()
+        } else if matches!(
+            self.resolved_embed(),
+            Some(crate::preview::Embed::Video { .. })
+        ) && self.text.trim().starts_with("http")
+            && !self.text.trim().contains(char::is_whitespace)
+        {
+            "🎬 Video".into()
         } else {
             self.text.clone()
         };
