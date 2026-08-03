@@ -431,12 +431,13 @@ fn message_inline_hover_opacity(ui: &egui::Ui, hover_id: Id, force_show: bool) -
     let within_grace = last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_GRACE_SECS;
     let want_show = force_show || (in_hit_zone && dwell_ok) || within_grace;
 
-    if !in_hit_zone {
+    if !in_hit_zone && !within_grace && !force_show {
+        // Drop enter only after grace ends. Clearing it while grace is active
+        // would force a full re-dwell on a brief slip + re-enter, so the chip
+        // could start fading out while the pointer is already back on the bubble.
         ui.ctx().data_mut(|d| {
             d.remove::<f64>(enter_id);
-            if !within_grace && !force_show {
-                d.remove::<f64>(last_seen_id);
-            }
+            d.remove::<f64>(last_seen_id);
         });
     }
 
