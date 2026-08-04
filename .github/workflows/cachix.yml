@@ -1,10 +1,8 @@
 # Build flake packages on merge to main and push store paths to Cachix.
+# Builds run on nixbuild.net; Cachix is only for local/substitute pull.
 # Cache: https://codegod100.cachix.org
 #
-# CACHIX_AUTH_TOKEN is pulled at runtime from OpenBao (openbao.boxd.sh),
-# same KV layout as eve (`secret/data/ai-api-keys`, plus `secret/data/cachix`).
-#
-# Requires repository secret OPENBAO_TOKEN (read token for OpenBao).
+# OPENBAO_TOKEN unlocks NIXBUILD_TOKEN + CACHIX_AUTH_TOKEN at runtime.
 
 name: Cachix
 
@@ -29,13 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Android SDK/NDK + Rust builds need headroom on the default runner disk.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
-          df -h /
-
       - name: Fetch secrets from OpenBao
         env:
           OPENBAO_ADDR: https://openbao.boxd.sh
@@ -49,13 +40,18 @@ jobs:
             exit 1
           fi
           chmod +x scripts/fetch-openbao-env.sh
-          ./scripts/fetch-openbao-env.sh --github-env --keys CACHIX_AUTH_TOKEN
+          ./scripts/fetch-openbao-env.sh --github-env --keys NIXBUILD_TOKEN,CACHIX_AUTH_TOKEN
 
-      - uses: cachix/install-nix-action@v31
+      - uses: nixbuild/nix-quick-install-action@v35
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-          extra_nix_config: |
+          nix_conf: |
             accept-flake-config = true
+            experimental-features = nix-command flakes
+
+      - uses: nixbuild/nixbuild-action@v25
+        with:
+          nixbuild_token: ${{ env.NIXBUILD_TOKEN }}
 
       - uses: cachix/cachix-action@v17
         with:
