@@ -1,14 +1,7 @@
-# Substitute .#android + .#flatpak from binary cache only (hosted Spindle cannot compile).
-# Warm cache locally:
-#   just android
-#   just flatpak && cachix push codegod100 ./result-flatpak
-#
-# On push/manual to main (not PRs), after a successful substitute:
-#   1. Force-move annotated tag `dev` to this commit
-#   2. Push the tag (needs DEPLOY_KEY — write deploy key)
-#   3. Republish Tangled assets onto that tag (needs ATP_APP_PASSWORD)
+# Build .#android + .#flatpak on nixbuild.net, then publish Tangled assets on main.
 #
 # Secrets (Settings → Secrets):
+#   NIXBUILD_TOKEN    — nixbuild.net auth token (build/store read+write)
 #   DEPLOY_KEY        — SSH private key with write access to this repo
 #   ATP_APP_PASSWORD  — ATProto app password for blob/artifact upload
 # Optional env/secrets:
@@ -36,33 +29,27 @@ environment:
   DEV_TAG: "dev"
 
 steps:
-  - name: "Substitute APK from cache"
+  - name: "Build APK on nixbuild.net"
     command: |
       set -euo pipefail
-      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true\nmax-jobs = 0\nextra-substituters = https://codegod100.cachix.org\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
       echo "kind=${TANGLED_PIPELINE_KIND:-?} sha=${TANGLED_SHA:-?}"
       nix --version
-      if ! nix build .#android --out-link result-android \
-          --substituters 'https://codegod100.cachix.org https://cache.nixos.org' \
-          --trusted-public-keys 'codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='; then
-        echo "error: .#android not in cache. On a machine with Cachix write access:" >&2
-        echo "  just android" >&2
+      if [[ -z "${NIXBUILD_TOKEN:-}" ]]; then
+        echo "error: NIXBUILD_TOKEN secret is not set (nixbuild.net auth token)" >&2
         exit 1
       fi
+      bash scripts/nixbuild-setup.sh
+      nix build .#android --out-link result-android -L --print-build-logs
       test -s result-android/sleek.apk
       ls -lah result-android/
 
-  - name: "Substitute Flatpak from cache"
+  - name: "Build Flatpak on nixbuild.net"
     command: |
       set -euo pipefail
-      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true\nmax-jobs = 0\nextra-substituters = https://codegod100.cachix.org\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='
-      if ! nix build .#flatpak --out-link result-flatpak \
-          --substituters 'https://codegod100.cachix.org https://cache.nixos.org' \
-          --trusted-public-keys 'codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='; then
-        echo "error: .#flatpak not in cache. On a machine with Cachix write access:" >&2
-        echo "  just flatpak && cachix push codegod100 ./result-flatpak" >&2
-        exit 1
-      fi
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
+      bash scripts/nixbuild-setup.sh
+      nix build .#flatpak --out-link result-flatpak -L --print-build-logs
       test -s result-flatpak/uk.nandi.sleek.flatpak
       ls -lah result-flatpak/
       cat result-flatpak/build-info.json
@@ -70,7 +57,7 @@ steps:
   - name: "Cut / move annotated tag `dev`"
     command: |
       set -euo pipefail
-      # PRs only need the cache check; tagging is for main pushes.
+      # PRs only need the build check; tagging is for main pushes.
       if [[ "${TANGLED_PIPELINE_KIND:-}" == "pull_request" ]]; then
         echo "PR pipeline — skip tagging"
         exit 0
