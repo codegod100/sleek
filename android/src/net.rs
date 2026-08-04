@@ -152,6 +152,13 @@ pub enum NetCmd {
         request_id: u64,
         query: String,
     },
+    /// Fetch policy check + rules for the join-gate modal.
+    PolicyFetch {
+        request_id: u64,
+        channel: String,
+        api_base: String,
+        did: String,
+    },
     Quit,
 }
 
@@ -229,6 +236,12 @@ pub enum NetEvent {
         actors: Vec<HandleSuggestion>,
         /// `None` on success; set when the AppView request failed.
         error: Option<String>,
+    },
+    /// Policy check + rules for the join-gate modal.
+    PolicyFetched {
+        request_id: u64,
+        check: Result<crate::policy::PolicyCheck, String>,
+        rules: Result<String, String>,
     },
 }
 
@@ -927,6 +940,23 @@ async fn apply_cmd(
                         });
                     }
                 }
+            });
+        }
+        NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let check = crate::policy::fetch_check(&api_base, &channel, &did).await;
+                let rules = crate::policy::fetch_rules(&api_base, &channel).await;
+                let _ = tx.send(NetEvent::PolicyFetched {
+                    request_id,
+                    check,
+                    rules,
+                });
             });
         }
         NetCmd::Quit => {

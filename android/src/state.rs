@@ -1028,6 +1028,45 @@ pub fn api_base_for_server(server: &str) -> String {
     }
 }
 
+/// Join-gate modal state (policy acceptance before JOIN).
+#[derive(Debug, Default)]
+pub struct PolicyGate {
+    /// Channel the modal is open for (`None` = closed).
+    pub channel: Option<String>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub check: Option<crate::policy::PolicyCheck>,
+    pub rules: Option<String>,
+    pub accepting: bool,
+    pub joining: bool,
+    /// Monotonic id so stale HTTP responses are ignored.
+    pub fetch_id: u64,
+    /// When set, refresh the policy check after ACCEPT / verify.
+    pub refresh_after: Option<Instant>,
+}
+
+impl PolicyGate {
+    pub fn is_open(&self) -> bool {
+        self.channel.is_some()
+    }
+
+    pub fn open(&mut self, channel: String) {
+        self.channel = Some(channel);
+        self.loading = true;
+        self.error = None;
+        self.check = None;
+        self.rules = None;
+        self.accepting = false;
+        self.joining = false;
+        self.refresh_after = None;
+        self.fetch_id = self.fetch_id.wrapping_add(1);
+    }
+
+    pub fn close(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub connection: ConnectionState,
@@ -1180,6 +1219,9 @@ pub struct AppState {
     pub reconnect_attempts: u32,
     /// When set, fire auto-reconnect once `Instant::now() >=` this deadline.
     pub reconnect_at: Option<Instant>,
+
+    /// Channel policy join-gate modal (authenticated users blocked by ACCEPT rules).
+    pub policy_gate: PolicyGate,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -1298,6 +1340,7 @@ impl AppState {
             intentional_disconnect: false,
             reconnect_attempts: 0,
             reconnect_at: None,
+            policy_gate: PolicyGate::default(),
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -2007,6 +2050,17 @@ impl AppState {
     pub fn close_react_picker(&mut self) {
         self.react_picker_msg = None;
         self.react_picker_search.clear();
+    }
+
+    /// Open the channel policy join-gate modal and request a fresh check.
+    pub fn open_policy_gate(&mut self, channel: &str) -> u64 {
+        let ch = Self::normalize_channel(channel);
+        self.policy_gate.open(ch);
+        self.policy_gate.fetch_id
+    }
+
+    pub fn close_policy_gate(&mut self) {
+        self.policy_gate.close();
     }
 
     /// Start editing an existing message in the compose bar.
