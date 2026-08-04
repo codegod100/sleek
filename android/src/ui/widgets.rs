@@ -873,10 +873,7 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
-    let video_url = match &embed {
-        Some(Embed::Video { url }) => Some(url.clone()),
-        _ => None,
-    };
+    let body_line = message_body_line(&body_text, embed.as_ref());
     let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
@@ -930,14 +927,15 @@ pub fn message_bubble(
     if swipe_offset > 0.0 {
         ui.add_space(swipe_offset);
     }
+    let inner_w = ui.available_width().max(1.0);
     let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            let inner_w = ui.available_width().max(1.0);
             ui.set_max_width(inner_w);
+            ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&msg.from)
@@ -980,7 +978,6 @@ pub fn message_bubble(
             // Sense on the body — URL tap opens browser; double-click heart.
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
-            let body_line = message_body_line(&body_text, embed.as_ref());
             let mut body_resp = None;
             let mut galley = None;
             let mut galley_origin = egui::Pos2::ZERO;
@@ -1073,9 +1070,17 @@ pub fn message_bubble(
 
             if let Some(embed) = embed.as_ref() {
                 match embed {
-                    // Video mounts outside the bubble frame (below) so play
-                    // clicks are not stolen by later bubble interacts.
-                    Embed::Video { .. } => {}
+                    Embed::Video { url } => {
+                        ui.add_space(sp.sm);
+                        inline_video_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        );
+                    }
                     Embed::Image { url } => {
                         ui.add_space(sp.sm);
                         if inline_image_preview(ui, th, media, url) {
@@ -1110,12 +1115,6 @@ pub fn message_bubble(
 
     ui.ctx()
         .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp.rect));
-
-    // Video below the bubble — same layering rule as reaction chips.
-    if let Some(url) = video_url {
-        ui.add_space(sp.xs);
-        inline_video_preview(ui, th, media, &url, &msg.id, media_caption.as_deref());
-    }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
     if action_metrics.is_some() {
@@ -1536,9 +1535,11 @@ fn emoji_pick_cell(
     btn.clicked()
 }
 
-/// Max width for inline image / link cards inside a bubble.
-const EMBED_MAX_W: f32 = 280.0;
-const EMBED_MAX_H: f32 = 220.0;
+/// Inline video card width (message bubble is full-width; player stays compact).
+const EMBED_VIDEO_MAX_W: f32 = 280.0;
+/// Cap image height when filling the bubble; video uses 16:9 within its max W.
+const EMBED_MEDIA_MAX_H: f32 = 420.0;
+const EMBED_VIDEO_MAX_H: f32 = 220.0;
 
 /// Resolved message body line for bubble rendering.
 enum MessageBodyLine {
@@ -1572,21 +1573,14 @@ fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
         return MessageBodyLine::Cleared;
     }
     if let Some(embed) = embed {
-        match embed {
-            Embed::Image { url } | Embed::Video { url } => {
-                let caption = preview::caption_without_embed_url(trimmed, url);
-                if caption.is_empty() {
-                    MessageBodyLine::Text(trimmed.to_string())
-                } else {
-                    MessageBodyLine::Text(caption)
+        if preview::is_embed_only_message(trimmed, Some(embed)) {
+            MessageBodyLine::Skip
+        } else {
+            match embed {
+                Embed::Image { url } | Embed::Video { url } => {
+                    MessageBodyLine::Text(preview::caption_without_embed_url(trimmed, url))
                 }
-            }
-            Embed::Link { url } => {
-                if trimmed.eq_ignore_ascii_case(url.trim()) {
-                    MessageBodyLine::Skip
-                } else {
-                    MessageBodyLine::Text(trimmed.to_string())
-                }
+                Embed::Link { .. } => MessageBodyLine::Text(trimmed.to_string()),
             }
         }
     } else {
@@ -1758,17 +1752,22 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
             false
         }
         Some((tex, width, height)) => {
-            let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
-            let scale = (max_w / width.max(1) as f32)
-                .min(EMBED_MAX_H / height.max(1) as f32)
-                .min(1.0);
-            let size = Vec2::new(
-                (width as f32 * scale).max(1.0),
-                (height as f32 * scale).max(1.0),
-            );
+            let max_w = ui.available_width().max(80.0);
+            // Fill bubble width; clamp height so portrait media doesn't dominate.
+            let fill_scale = max_w / width.max(1) as f32;
+            let display_h = (height as f32 * fill_scale)
+                .min(EMBED_MEDIA_MAX_H)
+                .max(1.0);
+            let display_w = if height as f32 * fill_scale > EMBED_MEDIA_MAX_H {
+                (width as f32 * (EMBED_MEDIA_MAX_H / height.max(1) as f32)).max(1.0)
+            } else {
+                max_w
+            };
+            let display = Vec2::new(display_w, display_h);
             let resp = ui
                 .add(
-                    egui::Image::new((tex.id(), size))
+                    egui::Image::new((tex.id(), display))
+                        .fit_to_exact_size(display)
                         .corner_radius(sp.radius_sm)
                         .sense(Sense::click()),
                 )
@@ -1795,7 +1794,9 @@ fn inline_video_preview(
     media.touch_video(url);
 
     let sp = &th.spacing;
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+    // Compact player — bubble is full-width; don't stretch the video surface.
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
 
     match media.videos.get(url) {
         Some(crate::state::VideoState::Loading) | None => {
@@ -1804,6 +1805,7 @@ fn inline_video_preview(
                 .corner_radius(sp.radius_sm)
                 .inner_margin(egui::Margin::symmetric(12, 16))
                 .show(ui, |ui| {
+                    ui.set_width(max_w);
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.add_space(sp.sm);
@@ -1836,17 +1838,53 @@ fn inline_video_preview(
 
     let opts = VideoPlayerOpts {
         max_width: max_w,
-        max_height: EMBED_MAX_H,
+        max_height: max_h,
         title: caption
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .or_else(|| Some(preview::display_filename(url))),
         open_url_on_unsupported: Some(url.to_string()),
     };
-    let (_resp, action) = video_player(ui, th, player, &opts);
+    let playing = player.is_playing();
+    let (resp, action) = video_player(ui, th, player, &opts);
+    // High-contrast play affordance — theme accent blends into solid-blue
+    // first frames; paint a dark circle + white triangle on top.
+    if !playing {
+        paint_video_play_affordance(ui, resp.rect);
+    }
     if action == VideoPlayerAction::OpenExternally {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+}
+
+/// Dark play circle that stays visible on blue / accent-tinted video frames.
+fn paint_video_play_affordance(ui: &egui::Ui, rect: Rect) {
+    if !rect.is_positive() {
+        return;
+    }
+    let play_r = (rect.height() * 0.18).clamp(18.0, 32.0);
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(
+        center,
+        play_r,
+        Color32::from_rgba_unmultiplied(20, 20, 24, 220),
+    );
+    painter.circle_stroke(
+        center,
+        play_r,
+        Stroke::new(1.5_f32, Color32::from_rgb(245, 245, 250)),
+    );
+    let tri_w = play_r * 0.7;
+    let tri_h = play_r * 0.85;
+    let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+    let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+    let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, bot, top],
+        Color32::from_rgb(255, 255, 255),
+        Stroke::NONE,
+    ));
 }
 
 /// Play-card that only opens the URL (fetch/decode failed).
@@ -1854,8 +1892,8 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     let p = &th.palette;
     let sp = &th.spacing;
 
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
-    let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
     let size = Vec2::new(max_w, height);
     let card_id = ui.id().with("video_fallback").with(id_salt);
 
@@ -1867,20 +1905,7 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter()
                 .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
-            let play_r = (height * 0.18).clamp(16.0, 28.0);
-            let center = rect.center();
-            ui.painter()
-                .circle_filled(center, play_r, p.accent.gamma_multiply(0.92));
-            let tri_w = play_r * 0.7;
-            let tri_h = play_r * 0.85;
-            let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
-            let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
-            let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
-            ui.painter().add(egui::Shape::convex_polygon(
-                vec![tip, bot, top],
-                Color32::from_rgb(255, 255, 255),
-                Stroke::NONE,
-            ));
+            paint_video_play_affordance(ui, rect);
             let name = preview::display_filename(url);
             let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
             let foot = Rect::from_min_max(

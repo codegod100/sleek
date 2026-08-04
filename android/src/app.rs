@@ -241,6 +241,40 @@ impl SleekApp {
         apply(ctx, &self.theme());
     }
 
+    /// Fire a scheduled MoQ re-dial while still in an IRC call.
+    fn poll_media_reconnect(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.state.media_reconnect_at else {
+            return;
+        };
+        let Some(lc) = self.state.local_call.clone() else {
+            self.state.cancel_media_reconnect();
+            return;
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if std::time::Instant::now() < at {
+            return;
+        }
+        self.state.media_reconnect_at = None;
+        if lc.session_id.is_empty() {
+            return;
+        }
+        // Force past the Live/Connecting dedupe — we are intentionally redialing
+        // after a transport drop even if status was left Connecting.
+        if let Some(local) = self.state.local_call.as_mut() {
+            local.media = MediaStatus::Idle;
+        }
+        log::info!(
+            "av-media: re-dialing MoQ after transport drop (session {})",
+            lc.session_id
+        );
+        self.try_start_av_media(
+            &lc.channel,
+            &lc.session_id,
+            &lc.instance,
+            lc.token.as_deref(),
+        );
+    }
+
     /// Fire a scheduled auto-reconnect once its backoff deadline elapses.
     fn poll_auto_reconnect(&mut self, ctx: &egui::Context) {
         let Some(at) = self.state.reconnect_at else {
@@ -303,11 +337,14 @@ impl SleekApp {
             .local_call
             .as_ref()
             .is_some_and(|lc| matches!(lc.media, MediaStatus::Live | MediaStatus::Connecting));
+        let media_redial_pending = self.state.media_reconnect_at.is_some()
+            && self.state.local_call.is_some();
         if self.state.connection == ConnectionState::Connecting
             || self.state.connection.is_live()
             || self.state.awaiting_oauth
             || self.state.media.has_loading()
             || in_live_call
+            || media_redial_pending
         {
             // ~30 fps while a call is live so remote tiles update smoothly.
             let ms = if in_live_call { 33 } else { 50 };
@@ -530,8 +567,22 @@ impl SleekApp {
                 has_mic,
             } => {
                 let mut sync_camera: Option<bool> = None;
+                let intentional_redial = self.state.local_call.as_ref().is_some_and(|lc| {
+                    matches!(lc.media, MediaStatus::Connecting)
+                });
+                let media_went_live = matches!(status, MediaStatus::Live);
+                let schedule_media_redial = matches!(
+                    status,
+                    MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
+                ) && self.state.local_call.is_some()
+                    && !intentional_redial;
                 if let Some(lc) = self.state.local_call.as_mut() {
-                    lc.media = status.clone();
+                    // `AvMediaConnect` stops the prior session (Idle) before the
+                    // new handshake — keep Connecting so we don't schedule a
+                    // second reconnect or wipe in-flight dial state.
+                    if !(matches!(status, MediaStatus::Idle) && intentional_redial) {
+                        lc.media = status.clone();
+                    }
                     if matches!(status, MediaStatus::Live) {
                         lc.has_camera = has_camera;
                         lc.has_mic = has_mic;
@@ -555,26 +606,52 @@ impl SleekApp {
                             sync_camera = Some(true);
                         }
                     }
-                    if matches!(
+                    if schedule_media_redial {
+                        // Stay Idle/Failed so try_start_av_media won't dedupe the
+                        // scheduled re-dial (Connecting would skip it). The call
+                        // panel still paints tiles while media_reconnect_at is set.
+                        lc.camera_awaiting_permission = false;
+                    } else if matches!(
                         status,
                         MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                    ) {
-                        // Media plane down — hide camera control; keep mute/camera prefs.
+                    ) && !intentional_redial
+                    {
+                        // Media plane down for real — hide camera control; keep prefs.
                         lc.has_camera = false;
                         lc.has_mic = false;
                         lc.camera_awaiting_permission = false;
                     }
                 }
                 if let Some(store) = video {
+                    // New MoQ sessions start with an empty store. Seed last-good
+                    // tiles into it, then always attach — so the UI keeps pixels
+                    // during Connecting/Live and decoder writes hit the same Arc.
+                    if store.is_empty() {
+                        if let Some(old) = self.state.av_video.as_ref().filter(|s| !s.is_empty()) {
+                            store.seed_missing_from(old);
+                        }
+                    }
                     self.state.av_video = Some(store);
                 }
                 if let Some(level) = mic_level {
                     self.state.av_mic_level = Some(level);
+                } else if schedule_media_redial || intentional_redial {
+                    self.state.av_mic_level = None;
                 }
-                if matches!(
+                let was_recovering = self.state.media_recovering();
+                if media_went_live {
+                    // Cancel pending timer only — do not zero attempts on a
+                    // 1-second Live blip or MoQ thrashes every 2s forever.
+                    self.state.on_media_live();
+                }
+                if schedule_media_redial {
+                    // Keep last video frames visible while MoQ reconnects.
+                    self.state.schedule_media_reconnect();
+                } else if matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                ) {
+                ) && !intentional_redial
+                {
                     self.state.clear_av_media();
                 }
                 if let Some(enabled) = sync_camera {
@@ -582,38 +659,41 @@ impl SleekApp {
                 }
                 match &status {
                     MediaStatus::Live => {
-                        let awaiting = self
-                            .state
-                            .local_call
-                            .as_ref()
-                            .is_some_and(|lc| lc.camera_awaiting_permission);
-                        let cam = if awaiting {
-                            " · awaiting camera permission"
-                        } else if has_camera {
-                            if self
+                        // Skip toast spam while recovering from transport drops.
+                        if !was_recovering {
+                            let awaiting = self
                                 .state
                                 .local_call
                                 .as_ref()
-                                .is_some_and(|lc| lc.camera)
-                            {
-                                " + camera on"
+                                .is_some_and(|lc| lc.camera_awaiting_permission);
+                            let cam = if awaiting {
+                                " · awaiting camera permission"
+                            } else if has_camera {
+                                if self
+                                    .state
+                                    .local_call
+                                    .as_ref()
+                                    .is_some_and(|lc| lc.camera)
+                                {
+                                    " + camera on"
+                                } else {
+                                    " + camera (off)"
+                                }
+                            } else if self.state.av_pref_camera {
+                                // User wanted video but open failed (busy device,
+                                // dead OBS node, etc.) — make it visible in the toast.
+                                " · camera unavailable"
                             } else {
-                                " + camera (off)"
-                            }
-                        } else if self.state.av_pref_camera {
-                            // User wanted video but open failed (busy device,
-                            // dead OBS node, etc.) — make it visible in the toast.
-                            " · camera unavailable"
-                        } else {
-                            ""
-                        };
-                        let mic = if has_mic {
-                            ""
-                        } else {
-                            " · no mic (listen-only)"
-                        };
-                        self.state
-                            .show_toast(format!("Call media connected{cam}{mic}"));
+                                ""
+                            };
+                            let mic = if has_mic {
+                                ""
+                            } else {
+                                " · no mic (listen-only)"
+                            };
+                            self.state
+                                .show_toast(format!("Call media connected{cam}{mic}"));
+                        }
                     }
                     MediaStatus::Failed(e) => {
                         self.state.show_toast(format!("Call media failed: {e}"));
@@ -1222,6 +1302,7 @@ impl SleekApp {
                     self.net.send(NetCmd::AvMediaStop);
                     self.state.local_call = None;
                     self.state.clear_av_media();
+                    self.state.cancel_media_reconnect();
                 }
             }
         }
@@ -1416,6 +1497,7 @@ impl SleekApp {
         }
         self.state.persist_av_prefs();
         self.state.clear_av_media();
+        self.state.cancel_media_reconnect();
         self.net.send(NetCmd::AvLeave {
             channel: lc.channel,
             session_id: lc.session_id,
@@ -2183,6 +2265,8 @@ impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
         self.poll_auto_reconnect(ctx);
+        self.state.poll_media_live_stability();
+        self.poll_media_reconnect(ctx);
         self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
