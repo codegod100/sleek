@@ -1174,15 +1174,6 @@ async fn run_media(
     drop(audio_for_playback);
     // Keep last frames in the shared store so the call UI can paint stale tiles
     // across MoQ transport drops / re-dials. Call end clears via clear_av_media.
-    // #region agent log
-    {
-        let n = video_store.len();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log") {
-            use std::io::Write;
-            let _ = writeln!(f, "{}", serde_json::json!({"hypothesisId":"A","location":"av_media.rs:teardown","message":"preserving video_store on teardown","data":{"keys":n,"broadcast":our_broadcast,"runId":"post-fix"},"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0)}));
-        }
-    }
-    // #endregion
     mic_level.clear();
     // Brief yield so aborted tasks drop cpal/PW resources before the next dial.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

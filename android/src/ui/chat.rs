@@ -2222,29 +2222,6 @@ fn paint_av_video_tiles(
         ));
     }
     if frames.is_empty() {
-        // #region agent log
-        {
-            let media = state.local_call.as_ref().map(|lc| format!("{:?}", lc.media));
-            let redial = state.media_reconnect_at.is_some();
-            if media.is_some() || redial {
-                static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-                let mut emit = false;
-                if let Ok(mut g) = LAST.lock() {
-                    let now = std::time::Instant::now();
-                    if g.map(|t| now.duration_since(t).as_millis() > 400).unwrap_or(true) {
-                        *g = Some(now);
-                        emit = true;
-                    }
-                }
-                if emit {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log") {
-                        use std::io::Write;
-                        let _ = writeln!(f, "{}", serde_json::json!({"hypothesisId":"D","location":"chat.rs:paint_av_video_tiles","message":"paint skipped empty frames","data":{"media":media,"redial_pending":redial,"has_store":state.av_video.is_some(),"store_len":state.av_video.as_ref().map(|s|s.len()).unwrap_or(0),"runId":"post-fix"},"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0)}));
-                    }
-                }
-            }
-        }
-        // #endregion
         return;
     }
     // Keep painting while frames arrive (software GL + MoQ can stall idle ticks).
