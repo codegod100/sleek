@@ -207,22 +207,30 @@ impl ChatMessage {
             .filter(|t| !t.trim().is_empty())
         {
             format!("🔗 {title}")
-        } else if matches!(
-            self.resolved_embed(),
-            Some(crate::preview::Embed::Image { .. })
-        ) && self.text.trim().starts_with("http")
-            && !self.text.trim().contains(char::is_whitespace)
-        {
-            "📷 Image".into()
-        } else if matches!(
-            self.resolved_embed(),
-            Some(crate::preview::Embed::Video { .. })
-        ) && self.text.trim().starts_with("http")
-            && !self.text.trim().contains(char::is_whitespace)
-        {
-            "🎬 Video".into()
+        } else if let Some(embed) = self.resolved_embed() {
+            match &embed {
+                crate::preview::Embed::Image { url } | crate::preview::Embed::Video { url } => {
+                    let caption =
+                        crate::preview::caption_without_embed_url(self.text.trim(), url);
+                    if caption.is_empty() {
+                        if matches!(embed, crate::preview::Embed::Image { .. }) {
+                            "📷 Image".into()
+                        } else {
+                            "🎬 Video".into()
+                        }
+                    } else {
+                        caption
+                    }
+                }
+                crate::preview::Embed::Link { .. } => self.text.clone(),
+            }
         } else {
             self.text.clone()
+        };
+        let body = if body.trim().is_empty() {
+            "[message cleared]".into()
+        } else {
+            body
         };
         if self.from.is_empty() {
             body

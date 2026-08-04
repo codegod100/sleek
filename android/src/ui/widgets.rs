@@ -329,14 +329,9 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
         let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
-        let preview = parent.preview();
-        let label = if parent.from.is_empty() {
-            preview
-        } else {
-            format!("{}: {preview}", parent.from)
-        };
+        // `ChatMessage::preview()` already prefixes the sender nick.
         ui.label(
-            RichText::new(label)
+            RichText::new(parent.preview())
                 .size(th.type_scale.caption)
                 .color(p.text_secondary),
         );
@@ -882,6 +877,7 @@ pub fn message_bubble(
         Some(Embed::Video { url }) => Some(url.clone()),
         _ => None,
     };
+    let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
@@ -931,20 +927,16 @@ pub fn message_bubble(
     }
 
     let mut bubble_rect = Rect::NOTHING;
-    let row_resp = ui.horizontal(|ui| {
-        if swipe_offset > 0.0 {
-            ui.add_space(swipe_offset);
-        }
-        let bubble_w = ui.available_width().max(1.0);
-        ui.set_max_width(bubble_w);
-        let frame_resp = egui::Frame::new()
+    if swipe_offset > 0.0 {
+        ui.add_space(swipe_offset);
+    }
+    let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
             let inner_w = ui.available_width().max(1.0);
-            ui.set_min_width(inner_w);
             ui.set_max_width(inner_w);
             ui.horizontal(|ui| {
                 ui.label(
@@ -988,71 +980,95 @@ pub fn message_bubble(
             // Sense on the body — URL tap opens browser; double-click heart.
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
-            let url_spans = preview::extract_url_spans(&body_text);
-            let wrap_w = message_body_wrap_width(ui);
-            let mut job = linkify_layout_job(&body_text, &url_spans, th);
-            job.wrap.max_width = wrap_w;
-            // Pre-layout for URL hit-testing. The visible label uses `.wrap()` so
-            // egui lays out text itself — passing a pre-built Galley with
-            // `.selectable(true)` can paint nothing on Android GLES while still
-            // reserving the galley's height.
-            let galley = ui.fonts(|f| f.layout_job(job.clone()));
-            let body_selectable = !touch_ui;
-            let body_resp = ui.add(
-                egui::Label::new(job)
-                    .wrap()
-                    .sense(Sense::click())
-                    .selectable(body_selectable),
-            );
-            body_long_touched = body_resp.long_touched();
-            let galley_origin = body_resp.rect.min;
-            let hovered_url = body_resp.hover_pos().and_then(|pos| {
-                url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+            let body_line = message_body_line(&body_text, embed.as_ref());
+            let mut body_resp = None;
+            let mut galley = None;
+            let mut galley_origin = egui::Pos2::ZERO;
+            let mut url_spans = Vec::new();
+            if let MessageBodyLine::Skip = body_line {
+                // URL-only link — OG card below carries the content.
+            } else {
+                let (visible, cleared) = match &body_line {
+                    MessageBodyLine::Text(t) => (t.as_str(), false),
+                    MessageBodyLine::Cleared => ("[message cleared]", true),
+                    MessageBodyLine::Skip => unreachable!(),
+                };
+                url_spans = preview::extract_url_spans(visible);
+                let (resp, laid_out, origin) =
+                    render_message_body(ui, th, visible, cleared, inner_w, &url_spans);
+                body_long_touched = resp.long_touched();
+                galley_origin = origin;
+                galley = laid_out;
+                body_resp = Some(resp);
+            }
+            let hovered_url = body_resp.as_ref().and_then(|body_resp| {
+                body_resp.hover_pos().and_then(|pos| {
+                    url_at_galley_pos(
+                        galley.as_ref()?,
+                        galley_origin,
+                        match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => return None,
+                        },
+                        &url_spans,
+                        pos,
+                    )
+                })
             });
-            let tip = if let Some(url) = hovered_url.as_deref() {
-                url.to_string()
-            } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
-                if can_edit || can_delete {
-                    "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
+            if let Some(mut body_resp) = body_resp {
+                let tip = if let Some(url) = hovered_url.as_deref() {
+                    url.to_string()
+                } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+                    if can_edit || can_delete {
+                        "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
+                    } else if can_react {
+                        "Long-press for React, Reply · swipe right to reply".to_string()
+                    } else if can_reply {
+                        "Swipe right to reply".to_string()
+                    } else {
+                        String::new()
+                    }
+                } else if can_edit || can_delete {
+                    "Hover or right-click for React, Edit, Delete".to_string()
                 } else if can_react {
-                    "Long-press for React, Reply · swipe right to reply".to_string()
-                } else if can_reply {
-                    "Swipe right to reply".to_string()
+                    let heart = display_emoji(DEFAULT_REACT_EMOJI);
+                    format!("Double-click {heart} · hover or right-click for React")
                 } else {
                     String::new()
+                };
+                body_resp = body_resp.on_hover_text(tip);
+                if hovered_url.is_some() {
+                    body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
                 }
-            } else if can_edit || can_delete {
-                "Select to copy · hover or right-click for React, Edit, Delete".to_string()
-            } else if can_react {
-                let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                format!("Select to copy · double-click {heart} · hover or right-click for React")
-            } else {
-                "Select to copy".into()
-            };
-            let mut body_resp = body_resp.on_hover_text(tip);
-            if hovered_url.is_some() {
-                body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
-            }
-            let mut opened_link = false;
-            if body_resp.clicked() {
-                if let Some(pos) = body_resp.interact_pointer_pos() {
-                    if let Some(url) =
-                        url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+                let mut opened_link = false;
+                if body_resp.clicked() {
+                    if let (Some(pos), Some(galley)) =
+                        (body_resp.interact_pointer_pos(), galley.as_ref())
                     {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                        opened_link = true;
+                        let visible = match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => "",
+                        };
+                        if let Some(url) =
+                            url_at_galley_pos(galley, galley_origin, visible, &url_spans, pos)
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            opened_link = true;
+                        }
                     }
                 }
-            }
-            if can_react
-                && !opened_link
-                && matches!(action, MessageBubbleAction::None)
-                && body_resp.double_clicked()
-            {
-                action = MessageBubbleAction::ToggleReaction {
-                    msgid: msg.id.clone(),
-                    emoji: DEFAULT_REACT_EMOJI.to_string(),
-                };
+                if can_react
+                    && !opened_link
+                    && matches!(action, MessageBubbleAction::None)
+                    && body_resp.double_clicked()
+                {
+                    action = MessageBubbleAction::ToggleReaction {
+                        msgid: msg.id.clone(),
+                        emoji: DEFAULT_REACT_EMOJI.to_string(),
+                    };
+                }
             }
 
             if let Some(embed) = embed.as_ref() {
@@ -1078,9 +1094,8 @@ pub fn message_bubble(
                 }
             }
         });
-        bubble_rect = frame_resp.response.rect;
-    })
-    .response;
+    bubble_rect = frame_resp.response.rect;
+    let row_resp = frame_resp.response;
 
     if swipe_offset > 0.0 {
         let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
@@ -1099,7 +1114,7 @@ pub fn message_bubble(
     // Video below the bubble — same layering rule as reaction chips.
     if let Some(url) = video_url {
         ui.add_space(sp.xs);
-        inline_video_preview(ui, th, media, &url, &msg.id);
+        inline_video_preview(ui, th, media, &url, &msg.id, media_caption.as_deref());
     }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
@@ -1525,10 +1540,112 @@ fn emoji_pick_cell(
 const EMBED_MAX_W: f32 = 280.0;
 const EMBED_MAX_H: f32 = 220.0;
 
-/// Clamp message-body wrap width so nested horizontal layouts never pass an
-/// unbounded width into the text layout (degenerate galleys on APK).
-fn message_body_wrap_width(ui: &egui::Ui) -> f32 {
-    ui.available_width().min(ui.max_rect().width()).max(1.0)
+/// Resolved message body line for bubble rendering.
+enum MessageBodyLine {
+    /// Visible text (caption-only for image/video when prose exists).
+    Text(String),
+    /// Whitespace-only / cleared message.
+    Cleared,
+    /// URL-only link message — OG card carries the content.
+    Skip,
+}
+
+/// Caption text for image/video embeds (URL stripped). `None` when URL-only.
+fn media_embed_caption(text: &str, embed: Option<&Embed>) -> Option<String> {
+    let embed = embed?;
+    let url = match embed {
+        Embed::Image { url } | Embed::Video { url } => url.as_str(),
+        Embed::Link { .. } => return None,
+    };
+    let caption = preview::caption_without_embed_url(text, url);
+    if caption.is_empty() {
+        None
+    } else {
+        Some(caption)
+    }
+}
+
+/// Choose visible bubble body text (strip bare media URLs; flag cleared bodies).
+fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return MessageBodyLine::Cleared;
+    }
+    if let Some(embed) = embed {
+        match embed {
+            Embed::Image { url } | Embed::Video { url } => {
+                let caption = preview::caption_without_embed_url(trimmed, url);
+                if caption.is_empty() {
+                    MessageBodyLine::Text(trimmed.to_string())
+                } else {
+                    MessageBodyLine::Text(caption)
+                }
+            }
+            Embed::Link { url } => {
+                if trimmed.eq_ignore_ascii_case(url.trim()) {
+                    MessageBodyLine::Skip
+                } else {
+                    MessageBodyLine::Text(trimmed.to_string())
+                }
+            }
+        }
+    } else {
+        MessageBodyLine::Text(trimmed.to_string())
+    }
+}
+
+/// Render a message body line. Plain text uses `RichText` (reliable on GLES);
+/// linkified bodies use a pre-built galley with selection disabled.
+fn render_message_body(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    visible: &str,
+    cleared: bool,
+    wrap_w: f32,
+    url_spans: &[UrlSpan],
+) -> (egui::Response, Option<std::sync::Arc<egui::Galley>>, egui::Pos2) {
+    let p = &th.palette;
+    if url_spans.is_empty() {
+        let resp = if cleared {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary)
+                        .italics(),
+                )
+                .wrap(),
+            )
+        } else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.body)
+                        .color(p.text),
+                )
+                .wrap(),
+            )
+        };
+        let origin = resp.rect.min;
+        return (resp, None, origin);
+    }
+
+    let mut job = linkify_layout_job(visible, url_spans, th);
+    if cleared {
+        if let Some(section) = job.sections.first_mut() {
+            section.format.color = p.text_secondary;
+            section.format.italics = true;
+        }
+    }
+    job.wrap.max_width = wrap_w;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let resp = ui.add(
+        egui::Label::new(egui::WidgetText::Galley(galley.clone()))
+            .sense(Sense::click())
+            .selectable(false),
+    );
+    let origin = resp.rect.min;
+    (resp, Some(galley), origin)
 }
 
 /// LayoutJob with http(s) spans styled as accent underlines.
@@ -1671,6 +1788,7 @@ fn inline_video_preview(
     media: &mut MediaCache,
     url: &str,
     id_salt: &str,
+    caption: Option<&str>,
 ) {
     use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
 
@@ -1719,7 +1837,10 @@ fn inline_video_preview(
     let opts = VideoPlayerOpts {
         max_width: max_w,
         max_height: EMBED_MAX_H,
-        title: Some(preview::display_filename(url)),
+        title: caption
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| Some(preview::display_filename(url))),
         open_url_on_unsupported: Some(url.to_string()),
     };
     let (_resp, action) = video_player(ui, th, player, &opts);

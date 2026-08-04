@@ -192,6 +192,34 @@ fn has_video_ext(name: &str) -> bool {
         || base.ends_with(".webm")
 }
 
+/// Message prose with an inline image/video URL removed.
+///
+/// freeq sends `{url} {caption}` or `{alt} {url}`; the embed card carries the
+/// media bytes so the bubble body should show only the human caption.
+pub fn caption_without_embed_url(text: &str, embed_url: &str) -> String {
+    let text = text.trim();
+    let url = embed_url.trim();
+    if text.is_empty() || url.is_empty() {
+        return text.to_string();
+    }
+    let lower_text = text.to_ascii_lowercase();
+    let lower_url = url.to_ascii_lowercase();
+    if lower_text == lower_url {
+        return String::new();
+    }
+    let Some(pos) = lower_text.find(&lower_url) else {
+        return text.to_string();
+    };
+    let before = text[..pos].trim();
+    let after = text[pos + url.len()..].trim();
+    match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => after.to_string(),
+        (false, true) => before.to_string(),
+        (false, false) => format!("{before} {after}"),
+    }
+}
+
 /// Filename (or last path segment) for video/media cards.
 pub fn display_filename(url: &str) -> String {
     let path = display_path(url);
@@ -298,6 +326,20 @@ mod tests {
         ));
         assert!(!is_video_url("https://example.com/page"));
         assert!(!is_video_url("https://ex.com/a.png"));
+    }
+
+    #[test]
+    fn caption_without_embed_url_strips_bare_media_url() {
+        let url = "https://ex.com/a.mp4";
+        assert_eq!(caption_without_embed_url(url, url), "");
+        assert_eq!(
+            caption_without_embed_url(&format!("{url} hello"), url),
+            "hello"
+        );
+        assert_eq!(
+            caption_without_embed_url(&format!("hello {url}"), url),
+            "hello"
+        );
     }
 
     #[test]
