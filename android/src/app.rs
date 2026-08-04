@@ -258,6 +258,11 @@ impl SleekApp {
         if lc.session_id.is_empty() {
             return;
         }
+        // Force past the Live/Connecting dedupe — we are intentionally redialing
+        // after a transport drop even if status was left Connecting.
+        if let Some(local) = self.state.local_call.as_mut() {
+            local.media = MediaStatus::Idle;
+        }
         log::info!(
             "av-media: re-dialing MoQ after transport drop (session {})",
             lc.session_id
@@ -601,10 +606,10 @@ impl SleekApp {
                             sync_camera = Some(true);
                         }
                     }
-                    // Transport drop while still in the IRC call: keep the video
-                    // stage mounted (Connecting) so tiles don't unmount/remount.
                     if schedule_media_redial {
-                        lc.media = MediaStatus::Connecting;
+                        // Stay Idle/Failed so try_start_av_media won't dedupe the
+                        // scheduled re-dial (Connecting would skip it). The call
+                        // panel still paints tiles while media_reconnect_at is set.
                         lc.camera_awaiting_permission = false;
                     } else if matches!(
                         status,
@@ -618,13 +623,18 @@ impl SleekApp {
                     }
                 }
                 if let Some(store) = video {
-                    let keep_stale_frames = matches!(status, MediaStatus::Connecting)
-                        && self
-                            .state
-                            .av_video
-                            .as_ref()
-                            .is_some_and(|old| !old.is_empty())
-                        && store.is_empty();
+                    // Keep painting the previous store until the new session has
+                    // at least one frame — empty Connecting/Live swaps flash black.
+                    let keep_stale_frames = self
+                        .state
+                        .av_video
+                        .as_ref()
+                        .is_some_and(|old| !old.is_empty())
+                        && store.is_empty()
+                        && matches!(
+                            status,
+                            MediaStatus::Connecting | MediaStatus::Live
+                        );
                     if !keep_stale_frames {
                         self.state.av_video = Some(store);
                     }

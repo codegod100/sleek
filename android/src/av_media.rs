@@ -498,7 +498,8 @@ impl AvMediaSession {
             }
         }
         self.abort.take();
-        self.video.clear();
+        // Do not clear `video` here — the UI may still be painting the last
+        // frames from this Arc while MoQ re-dials. Call end uses clear_av_media.
         self.mic_level.clear();
     }
 
@@ -509,7 +510,7 @@ impl AvMediaSession {
             task.abort();
         }
         self.abort.take();
-        self.video.clear();
+        // Keep last frames for reconnect UI; see stop_and_wait.
         self.mic_level.clear();
     }
 }

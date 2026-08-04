@@ -1535,8 +1535,11 @@ fn emoji_pick_cell(
     btn.clicked()
 }
 
-/// Cap image/video height so tall media doesn't dominate the scroll area.
+/// Inline video card width (message bubble is full-width; player stays compact).
+const EMBED_VIDEO_MAX_W: f32 = 280.0;
+/// Cap image height when filling the bubble; video uses 16:9 within its max W.
 const EMBED_MEDIA_MAX_H: f32 = 420.0;
+const EMBED_VIDEO_MAX_H: f32 = 220.0;
 
 /// Resolved message body line for bubble rendering.
 enum MessageBodyLine {
@@ -1791,8 +1794,9 @@ fn inline_video_preview(
     media.touch_video(url);
 
     let sp = &th.spacing;
-    let max_w = ui.available_width().max(120.0);
-    let max_h = (max_w * 9.0 / 16.0).min(EMBED_MEDIA_MAX_H).max(120.0);
+    // Compact player — bubble is full-width; don't stretch the video surface.
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
 
     match media.videos.get(url) {
         Some(crate::state::VideoState::Loading) | None => {
@@ -1841,10 +1845,46 @@ fn inline_video_preview(
             .or_else(|| Some(preview::display_filename(url))),
         open_url_on_unsupported: Some(url.to_string()),
     };
-    let (_resp, action) = video_player(ui, th, player, &opts);
+    let playing = player.is_playing();
+    let (resp, action) = video_player(ui, th, player, &opts);
+    // High-contrast play affordance — theme accent blends into solid-blue
+    // first frames; paint a dark circle + white triangle on top.
+    if !playing {
+        paint_video_play_affordance(ui, resp.rect);
+    }
     if action == VideoPlayerAction::OpenExternally {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+}
+
+/// Dark play circle that stays visible on blue / accent-tinted video frames.
+fn paint_video_play_affordance(ui: &egui::Ui, rect: Rect) {
+    if !rect.is_positive() {
+        return;
+    }
+    let play_r = (rect.height() * 0.18).clamp(18.0, 32.0);
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(
+        center,
+        play_r,
+        Color32::from_rgba_unmultiplied(20, 20, 24, 220),
+    );
+    painter.circle_stroke(
+        center,
+        play_r,
+        Stroke::new(1.5_f32, Color32::from_rgb(245, 245, 250)),
+    );
+    let tri_w = play_r * 0.7;
+    let tri_h = play_r * 0.85;
+    let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+    let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+    let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, bot, top],
+        Color32::from_rgb(255, 255, 255),
+        Stroke::NONE,
+    ));
 }
 
 /// Play-card that only opens the URL (fetch/decode failed).
@@ -1852,8 +1892,8 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     let p = &th.palette;
     let sp = &th.spacing;
 
-    let max_w = ui.available_width().max(120.0);
-    let height = (max_w * 9.0 / 16.0).min(EMBED_MEDIA_MAX_H).max(72.0);
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
     let size = Vec2::new(max_w, height);
     let card_id = ui.id().with("video_fallback").with(id_salt);
 
@@ -1865,20 +1905,7 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter()
                 .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
-            let play_r = (height * 0.18).clamp(16.0, 28.0);
-            let center = rect.center();
-            ui.painter()
-                .circle_filled(center, play_r, p.accent.gamma_multiply(0.92));
-            let tri_w = play_r * 0.7;
-            let tri_h = play_r * 0.85;
-            let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
-            let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
-            let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
-            ui.painter().add(egui::Shape::convex_polygon(
-                vec![tip, bot, top],
-                Color32::from_rgb(255, 255, 255),
-                Stroke::NONE,
-            ));
+            paint_video_play_affordance(ui, rect);
             let name = preview::display_filename(url);
             let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
             let foot = Rect::from_min_max(
