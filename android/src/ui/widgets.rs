@@ -1858,8 +1858,7 @@ fn inline_video_preview(
         max_height: max_h,
         title: caption
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| Some(preview::display_filename(url))),
+            .map(|s| s.to_string()),
         open_url_on_unsupported: Some(url.to_string()),
     };
     let playing = player.is_playing();
@@ -1959,7 +1958,7 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     }
 }
 
-/// Filename + clickable full URL under inline image/video embeds.
+/// Clickable full URL under inline image/video embeds (optional caption above).
 fn media_embed_link_footer(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -1970,16 +1969,12 @@ fn media_embed_link_footer(
     let p = &th.palette;
     let sp = &th.spacing;
     let link_line = url.trim();
-    let filename = preview::display_filename(url);
-    let title = caption
-        .filter(|s| !s.is_empty())
-        .unwrap_or(filename.as_str());
 
     ui.add_space(sp.xs);
     ui.push_id(id_salt, |ui| {
-        if title != link_line {
+        if let Some(caption) = caption.filter(|s| !s.is_empty()) {
             ui.label(
-                RichText::new(title)
+                RichText::new(caption)
                     .size(th.type_scale.caption)
                     .color(p.text)
                     .strong(),
