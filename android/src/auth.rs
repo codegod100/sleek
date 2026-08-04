@@ -108,12 +108,23 @@ impl Default for SavedPrefs {
     }
 }
 
+/// Writable app config directory (`~/.config/sleek` on desktop; app files on Android).
+fn storage_dir() -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = crate::android_media::app_storage_dir() {
+            return dir;
+        }
+        log::warn!("android: app storage dir unavailable; prefs may not persist");
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("sleek")
+}
+
 impl SavedPrefs {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleek")
-            .join("prefs.json")
+        storage_dir().join("prefs.json")
     }
 
     pub fn load() -> Self {
@@ -199,10 +210,7 @@ pub struct SavedSession {
 
 impl SavedSession {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleek")
-            .join("session.json")
+        storage_dir().join("session.json")
     }
 
     pub fn load() -> Option<Self> {
