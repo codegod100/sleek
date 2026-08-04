@@ -935,13 +935,17 @@ pub fn message_bubble(
         if swipe_offset > 0.0 {
             ui.add_space(swipe_offset);
         }
+        let bubble_w = ui.available_width().max(1.0);
+        ui.set_max_width(bubble_w);
         let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+            let inner_w = ui.available_width().max(1.0);
+            ui.set_min_width(inner_w);
+            ui.set_max_width(inner_w);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&msg.from)
@@ -985,13 +989,20 @@ pub fn message_bubble(
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
             let url_spans = preview::extract_url_spans(&body_text);
+            let wrap_w = message_body_wrap_width(ui);
             let mut job = linkify_layout_job(&body_text, &url_spans, th);
-            job.wrap.max_width = ui.available_width();
-            let galley = ui.fonts(|f| f.layout_job(job));
+            job.wrap.max_width = wrap_w;
+            // Pre-layout for URL hit-testing. The visible label uses `.wrap()` so
+            // egui lays out text itself — passing a pre-built Galley with
+            // `.selectable(true)` can paint nothing on Android GLES while still
+            // reserving the galley's height.
+            let galley = ui.fonts(|f| f.layout_job(job.clone()));
+            let body_selectable = !touch_ui;
             let body_resp = ui.add(
-                egui::Label::new(egui::WidgetText::Galley(galley.clone()))
+                egui::Label::new(job)
+                    .wrap()
                     .sense(Sense::click())
-                    .selectable(true),
+                    .selectable(body_selectable),
             );
             body_long_touched = body_resp.long_touched();
             let galley_origin = body_resp.rect.min;
@@ -1513,6 +1524,12 @@ fn emoji_pick_cell(
 /// Max width for inline image / link cards inside a bubble.
 const EMBED_MAX_W: f32 = 280.0;
 const EMBED_MAX_H: f32 = 220.0;
+
+/// Clamp message-body wrap width so nested horizontal layouts never pass an
+/// unbounded width into the text layout (degenerate galleys on APK).
+fn message_body_wrap_width(ui: &egui::Ui) -> f32 {
+    ui.available_width().min(ui.max_rect().width()).max(1.0)
+}
 
 /// LayoutJob with http(s) spans styled as accent underlines.
 fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
