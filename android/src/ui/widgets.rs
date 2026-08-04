@@ -1959,7 +1959,7 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     }
 }
 
-/// Filename + clickable host under inline image/video (freeq file-embed parity).
+/// Filename + clickable full URL under inline image/video embeds.
 fn media_embed_link_footer(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -1969,7 +1969,7 @@ fn media_embed_link_footer(
 ) {
     let p = &th.palette;
     let sp = &th.spacing;
-    let host = preview::display_host(url);
+    let link_line = url.trim();
     let filename = preview::display_filename(url);
     let title = caption
         .filter(|s| !s.is_empty())
@@ -1977,7 +1977,7 @@ fn media_embed_link_footer(
 
     ui.add_space(sp.xs);
     ui.push_id(id_salt, |ui| {
-        if title != host.as_str() {
+        if title != link_line {
             ui.label(
                 RichText::new(title)
                     .size(th.type_scale.caption)
@@ -1988,14 +1988,15 @@ fn media_embed_link_footer(
         let resp = ui
             .add(
                 egui::Label::new(
-                    RichText::new(&host)
+                    RichText::new(link_line)
                         .size(th.type_scale.caption)
                         .color(p.accent),
                 )
+                .wrap()
                 .sense(Sense::click()),
             )
             .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(url);
+            .on_hover_text("Open in browser");
         if resp.clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
         }
