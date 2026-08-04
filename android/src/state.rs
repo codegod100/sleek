@@ -1193,9 +1193,9 @@ pub struct AppState {
     pub media_reconnect_at: Option<Instant>,
 }
 
-/// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
+/// egui texture + last-uploaded frame gen for AV tiles.
 #[derive(Default)]
-pub struct AvVideoTextures(pub HashMap<String, TextureHandle>);
+pub struct AvVideoTextures(pub HashMap<String, (TextureHandle, u64)>);
 
 impl std::fmt::Debug for AvVideoTextures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1205,16 +1205,13 @@ impl std::fmt::Debug for AvVideoTextures {
     }
 }
 
-impl std::ops::Deref for AvVideoTextures {
-    type Target = HashMap<String, TextureHandle>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl AvVideoTextures {
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
-}
 
-impl std::ops::DerefMut for AvVideoTextures {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    pub fn retain(&mut self, mut f: impl FnMut(&String) -> bool) {
+        self.0.retain(|k, _| f(k));
     }
 }
 

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use freeq_sdk::av::{AvAction, AvState};
@@ -63,6 +63,8 @@ pub struct RgbaVideoFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<[u8]>,
+    /// Monotonic id for this key — UI skips texture upload when unchanged.
+    pub gen: u64,
 }
 
 impl fmt::Debug for RgbaVideoFrame {
@@ -71,6 +73,7 @@ impl fmt::Debug for RgbaVideoFrame {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("rgba_len", &self.rgba.len())
+            .field("gen", &self.gen)
             .finish()
     }
 }
@@ -82,6 +85,7 @@ impl fmt::Debug for RgbaVideoFrame {
 #[derive(Clone, Default)]
 pub struct VideoFrameStore {
     frames: Arc<Mutex<HashMap<String, RgbaVideoFrame>>>,
+    next_gen: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for VideoFrameStore {
@@ -109,6 +113,7 @@ impl VideoFrameStore {
         // Camera / decoder paths sometimes leave alpha at 0 (OBS virtual cam,
         // some MJPEG converters). egui then draws a fully transparent tile.
         let rgba = force_opaque_rgba(rgba);
+        let gen = self.next_gen.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         if let Ok(mut g) = self.frames.lock() {
             g.insert(
                 nick.into(),
@@ -116,6 +121,7 @@ impl VideoFrameStore {
                     width,
                     height,
                     rgba,
+                    gen,
                 },
             );
         }

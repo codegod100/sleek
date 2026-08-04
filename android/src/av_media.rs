@@ -867,8 +867,9 @@ async fn run_media(
                     }
                     None => {
                         let path_str = path.to_string();
-                        let key = path_key(&path_str).to_string();
-                        store_for_subs.remove(&key);
+                        // Keep last frame visible — SFU unannounce/reannounce
+                        // blips used to clear the tile and flash black. Stale
+                        // frames are wiped on call end via clear_av_media.
                         if let Some(h) = tap_keys.remove(&path_str) {
                             h.abort();
                         }

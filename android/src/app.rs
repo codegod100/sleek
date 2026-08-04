@@ -601,11 +601,17 @@ impl SleekApp {
                             sync_camera = Some(true);
                         }
                     }
-                    if matches!(
+                    // Transport drop while still in the IRC call: keep the video
+                    // stage mounted (Connecting) so tiles don't unmount/remount.
+                    if schedule_media_redial {
+                        lc.media = MediaStatus::Connecting;
+                        lc.camera_awaiting_permission = false;
+                    } else if matches!(
                         status,
                         MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                    ) {
-                        // Media plane down — hide camera control; keep mute/camera prefs.
+                    ) && !intentional_redial
+                    {
+                        // Media plane down for real — hide camera control; keep prefs.
                         lc.has_camera = false;
                         lc.has_mic = false;
                         lc.camera_awaiting_permission = false;

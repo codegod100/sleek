@@ -874,7 +874,6 @@ pub fn message_bubble(
 
     let embed = msg.resolved_embed();
     let body_line = message_body_line(&body_text, embed.as_ref());
-    let embed_only = matches!(body_line, MessageBodyLine::Skip);
     let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
@@ -929,21 +928,14 @@ pub fn message_bubble(
         ui.add_space(swipe_offset);
     }
     let inner_w = ui.available_width().max(1.0);
-    let bubble_w = if embed_only {
-        (EMBED_MAX_W + (sp.md as f32) * 2.0 + 16.0).min(inner_w)
-    } else {
-        inner_w
-    };
     let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            ui.set_max_width(bubble_w);
-            if embed_only {
-                ui.set_width(bubble_w);
-            }
+            ui.set_max_width(inner_w);
+            ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&msg.from)
@@ -1543,9 +1535,8 @@ fn emoji_pick_cell(
     btn.clicked()
 }
 
-/// Max width for inline image / link cards inside a bubble.
-const EMBED_MAX_W: f32 = 280.0;
-const EMBED_MAX_H: f32 = 220.0;
+/// Cap image/video height so tall media doesn't dominate the scroll area.
+const EMBED_MEDIA_MAX_H: f32 = 420.0;
 
 /// Resolved message body line for bubble rendering.
 enum MessageBodyLine {
@@ -1758,18 +1749,22 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
             false
         }
         Some((tex, width, height)) => {
-            let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
-            ui.set_width(max_w);
-            let scale = (max_w / width.max(1) as f32)
-                .min(EMBED_MAX_H / height.max(1) as f32)
-                .min(1.0);
-            let size = Vec2::new(
-                (width as f32 * scale).max(1.0),
-                (height as f32 * scale).max(1.0),
-            );
+            let max_w = ui.available_width().max(80.0);
+            // Fill bubble width; clamp height so portrait media doesn't dominate.
+            let fill_scale = max_w / width.max(1) as f32;
+            let display_h = (height as f32 * fill_scale)
+                .min(EMBED_MEDIA_MAX_H)
+                .max(1.0);
+            let display_w = if height as f32 * fill_scale > EMBED_MEDIA_MAX_H {
+                (width as f32 * (EMBED_MEDIA_MAX_H / height.max(1) as f32)).max(1.0)
+            } else {
+                max_w
+            };
+            let display = Vec2::new(display_w, display_h);
             let resp = ui
                 .add(
-                    egui::Image::new((tex.id(), size))
+                    egui::Image::new((tex.id(), display))
+                        .fit_to_exact_size(display)
                         .corner_radius(sp.radius_sm)
                         .sense(Sense::click()),
                 )
@@ -1796,8 +1791,8 @@ fn inline_video_preview(
     media.touch_video(url);
 
     let sp = &th.spacing;
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
-    ui.set_width(max_w);
+    let max_w = ui.available_width().max(120.0);
+    let max_h = (max_w * 9.0 / 16.0).min(EMBED_MEDIA_MAX_H).max(120.0);
 
     match media.videos.get(url) {
         Some(crate::state::VideoState::Loading) | None => {
@@ -1839,7 +1834,7 @@ fn inline_video_preview(
 
     let opts = VideoPlayerOpts {
         max_width: max_w,
-        max_height: EMBED_MAX_H,
+        max_height: max_h,
         title: caption
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -1857,8 +1852,8 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     let p = &th.palette;
     let sp = &th.spacing;
 
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
-    let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
+    let max_w = ui.available_width().max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_MEDIA_MAX_H).max(72.0);
     let size = Vec2::new(max_w, height);
     let card_id = ui.id().with("video_fallback").with(id_salt);
 
