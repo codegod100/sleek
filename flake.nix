@@ -1,12 +1,12 @@
 {
   description = "Sleek — mobile freeq client (Vidya + freeq-sdk)";
 
-  # Trusted when accept-flake-config = true (bootstrap sets this on Codespaces).
+  # Pull cache URL for clients that accept flake config. The signing key and
+  # trusted-substituters entry must live in the daemon conf (bootstrap writes
+  # /etc/nix/nix.custom.conf) — non-trusted users cannot set trusted-public-keys
+  # via flake nixConfig even with --accept-flake-config.
   nixConfig = {
     extra-substituters = [ "https://codegod100.cachix.org" ];
-    extra-trusted-public-keys = [
-      "codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA="
-    ];
   };
 
   inputs = {
