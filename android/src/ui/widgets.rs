@@ -1083,7 +1083,14 @@ pub fn message_bubble(
                     }
                     Embed::Image { url } => {
                         ui.add_space(sp.sm);
-                        if inline_image_preview(ui, th, media, url) {
+                        if inline_image_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        ) {
                             action = MessageBubbleAction::OpenImage {
                                 url: url.clone(),
                             };
@@ -1716,7 +1723,14 @@ fn url_at_galley_pos(
 }
 
 /// Inline chat image. Returns `true` when the user taps to open the lightbox.
-fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, url: &str) -> bool {
+fn inline_image_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
     media.touch_image(url);
@@ -1749,6 +1763,7 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                         dim_label(ui, th, "Loading image…");
                     });
                 });
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             false
         }
         Some((tex, width, height)) => {
@@ -1773,6 +1788,7 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Tap to enlarge");
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             resp.clicked()
         }
     }
@@ -1812,6 +1828,7 @@ fn inline_video_preview(
                         dim_label(ui, th, "Loading video…");
                     });
                 });
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             return;
         }
         Some(crate::state::VideoState::Failed) => {
@@ -1855,6 +1872,7 @@ fn inline_video_preview(
     if action == VideoPlayerAction::OpenExternally {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+    media_embed_link_footer(ui, th, url, id_salt, caption);
 }
 
 /// Dark play circle that stays visible on blue / accent-tinted video frames.
@@ -1939,6 +1957,49 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     if resp.clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+}
+
+/// Filename + clickable host under inline image/video (freeq file-embed parity).
+fn media_embed_link_footer(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let host = preview::display_host(url);
+    let filename = preview::display_filename(url);
+    let title = caption
+        .filter(|s| !s.is_empty())
+        .unwrap_or(filename.as_str());
+
+    ui.add_space(sp.xs);
+    ui.push_id(id_salt, |ui| {
+        if title != host.as_str() {
+            ui.label(
+                RichText::new(title)
+                    .size(th.type_scale.caption)
+                    .color(p.text)
+                    .strong(),
+            );
+        }
+        let resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(&host)
+                        .size(th.type_scale.caption)
+                        .color(p.accent),
+                )
+                .sense(Sense::click()),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(url);
+        if resp.clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    });
 }
 
 fn og_link_preview(
