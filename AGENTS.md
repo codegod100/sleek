@@ -20,11 +20,16 @@ support).
   `BINDGEN_EXTRA_CLANG_ARGS` (needed by the `v4l2r` camera bindgen),
   `PKG_CONFIG_PATH`, `OPENSSL_NO_VENDOR`, and `SLEEK_LD_LIBRARY_PATH` are set.
   Use `nix develop /workspace --command <cmd>` or `./scripts/enter <cmd>`.
-- The flake's `nixConfig` advertises the optional `codegod100.cachix.org`
-  substituter. `accept-flake-config = false` is set in `/etc/nix/nix.conf` so it
-  is silently ignored (no cachix needed). If you invoke nix from an interactive
-  TTY (e.g. tmux) and still get a trust prompt, run nix with stdin from
-  `</dev/null`.
+- The flake's `nixConfig` advertises `codegod100.cachix.org` as an
+  `extra-substituter`. On multi-user Determinate Nix (`trusted-users = root`
+  only), that is **not** enough: non-trusted users get
+  `ignoring untrusted substituter` and rebuild toolchain deps from source.
+  Bootstrap writes the cache into `/etc/nix/nix.custom.conf` as
+  `extra-substituters`, `extra-trusted-substituters`, and
+  `extra-trusted-public-keys`, then reloads `nix-daemon`. If those warnings
+  appear, re-run `bash scripts/codespace-bootstrap.sh` (needs passwordless
+  sudo). Prefer `nix run --accept-flake-config` (or plain `nix run` once the
+  daemon trusts the cache); do not put the signing key in user `nix.conf`.
 
 ### Sibling path dependencies (required for working-tree builds)
 `android/Cargo.toml` uses path deps `../../vidya` and `../../freeq/freeq-sdk`.

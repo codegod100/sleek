@@ -100,6 +100,13 @@ Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm**
 
 Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
 
+On multi-user Determinate Nix, pull only works when the cache is a **trusted
+substituter** (not merely listed in the flake `nixConfig`). Bootstrap writes
+`extra-substituters`, `extra-trusted-substituters`, and
+`extra-trusted-public-keys` to `/etc/nix/nix.custom.conf` (Determinate’s durable
+include) and reloads `nix-daemon`. Without that, `nix run` / `nix build` print
+`ignoring untrusted substituter` and compile toolchain deps from source.
+
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
 On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` on nixbuild.net and pushes store paths to the same cache. CI pulls `NIXBUILD_TOKEN` and `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
