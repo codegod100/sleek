@@ -509,6 +509,50 @@ if ! command -v direnv >/dev/null 2>&1; then
   fi
 fi
 
+# ── starship prompt ──────────────────────────────────────────────────
+if ! command -v starship >/dev/null 2>&1; then
+  if nix_store_ok; then
+    log "installing starship via nix profile…"
+    if nix profile add nixpkgs#starship 2>/dev/null \
+      || nix profile install nixpkgs#starship 2>/dev/null \
+      || nix-env -iA nixpkgs.starship 2>/dev/null; then
+      load_nix_env
+      log "starship installed"
+    else
+      log "could not install starship (optional)"
+    fi
+  else
+    log "skipping starship install (nix store not ready)"
+  fi
+fi
+
+install_bashrc_starship() {
+  local marker="# sleek-starship"
+  touch "$HOME/.bashrc"
+  if grep -qF "$marker" "$HOME/.bashrc" 2>/dev/null; then
+    return 0
+  fi
+  # Drop the codespace default PS1 so it does not fight starship.
+  if grep -qE '^export PS1=' "$HOME/.bashrc" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    grep -vE '^export PS1=' "$HOME/.bashrc" >"$tmp" || true
+    mv "$tmp" "$HOME/.bashrc"
+  fi
+  {
+    echo ""
+    echo "# nix profile (starship, direnv, …)"
+    echo 'export PATH="${HOME}/.nix-profile/bin:/nix/var/nix/profiles/default/bin:${PATH}"'
+    echo ""
+    echo "$marker"
+    echo 'if command -v starship >/dev/null 2>&1; then'
+    echo '  eval "$(starship init bash)"'
+    echo 'fi'
+  } >>"$HOME/.bashrc"
+  log "wrote starship init to ~/.bashrc"
+}
+install_bashrc_starship
+
 # ── bashrc hook (codespace ssh / interactive login) ──────────────────
 HOOK_LINE="[ -f \"$ROOT/scripts/codespace-env.sh\" ] && . \"$ROOT/scripts/codespace-env.sh\""
 HOOK_MARKER="# sleek-nix-shim"

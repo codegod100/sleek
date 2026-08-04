@@ -966,6 +966,7 @@ PY
                 pkgs.openssl
                 # Faster linking for in-tree .cargo/config.toml (-fuse-ld=mold).
                 pkgs.mold
+                pkgs.starship
               ]
               ++ buildLibs
               ++ cliTools;
@@ -1010,6 +1011,11 @@ PY
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
                   echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix build .#android | nix build .#flatpak"
+                fi
+                # Starship prompt for interactive shells (bashrc also inits; this
+                # covers `nix develop` / ./scripts/enter before bashrc reloads).
+                if [[ $- == *i* ]] && command -v starship >/dev/null 2>&1; then
+                  eval "$(starship init bash)"
                 fi
               '';
             }
