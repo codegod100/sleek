@@ -873,6 +873,8 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
+    let body_line = message_body_line(&body_text, embed.as_ref());
+    let embed_only = matches!(body_line, MessageBodyLine::Skip);
     let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
@@ -926,14 +928,22 @@ pub fn message_bubble(
     if swipe_offset > 0.0 {
         ui.add_space(swipe_offset);
     }
+    let inner_w = ui.available_width().max(1.0);
+    let bubble_w = if embed_only {
+        (EMBED_MAX_W + (sp.md as f32) * 2.0 + 16.0).min(inner_w)
+    } else {
+        inner_w
+    };
     let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            let inner_w = ui.available_width().max(1.0);
-            ui.set_max_width(inner_w);
+            ui.set_max_width(bubble_w);
+            if embed_only {
+                ui.set_width(bubble_w);
+            }
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&msg.from)
@@ -976,7 +986,6 @@ pub fn message_bubble(
             // Sense on the body — URL tap opens browser; double-click heart.
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
-            let body_line = message_body_line(&body_text, embed.as_ref());
             let mut body_resp = None;
             let mut galley = None;
             let mut galley_origin = egui::Pos2::ZERO;
@@ -1570,21 +1579,14 @@ fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
         return MessageBodyLine::Cleared;
     }
     if let Some(embed) = embed {
-        match embed {
-            Embed::Image { url } | Embed::Video { url } => {
-                let caption = preview::caption_without_embed_url(trimmed, url);
-                if caption.is_empty() {
-                    MessageBodyLine::Text(trimmed.to_string())
-                } else {
-                    MessageBodyLine::Text(caption)
+        if preview::is_embed_only_message(trimmed, Some(embed)) {
+            MessageBodyLine::Skip
+        } else {
+            match embed {
+                Embed::Image { url } | Embed::Video { url } => {
+                    MessageBodyLine::Text(preview::caption_without_embed_url(trimmed, url))
                 }
-            }
-            Embed::Link { url } => {
-                if trimmed.eq_ignore_ascii_case(url.trim()) {
-                    MessageBodyLine::Skip
-                } else {
-                    MessageBodyLine::Text(trimmed.to_string())
-                }
+                Embed::Link { .. } => MessageBodyLine::Text(trimmed.to_string()),
             }
         }
     } else {
@@ -1757,6 +1759,7 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
         }
         Some((tex, width, height)) => {
             let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
+            ui.set_width(max_w);
             let scale = (max_w / width.max(1) as f32)
                 .min(EMBED_MAX_H / height.max(1) as f32)
                 .min(1.0);
@@ -1794,6 +1797,7 @@ fn inline_video_preview(
 
     let sp = &th.spacing;
     let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+    ui.set_width(max_w);
 
     match media.videos.get(url) {
         Some(crate::state::VideoState::Loading) | None => {
@@ -1802,6 +1806,7 @@ fn inline_video_preview(
                 .corner_radius(sp.radius_sm)
                 .inner_margin(egui::Margin::symmetric(12, 16))
                 .show(ui, |ui| {
+                    ui.set_width(max_w);
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.add_space(sp.sm);

@@ -192,6 +192,40 @@ fn has_video_ext(name: &str) -> bool {
         || base.ends_with(".webm")
 }
 
+/// True when the message body is only the embed URL (no separate caption).
+///
+/// IRCv3 `media-url` may differ from the signed URL in the body; match on
+/// filename when stripping fails.
+pub fn is_embed_only_message(text: &str, embed: Option<&Embed>) -> bool {
+    let Some(embed) = embed else {
+        return false;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    match embed {
+        Embed::Link { url } => trimmed.eq_ignore_ascii_case(url.trim()),
+        Embed::Image { url } | Embed::Video { url } => {
+            if caption_without_embed_url(trimmed, url).is_empty() {
+                return true;
+            }
+            let urls = extract_urls(trimmed);
+            urls.len() == 1 && media_urls_equivalent(&urls[0], url)
+        }
+    }
+}
+
+/// Same media asset when paths differ (e.g. tag URL vs signed body URL).
+pub fn media_urls_equivalent(a: &str, b: &str) -> bool {
+    if a.trim().eq_ignore_ascii_case(b.trim()) {
+        return true;
+    }
+    display_filename(a) == display_filename(b)
+        && (is_image_url(a) || is_video_url(a))
+        && (is_image_url(b) || is_video_url(b))
+}
+
 /// Message prose with an inline image/video URL removed.
 ///
 /// freeq sends `{url} {caption}` or `{alt} {url}`; the embed card carries the
@@ -340,6 +374,17 @@ mod tests {
             caption_without_embed_url(&format!("hello {url}"), url),
             "hello"
         );
+    }
+
+    #[test]
+    fn is_embed_only_message_matches_signed_media_paths() {
+        let body = "https://irc.freeq.at/api/v1/media/id/sig/sleek-test.mp4";
+        let tag = "https://irc.freeq.at/api/v1/media/other/sig/sleek-test.mp4";
+        assert!(is_embed_only_message(
+            body,
+            Some(&Embed::Video { url: tag.into() })
+        ));
+        assert!(media_urls_equivalent(body, tag));
     }
 
     #[test]
