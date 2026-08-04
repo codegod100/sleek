@@ -1188,6 +1188,9 @@ pub struct AppState {
     pub reconnect_attempts: u32,
     /// When set, fire auto-reconnect once `Instant::now() >=` this deadline.
     pub reconnect_at: Option<Instant>,
+    /// MoQ media-plane reconnect while `local_call` is still active.
+    pub media_reconnect_attempts: u32,
+    pub media_reconnect_at: Option<Instant>,
 }
 
 /// egui texture map for AV tiles (`TextureHandle` is not `Debug`).
@@ -1306,6 +1309,8 @@ impl AppState {
             intentional_disconnect: false,
             reconnect_attempts: 0,
             reconnect_at: None,
+            media_reconnect_attempts: 0,
+            media_reconnect_at: None,
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -2112,12 +2117,25 @@ impl AppState {
         self.awaiting_oauth = false;
         self.local_call = None;
         self.clear_av_media();
+        self.cancel_media_reconnect();
         self.status_line = format!("Disconnected: {reason}");
     }
 
     pub fn cancel_auto_reconnect(&mut self) {
         self.reconnect_at = None;
         self.reconnect_attempts = 0;
+    }
+
+    /// Schedule a MoQ media re-dial while still in an IRC call.
+    pub fn schedule_media_reconnect(&mut self) {
+        self.media_reconnect_attempts = self.media_reconnect_attempts.saturating_add(1);
+        let delay = crate::reconnect::delay_secs(self.media_reconnect_attempts);
+        self.media_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+    }
+
+    pub fn cancel_media_reconnect(&mut self) {
+        self.media_reconnect_at = None;
+        self.media_reconnect_attempts = 0;
     }
 
     /// Schedule the next auto-reconnect attempt (exponential backoff).

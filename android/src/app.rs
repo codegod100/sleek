@@ -241,6 +241,35 @@ impl SleekApp {
         apply(ctx, &self.theme());
     }
 
+    /// Fire a scheduled MoQ re-dial while still in an IRC call.
+    fn poll_media_reconnect(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.state.media_reconnect_at else {
+            return;
+        };
+        let Some(lc) = self.state.local_call.clone() else {
+            self.state.cancel_media_reconnect();
+            return;
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if std::time::Instant::now() < at {
+            return;
+        }
+        self.state.media_reconnect_at = None;
+        if lc.session_id.is_empty() {
+            return;
+        }
+        log::info!(
+            "av-media: re-dialing MoQ after transport drop (session {})",
+            lc.session_id
+        );
+        self.try_start_av_media(
+            &lc.channel,
+            &lc.session_id,
+            &lc.instance,
+            lc.token.as_deref(),
+        );
+    }
+
     /// Fire a scheduled auto-reconnect once its backoff deadline elapses.
     fn poll_auto_reconnect(&mut self, ctx: &egui::Context) {
         let Some(at) = self.state.reconnect_at else {
@@ -303,11 +332,14 @@ impl SleekApp {
             .local_call
             .as_ref()
             .is_some_and(|lc| matches!(lc.media, MediaStatus::Live | MediaStatus::Connecting));
+        let media_redial_pending = self.state.media_reconnect_at.is_some()
+            && self.state.local_call.is_some();
         if self.state.connection == ConnectionState::Connecting
             || self.state.connection.is_live()
             || self.state.awaiting_oauth
             || self.state.media.has_loading()
             || in_live_call
+            || media_redial_pending
         {
             // ~30 fps while a call is live so remote tiles update smoothly.
             let ms = if in_live_call { 33 } else { 50 };
@@ -530,6 +562,11 @@ impl SleekApp {
                 has_mic,
             } => {
                 let mut sync_camera: Option<bool> = None;
+                let cancel_media_redial = matches!(status, MediaStatus::Live);
+                let schedule_media_redial = matches!(
+                    status,
+                    MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
+                ) && self.state.local_call.is_some();
                 if let Some(lc) = self.state.local_call.as_mut() {
                     lc.media = status.clone();
                     if matches!(status, MediaStatus::Live) {
@@ -571,7 +608,13 @@ impl SleekApp {
                 if let Some(level) = mic_level {
                     self.state.av_mic_level = Some(level);
                 }
-                if matches!(
+                if cancel_media_redial {
+                    self.state.cancel_media_reconnect();
+                }
+                if schedule_media_redial {
+                    self.state.clear_av_media();
+                    self.state.schedule_media_reconnect();
+                } else if matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
                 ) {
@@ -1222,6 +1265,7 @@ impl SleekApp {
                     self.net.send(NetCmd::AvMediaStop);
                     self.state.local_call = None;
                     self.state.clear_av_media();
+                    self.state.cancel_media_reconnect();
                 }
             }
         }
@@ -1416,6 +1460,7 @@ impl SleekApp {
         }
         self.state.persist_av_prefs();
         self.state.clear_av_media();
+        self.state.cancel_media_reconnect();
         self.net.send(NetCmd::AvLeave {
             channel: lc.channel,
             session_id: lc.session_id,
@@ -2183,6 +2228,7 @@ impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
         self.poll_auto_reconnect(ctx);
+        self.poll_media_reconnect(ctx);
         self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);

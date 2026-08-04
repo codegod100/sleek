@@ -1245,16 +1245,11 @@ async fn tap_remote(
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
                         consecutive_errs = consecutive_errs.saturating_add(1);
-                        // Permanent peer/session death — don't spam every 500ms.
-                        if msg.contains("dropped")
-                            || msg.contains("closed")
-                            || msg.contains("transport error")
-                        {
-                            log::warn!("av-media: audio sub {ps}: {e} (giving up)");
-                            break;
-                        }
+                        // Keep retrying while the remote broadcast is open — a
+                        // transient audio catalog/transport blip must not kill
+                        // the independent video pipeline (tap_remote waits on
+                        // `remote.closed()`, not this task exiting).
                         if consecutive_errs <= 3 || consecutive_errs % 10 == 0 {
                             log::warn!(
                                 "av-media: audio sub {ps}: {e} (retry {consecutive_errs})"
@@ -1287,14 +1282,6 @@ async fn tap_remote(
                         log::info!("av-media: video track ended for {path}");
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("dropped")
-                            || msg.contains("closed")
-                            || msg.contains("transport error")
-                        {
-                            log::debug!("av-media: video wait {path}: {e} (giving up)");
-                            break;
-                        }
                         log::debug!("av-media: video wait {path}: {e}");
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
@@ -1303,24 +1290,14 @@ async fn tap_remote(
         })
     };
 
-    // Keep both pipelines alive until the remote broadcast closes.
-    // Abort siblings — dropping JoinHandle alone detaches tasks and leaves
-    // audio_ready retry loops logging "dropped" forever after transport death.
-    tokio::select! {
-        err = remote.closed() => {
-            log::info!("av-media: remote closed {path}: {err}");
-            audio_task.abort();
-            video_task.abort();
-        }
-        _ = &mut audio_task => {
-            log::debug!("av-media: audio task exited for {path}");
-            video_task.abort();
-        }
-        _ = &mut video_task => {
-            log::debug!("av-media: video task exited for {path}");
-            audio_task.abort();
-        }
-    }
+    // Audio and video are independent: keep both taps alive until the remote
+    // broadcast catalog entry closes. Do not abort one when the other retries
+    // or hits a transient transport error — that dropped video while audio
+    // (and IRC call state) continued.
+    let close_err = remote.closed().await;
+    log::info!("av-media: remote closed {path}: {close_err}");
+    audio_task.abort();
+    video_task.abort();
     video_store.remove(&key);
 }
 
