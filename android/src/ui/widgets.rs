@@ -602,12 +602,215 @@ fn message_inline_action_chip(
     action
 }
 
-/// Track a press that started over a bubble so long-press works on the whole
-/// bubble (not only the selectable body label) without stealing click sense.
+/// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
+/// whole popup sits above the contact point (not under the fingertip).
 #[derive(Clone, Copy)]
-struct BubblePress {
+struct MenuAnchor {
+    pos: Pos2,
+    above_finger: bool,
+}
+
+/// Track a press that started over a widget so long-press works without
+/// stealing click sense.
+#[derive(Clone, Copy)]
+struct PressHold {
     t0: f64,
     pos: Pos2,
+    long_fired: bool,
+}
+
+/// Edge-trigger long-press over `rect` (APK / touch). Returns
+/// `(long_press_this_frame, suppress_short_click)` — the latter stays true from
+/// the long-press frame until the primary button is released.
+fn touch_long_press(ui: &mut egui::Ui, press_id: Id, rect: Rect) -> (bool, bool) {
+    let clipped = rect.intersect(ui.clip_rect());
+    let over = clipped.is_positive() && ui.rect_contains_pointer(clipped);
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let time = ui.input(|i| i.time);
+    let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
+    let max_slide = ui
+        .ctx()
+        .options(|o| o.input_options.max_click_dist as f32)
+        .max(8.0);
+    let pos = ui.ctx().pointer_interact_pos();
+
+    if primary_pressed && over {
+        if let Some(pos) = pos {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(press_id, PressHold {
+                    t0: time,
+                    pos,
+                    long_fired: false,
+                }));
+        }
+    }
+
+    let mut long_this_frame = false;
+    let mut suppress_click = false;
+    if primary_down {
+        if let Some(mut start) = ui.ctx().data(|d| d.get_temp::<PressHold>(press_id)) {
+            suppress_click = start.long_fired;
+            let moved = pos
+                .map(|p| (p - start.pos).length() > max_slide)
+                .unwrap_or(false);
+            if moved {
+                ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+                suppress_click = false;
+            } else if !start.long_fired && time - start.t0 >= max_dur {
+                long_this_frame = true;
+                start.long_fired = true;
+                suppress_click = true;
+                ui.ctx().data_mut(|d| d.insert_temp(press_id, start));
+            }
+        }
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+    }
+    (long_this_frame, suppress_click)
+}
+
+/// Long-press (APK) popup listing nicknames who used one reaction emoji.
+fn reaction_reactors_popup(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    popup_id: Id,
+    chip_rect: Rect,
+    emoji: &str,
+    nicks: &[String],
+    opening: bool,
+) {
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    if opening {
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui {
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else {
+            MenuAnchor {
+                pos: Pos2::new(chip_rect.center().x, chip_rect.top() - 8.0),
+                above_finger: true,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(popup_id));
+        ui.ctx().data_mut(|d| d.insert_temp(popup_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(popup_id)) {
+        return;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(popup_id))
+        .unwrap_or(MenuAnchor {
+            pos: chip_rect.left_top(),
+            above_finger: touch_ui,
+        });
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let shown_emoji = display_emoji(emoji);
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+
+    let popup = egui::Area::new(popup_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .default_width(200.0)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(p.card_bg)
+                .stroke(Stroke::new(1.0_f32, p.border_soft))
+                .corner_radius(sp.radius_md)
+                .inner_margin(egui::Margin::same(8))
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let icon_size = (th.type_scale.caption * 1.15).max(14.0);
+                        let (ir, _) =
+                            ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
+                        paint_emoji_in(ui, ir, emoji, p.text);
+                        ui.label(
+                            RichText::new(format!("{shown_emoji} · {}", nicks.len()))
+                                .size(th.type_scale.caption)
+                                .color(p.text_secondary)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for nick in nicks {
+                                ui.label(
+                                    RichText::new(nick)
+                                        .size(th.type_scale.body)
+                                        .color(p.text),
+                                );
+                            }
+                        });
+                });
+        });
+
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    popup_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    if escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| d.remove::<MenuAnchor>(popup_id));
+    }
 }
 
 /// Right-click / long-press menu for a message bubble: React, Edit, Delete icons.
@@ -632,14 +835,6 @@ fn message_context_menu(
         return None;
     }
 
-    /// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
-    /// whole popup sits above the contact point (not under the fingertip).
-    #[derive(Clone, Copy)]
-    struct MenuAnchor {
-        pos: Pos2,
-        above_finger: bool,
-    }
-
     let press_id = menu_id.with("press");
     let clipped = bubble_rect.intersect(ui.clip_rect());
     let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
@@ -647,43 +842,7 @@ fn message_context_menu(
     let touch_ui =
         cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
 
-    // Whole-bubble long-press (APK): track primary press start over the bubble.
-    // Edge-triggers once duration exceeds egui's max_click_duration (~0.8s) and
-    // the finger hasn't moved enough to look like a scroll.
-    let long_press_anywhere = {
-        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
-        let primary_down = ui.input(|i| i.pointer.primary_down());
-        let time = ui.input(|i| i.time);
-        let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
-        // Match egui's "still a click / long-press" slide budget (points).
-        let max_slide = ui.ctx().options(|o| o.input_options.max_click_dist as f32).max(8.0);
-        let pos = ui.ctx().pointer_interact_pos();
-
-        if primary_pressed && over_bubble {
-            if let Some(pos) = pos {
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(press_id, BubblePress { t0: time, pos }));
-            }
-        }
-
-        let mut fired = false;
-        if primary_down {
-            if let Some(start) = ui.ctx().data(|d| d.get_temp::<BubblePress>(press_id)) {
-                let moved = pos
-                    .map(|p| (p - start.pos).length() > max_slide)
-                    .unwrap_or(false);
-                if moved {
-                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-                } else if time - start.t0 >= max_dur {
-                    fired = true;
-                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-                }
-            }
-        } else {
-            ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-        }
-        fired
-    };
+    let (long_press_anywhere, _) = touch_long_press(ui, press_id, bubble_rect);
 
     let long_press = body_long_touched || long_press_anywhere;
     let opening = over_bubble && (secondary || long_press);
@@ -814,7 +973,7 @@ fn message_context_menu(
         ui.memory_mut(|m| m.close_popup());
         ui.ctx().data_mut(|d| {
             d.remove::<MenuAnchor>(menu_id);
-            d.remove::<BubblePress>(press_id);
+            d.remove::<PressHold>(press_id);
         });
     }
 
@@ -1170,10 +1329,10 @@ pub fn message_bubble(
                     Stroke::new(1.0_f32, p.border_soft)
                 };
                 let shown_emoji = display_emoji(emoji);
+                let mut names: Vec<_> = nicks.iter().cloned().collect();
+                names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                 let tip = {
-                    let mut names: Vec<_> = nicks.iter().cloned().collect();
-                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-                    let shown: Vec<_> = names.into_iter().take(12).collect();
+                    let shown: Vec<_> = names.iter().take(12).cloned().collect();
                     let extra = count.saturating_sub(shown.len());
                     let mut s = format!("reacted with {shown_emoji}: {}", shown.join(", "));
                     if extra > 0 {
@@ -1181,6 +1340,7 @@ pub fn message_bubble(
                     }
                     s
                 };
+                let chip_id = ui.id().with("react_chip").with(&msg.id).with(emoji.as_str());
                 let chip = egui::Frame::new()
                     .fill(fill)
                     .stroke(stroke)
@@ -1201,15 +1361,26 @@ pub fn message_bubble(
                             }
                         });
                     });
+                let (long_press, suppress_click) = if touch_ui {
+                    touch_long_press(ui, chip_id.with("press"), chip.response.rect)
+                } else {
+                    (false, false)
+                };
+                let popup_id = chip_id.with("reactors");
+                reaction_reactors_popup(
+                    ui,
+                    th,
+                    popup_id,
+                    chip.response.rect,
+                    emoji,
+                    &names,
+                    long_press,
+                );
                 let resp = ui
-                    .interact(
-                        chip.response.rect,
-                        ui.id().with("react_chip").with(&msg.id).with(emoji.as_str()),
-                        Sense::click(),
-                    )
+                    .interact(chip.response.rect, chip_id, Sense::click())
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text(tip);
-                if can_react && resp.clicked() {
+                if can_react && resp.clicked() && !suppress_click && !long_press {
                     action = MessageBubbleAction::ToggleReaction {
                         msgid: msg.id.clone(),
                         emoji: emoji.clone(),
