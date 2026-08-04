@@ -224,6 +224,11 @@ impl ChatMessage {
         } else {
             self.text.clone()
         };
+        let body = if body.trim().is_empty() {
+            "[message cleared]".into()
+        } else {
+            body
+        };
         if self.from.is_empty() {
             body
         } else {
