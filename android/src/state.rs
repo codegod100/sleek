@@ -1191,6 +1191,9 @@ pub struct AppState {
     /// MoQ media-plane reconnect while `local_call` is still active.
     pub media_reconnect_attempts: u32,
     pub media_reconnect_at: Option<Instant>,
+    /// When the media plane last became `Live`. Used so brief Live→drop
+    /// blips do not reset reconnect backoff (that thrashed MoQ every 2s).
+    pub media_live_since: Option<Instant>,
 }
 
 /// egui texture + last-uploaded frame gen for AV tiles.
@@ -1308,6 +1311,7 @@ impl AppState {
             reconnect_at: None,
             media_reconnect_attempts: 0,
             media_reconnect_at: None,
+            media_live_since: None,
         };
         if let Some(saved) = crate::auth::SavedSession::load() {
             if saved.has_session() {
@@ -2125,14 +2129,57 @@ impl AppState {
 
     /// Schedule a MoQ media re-dial while still in an IRC call.
     pub fn schedule_media_reconnect(&mut self) {
+        // A long healthy Live means the next drop is a fresh failure.
+        const STABLE: Duration = Duration::from_secs(8);
+        if self
+            .media_live_since
+            .is_some_and(|t| t.elapsed() >= STABLE)
+        {
+            self.media_reconnect_attempts = 0;
+        }
+        self.media_live_since = None;
         self.media_reconnect_attempts = self.media_reconnect_attempts.saturating_add(1);
         let delay = crate::reconnect::delay_secs(self.media_reconnect_attempts);
         self.media_reconnect_at = Some(Instant::now() + Duration::from_secs(delay));
+        log::info!(
+            "av-media: scheduled MoQ re-dial in {delay}s (attempt {})",
+            self.media_reconnect_attempts
+        );
     }
 
+    /// Stop a pending re-dial timer and reset backoff (call leave / stable end).
     pub fn cancel_media_reconnect(&mut self) {
         self.media_reconnect_at = None;
         self.media_reconnect_attempts = 0;
+        self.media_live_since = None;
+    }
+
+    /// Live again — cancel any pending timer; keep attempt count so a 1s Live
+    /// blip cannot reset backoff to 2s (that thrashed MoQ forever).
+    pub fn on_media_live(&mut self) {
+        self.media_reconnect_at = None;
+        if self.media_live_since.is_none() {
+            self.media_live_since = Some(Instant::now());
+        }
+    }
+
+    /// Clear backoff after media has been Live long enough (called from UI tick).
+    pub fn poll_media_live_stability(&mut self) {
+        const STABLE: Duration = Duration::from_secs(8);
+        if self.media_reconnect_attempts == 0 {
+            return;
+        }
+        if self
+            .media_live_since
+            .is_some_and(|t| t.elapsed() >= STABLE)
+        {
+            self.media_reconnect_attempts = 0;
+        }
+    }
+
+    /// True when we are mid MoQ recovery (suppress "connected" toast spam).
+    pub fn media_recovering(&self) -> bool {
+        self.media_reconnect_attempts > 0 || self.media_reconnect_at.is_some()
     }
 
     /// Schedule the next auto-reconnect attempt (exponential backoff).

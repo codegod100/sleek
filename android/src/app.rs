@@ -570,7 +570,7 @@ impl SleekApp {
                 let intentional_redial = self.state.local_call.as_ref().is_some_and(|lc| {
                     matches!(lc.media, MediaStatus::Connecting)
                 });
-                let cancel_media_redial = matches!(status, MediaStatus::Live);
+                let media_went_live = matches!(status, MediaStatus::Live);
                 let schedule_media_redial = matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
@@ -638,8 +638,11 @@ impl SleekApp {
                 } else if schedule_media_redial || intentional_redial {
                     self.state.av_mic_level = None;
                 }
-                if cancel_media_redial {
-                    self.state.cancel_media_reconnect();
+                let was_recovering = self.state.media_recovering();
+                if media_went_live {
+                    // Cancel pending timer only — do not zero attempts on a
+                    // 1-second Live blip or MoQ thrashes every 2s forever.
+                    self.state.on_media_live();
                 }
                 if schedule_media_redial {
                     // Keep last video frames visible while MoQ reconnects.
@@ -656,38 +659,41 @@ impl SleekApp {
                 }
                 match &status {
                     MediaStatus::Live => {
-                        let awaiting = self
-                            .state
-                            .local_call
-                            .as_ref()
-                            .is_some_and(|lc| lc.camera_awaiting_permission);
-                        let cam = if awaiting {
-                            " · awaiting camera permission"
-                        } else if has_camera {
-                            if self
+                        // Skip toast spam while recovering from transport drops.
+                        if !was_recovering {
+                            let awaiting = self
                                 .state
                                 .local_call
                                 .as_ref()
-                                .is_some_and(|lc| lc.camera)
-                            {
-                                " + camera on"
+                                .is_some_and(|lc| lc.camera_awaiting_permission);
+                            let cam = if awaiting {
+                                " · awaiting camera permission"
+                            } else if has_camera {
+                                if self
+                                    .state
+                                    .local_call
+                                    .as_ref()
+                                    .is_some_and(|lc| lc.camera)
+                                {
+                                    " + camera on"
+                                } else {
+                                    " + camera (off)"
+                                }
+                            } else if self.state.av_pref_camera {
+                                // User wanted video but open failed (busy device,
+                                // dead OBS node, etc.) — make it visible in the toast.
+                                " · camera unavailable"
                             } else {
-                                " + camera (off)"
-                            }
-                        } else if self.state.av_pref_camera {
-                            // User wanted video but open failed (busy device,
-                            // dead OBS node, etc.) — make it visible in the toast.
-                            " · camera unavailable"
-                        } else {
-                            ""
-                        };
-                        let mic = if has_mic {
-                            ""
-                        } else {
-                            " · no mic (listen-only)"
-                        };
-                        self.state
-                            .show_toast(format!("Call media connected{cam}{mic}"));
+                                ""
+                            };
+                            let mic = if has_mic {
+                                ""
+                            } else {
+                                " · no mic (listen-only)"
+                            };
+                            self.state
+                                .show_toast(format!("Call media connected{cam}{mic}"));
+                        }
                     }
                     MediaStatus::Failed(e) => {
                         self.state.show_toast(format!("Call media failed: {e}"));
@@ -2259,6 +2265,7 @@ impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_fit_viewport(ctx);
         self.poll_auto_reconnect(ctx);
+        self.state.poll_media_live_stability();
         self.poll_media_reconnect(ctx);
         self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);

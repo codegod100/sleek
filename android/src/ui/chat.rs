@@ -1532,12 +1532,23 @@ fn av_call_chrome_meta(
         &state.route,
         crate::state::Route::Chat(ch) if ch.eq_ignore_ascii_case(&lc.channel)
     );
-    let status_line = match &lc.media {
-        crate::av::MediaStatus::Live => format!("{n} in call"),
-        crate::av::MediaStatus::Idle => format!("{n} in call"),
-        crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
-        crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
-        crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+    let status_line = if state.media_reconnect_at.is_some() {
+        let delay = state
+            .media_reconnect_at
+            .map(|at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+            })
+            .unwrap_or(0);
+        format!("Reconnecting media in {delay}s… · {n}")
+    } else {
+        match &lc.media {
+            crate::av::MediaStatus::Live => format!("{n} in call"),
+            crate::av::MediaStatus::Idle => format!("{n} in call"),
+            crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
+            crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
+            crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+        }
     };
     (headline, status_line, on_call_channel)
 }
