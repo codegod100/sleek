@@ -139,6 +139,29 @@ impl VideoFrameStore {
         }
     }
 
+    /// Copy frames from `other` for keys we do not already hold.
+    ///
+    /// Used when MoQ re-dials: the new session store starts empty, but the UI
+    /// still has last-good tiles. Seeding then attaching the new store keeps
+    /// stale pixels visible until live frames overwrite them — and ensures new
+    /// decoder writes land in the store the UI is painting (no orphan Arc).
+    pub fn seed_missing_from(&self, other: &Self) {
+        // Same Arc — nothing to copy.
+        if Arc::ptr_eq(&self.frames, &other.frames) {
+            return;
+        }
+        for (key, frame) in other.snapshot() {
+            let missing = self
+                .frames
+                .lock()
+                .map(|g| !g.contains_key(&key))
+                .unwrap_or(true);
+            if missing {
+                self.set(key, frame.width, frame.height, frame.rgba);
+            }
+        }
+    }
+
     /// Snapshot of all latest frames (for UI paint).
     pub fn snapshot(&self) -> Vec<(String, RgbaVideoFrame)> {
         self.frames
@@ -149,6 +172,10 @@ impl VideoFrameStore {
 
     pub fn is_empty(&self) -> bool {
         self.frames.lock().map(|g| g.is_empty()).unwrap_or(true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.lock().map(|g| g.len()).unwrap_or(0)
     }
 }
 
@@ -573,6 +600,28 @@ mod tests {
         }
         // RGB preserved from input (first pixel was 0,80,120,0 → A forced).
         assert_eq!(&frame.rgba[0..4], &[0, 80, 120, 255]);
+    }
+
+    #[test]
+    fn video_frame_store_seed_missing_from_copies_only_absent_keys() {
+        let old = VideoFrameStore::new();
+        let rgba: Arc<[u8]> = Arc::from([10u8, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 1, 2, 3, 255]);
+        old.set("eve", 2, 2, rgba.clone());
+        old.set(LOCAL_PREVIEW_KEY, 2, 2, rgba);
+
+        let new = VideoFrameStore::new();
+        // Live key already present — must not be overwritten by seed.
+        let live: Arc<[u8]> = Arc::from([
+            9u8, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255,
+        ]);
+        new.set("eve", 2, 2, live.clone());
+
+        new.seed_missing_from(&old);
+        let snap = new.snapshot();
+        assert_eq!(snap.len(), 2);
+        let eve = snap.iter().find(|(k, _)| k == "eve").unwrap();
+        assert_eq!(eve.1.rgba.as_ref(), live.as_ref());
+        assert!(snap.iter().any(|(k, _)| k == LOCAL_PREVIEW_KEY));
     }
 
     #[test]

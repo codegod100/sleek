@@ -623,21 +623,40 @@ impl SleekApp {
                     }
                 }
                 if let Some(store) = video {
-                    // Keep painting the previous store until the new session has
-                    // at least one frame — empty Connecting/Live swaps flash black.
-                    let keep_stale_frames = self
-                        .state
-                        .av_video
-                        .as_ref()
-                        .is_some_and(|old| !old.is_empty())
-                        && store.is_empty()
-                        && matches!(
-                            status,
-                            MediaStatus::Connecting | MediaStatus::Live
-                        );
-                    if !keep_stale_frames {
-                        self.state.av_video = Some(store);
+                    // New MoQ sessions start with an empty store. Seed last-good
+                    // tiles into it, then always attach — so the UI keeps pixels
+                    // during Connecting/Live and decoder writes hit the same Arc.
+                    let old_len = self.state.av_video.as_ref().map(|s| s.len()).unwrap_or(0);
+                    let seeded = if store.is_empty() {
+                        if let Some(old) = self.state.av_video.as_ref().filter(|s| !s.is_empty()) {
+                            store.seed_missing_from(old);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    let new_len = store.len();
+                    // #region agent log
+                    {
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log") {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{}", serde_json::json!({"hypothesisId":"B","location":"app.rs:AvMediaStatus","message":"video store attach","data":{"status":format!("{status:?}"),"old_len":old_len,"new_len":new_len,"seeded":seeded,"intentional_redial":intentional_redial,"schedule_redial":schedule_media_redial,"runId":"post-fix"},"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0)}));
+                        }
                     }
+                    // #endregion
+                    self.state.av_video = Some(store);
+                } else {
+                    // #region agent log
+                    {
+                        let old_len = self.state.av_video.as_ref().map(|s| s.len()).unwrap_or(0);
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log") {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{}", serde_json::json!({"hypothesisId":"C","location":"app.rs:AvMediaStatus","message":"status with video=None","data":{"status":format!("{status:?}"),"old_len":old_len,"intentional_redial":intentional_redial,"schedule_redial":schedule_media_redial,"runId":"post-fix"},"timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_millis()).unwrap_or(0)}));
+                        }
+                    }
+                    // #endregion
                 }
                 if let Some(level) = mic_level {
                     self.state.av_mic_level = Some(level);
