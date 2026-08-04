@@ -877,6 +877,7 @@ pub fn message_bubble(
         Some(Embed::Video { url }) => Some(url.clone()),
         _ => None,
     };
+    let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
@@ -979,18 +980,18 @@ pub fn message_bubble(
             // Sense on the body — URL tap opens browser; double-click heart.
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
-            let body_display = message_body_display(&body_text, embed.as_ref());
+            let body_line = message_body_line(&body_text, embed.as_ref());
             let mut body_resp = None;
             let mut galley = None;
             let mut galley_origin = egui::Pos2::ZERO;
             let mut url_spans = Vec::new();
-            if let MessageBodyDisplay::Omit = body_display {
-                // Media-only bubble — embed below carries the content.
+            if let MessageBodyLine::Skip = body_line {
+                // URL-only link — OG card below carries the content.
             } else {
-                let (visible, cleared) = match body_display {
-                    MessageBodyDisplay::Text(t) => (t, false),
-                    MessageBodyDisplay::Cleared => ("[message cleared]", true),
-                    MessageBodyDisplay::Omit => unreachable!(),
+                let (visible, cleared) = match &body_line {
+                    MessageBodyLine::Text(t) => (t.as_str(), false),
+                    MessageBodyLine::Cleared => ("[message cleared]", true),
+                    MessageBodyLine::Skip => unreachable!(),
                 };
                 url_spans = preview::extract_url_spans(visible);
                 let (resp, laid_out, origin) =
@@ -1005,10 +1006,10 @@ pub fn message_bubble(
                     url_at_galley_pos(
                         galley.as_ref()?,
                         galley_origin,
-                        match body_display {
-                            MessageBodyDisplay::Text(t) => t,
-                            MessageBodyDisplay::Cleared => "[message cleared]",
-                            MessageBodyDisplay::Omit => return None,
+                        match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => return None,
                         },
                         &url_spans,
                         pos,
@@ -1045,10 +1046,10 @@ pub fn message_bubble(
                     if let (Some(pos), Some(galley)) =
                         (body_resp.interact_pointer_pos(), galley.as_ref())
                     {
-                        let visible = match body_display {
-                            MessageBodyDisplay::Text(t) => t,
-                            MessageBodyDisplay::Cleared => "[message cleared]",
-                            MessageBodyDisplay::Omit => "",
+                        let visible = match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => "",
                         };
                         if let Some(url) =
                             url_at_galley_pos(galley, galley_origin, visible, &url_spans, pos)
@@ -1113,7 +1114,7 @@ pub fn message_bubble(
     // Video below the bubble — same layering rule as reaction chips.
     if let Some(url) = video_url {
         ui.add_space(sp.xs);
-        inline_video_preview(ui, th, media, &url, &msg.id);
+        inline_video_preview(ui, th, media, &url, &msg.id, media_caption.as_deref());
     }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
@@ -1539,31 +1540,57 @@ fn emoji_pick_cell(
 const EMBED_MAX_W: f32 = 280.0;
 const EMBED_MAX_H: f32 = 220.0;
 
-/// What to render in the message body row (below the nick / meta header).
-enum MessageBodyDisplay<'a> {
-    /// Normal text body.
-    Text(&'a str),
+/// Resolved message body line for bubble rendering.
+enum MessageBodyLine {
+    /// Visible text (caption-only for image/video when prose exists).
+    Text(String),
     /// Whitespace-only / cleared message.
     Cleared,
-    /// URL-only media/link message — embed card carries the content.
-    Omit,
+    /// URL-only link message — OG card carries the content.
+    Skip,
 }
 
-/// Choose visible bubble body text (strip bare embed URLs; flag cleared bodies).
-fn message_body_display<'a>(text: &'a str, embed: Option<&Embed>) -> MessageBodyDisplay<'a> {
-    let trimmed = text.trim();
-    if let Some(embed) = embed {
-        let url = match embed {
-            Embed::Image { url } | Embed::Video { url } | Embed::Link { url } => url.as_str(),
-        };
-        if trimmed.eq_ignore_ascii_case(url.trim()) {
-            return MessageBodyDisplay::Omit;
-        }
-    }
-    if trimmed.is_empty() {
-        MessageBodyDisplay::Cleared
+/// Caption text for image/video embeds (URL stripped). `None` when URL-only.
+fn media_embed_caption(text: &str, embed: Option<&Embed>) -> Option<String> {
+    let embed = embed?;
+    let url = match embed {
+        Embed::Image { url } | Embed::Video { url } => url.as_str(),
+        Embed::Link { .. } => return None,
+    };
+    let caption = preview::caption_without_embed_url(text, url);
+    if caption.is_empty() {
+        None
     } else {
-        MessageBodyDisplay::Text(text)
+        Some(caption)
+    }
+}
+
+/// Choose visible bubble body text (strip bare media URLs; flag cleared bodies).
+fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return MessageBodyLine::Cleared;
+    }
+    if let Some(embed) = embed {
+        match embed {
+            Embed::Image { url } | Embed::Video { url } => {
+                let caption = preview::caption_without_embed_url(trimmed, url);
+                if caption.is_empty() {
+                    MessageBodyLine::Text(trimmed.to_string())
+                } else {
+                    MessageBodyLine::Text(caption)
+                }
+            }
+            Embed::Link { url } => {
+                if trimmed.eq_ignore_ascii_case(url.trim()) {
+                    MessageBodyLine::Skip
+                } else {
+                    MessageBodyLine::Text(trimmed.to_string())
+                }
+            }
+        }
+    } else {
+        MessageBodyLine::Text(trimmed.to_string())
     }
 }
 
@@ -1761,6 +1788,7 @@ fn inline_video_preview(
     media: &mut MediaCache,
     url: &str,
     id_salt: &str,
+    caption: Option<&str>,
 ) {
     use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
 
@@ -1809,7 +1837,10 @@ fn inline_video_preview(
     let opts = VideoPlayerOpts {
         max_width: max_w,
         max_height: EMBED_MAX_H,
-        title: Some(preview::display_filename(url)),
+        title: caption
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| Some(preview::display_filename(url))),
         open_url_on_unsupported: Some(url.to_string()),
     };
     let (_resp, action) = video_player(ui, th, player, &opts);
