@@ -1298,7 +1298,8 @@ async fn tap_remote(
     log::info!("av-media: remote closed {path}: {close_err}");
     audio_task.abort();
     video_task.abort();
-    video_store.remove(&key);
+    // Frame removal is driven by announce `None` (participant left). Do not
+    // clear here — tap replacement would flash black until the next frame.
 }
 
 /// Set remote track volume from speaker-mute (`0.0` silence, `1.0` full).

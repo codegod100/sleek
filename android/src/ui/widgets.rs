@@ -873,10 +873,6 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
-    let video_url = match &embed {
-        Some(Embed::Video { url }) => Some(url.clone()),
-        _ => None,
-    };
     let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
@@ -1073,9 +1069,17 @@ pub fn message_bubble(
 
             if let Some(embed) = embed.as_ref() {
                 match embed {
-                    // Video mounts outside the bubble frame (below) so play
-                    // clicks are not stolen by later bubble interacts.
-                    Embed::Video { .. } => {}
+                    Embed::Video { url } => {
+                        ui.add_space(sp.sm);
+                        inline_video_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        );
+                    }
                     Embed::Image { url } => {
                         ui.add_space(sp.sm);
                         if inline_image_preview(ui, th, media, url) {
@@ -1110,12 +1114,6 @@ pub fn message_bubble(
 
     ui.ctx()
         .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp.rect));
-
-    // Video below the bubble — same layering rule as reaction chips.
-    if let Some(url) = video_url {
-        ui.add_space(sp.xs);
-        inline_video_preview(ui, th, media, &url, &msg.id, media_caption.as_deref());
-    }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
     if action_metrics.is_some() {

@@ -562,13 +562,22 @@ impl SleekApp {
                 has_mic,
             } => {
                 let mut sync_camera: Option<bool> = None;
+                let intentional_redial = self.state.local_call.as_ref().is_some_and(|lc| {
+                    matches!(lc.media, MediaStatus::Connecting)
+                });
                 let cancel_media_redial = matches!(status, MediaStatus::Live);
                 let schedule_media_redial = matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                ) && self.state.local_call.is_some();
+                ) && self.state.local_call.is_some()
+                    && !intentional_redial;
                 if let Some(lc) = self.state.local_call.as_mut() {
-                    lc.media = status.clone();
+                    // `AvMediaConnect` stops the prior session (Idle) before the
+                    // new handshake — keep Connecting so we don't schedule a
+                    // second reconnect or wipe in-flight dial state.
+                    if !(matches!(status, MediaStatus::Idle) && intentional_redial) {
+                        lc.media = status.clone();
+                    }
                     if matches!(status, MediaStatus::Live) {
                         lc.has_camera = has_camera;
                         lc.has_mic = has_mic;
@@ -603,21 +612,33 @@ impl SleekApp {
                     }
                 }
                 if let Some(store) = video {
-                    self.state.av_video = Some(store);
+                    let keep_stale_frames = matches!(status, MediaStatus::Connecting)
+                        && self
+                            .state
+                            .av_video
+                            .as_ref()
+                            .is_some_and(|old| !old.is_empty())
+                        && store.is_empty();
+                    if !keep_stale_frames {
+                        self.state.av_video = Some(store);
+                    }
                 }
                 if let Some(level) = mic_level {
                     self.state.av_mic_level = Some(level);
+                } else if schedule_media_redial || intentional_redial {
+                    self.state.av_mic_level = None;
                 }
                 if cancel_media_redial {
                     self.state.cancel_media_reconnect();
                 }
                 if schedule_media_redial {
-                    self.state.clear_av_media();
+                    // Keep last video frames visible while MoQ reconnects.
                     self.state.schedule_media_reconnect();
                 } else if matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                ) {
+                ) && !intentional_redial
+                {
                     self.state.clear_av_media();
                 }
                 if let Some(enabled) = sync_camera {
