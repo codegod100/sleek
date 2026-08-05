@@ -1719,6 +1719,27 @@ const EMBED_VIDEO_MAX_W: f32 = 280.0;
 const EMBED_MEDIA_MAX_H: f32 = 420.0;
 const EMBED_VIDEO_MAX_H: f32 = 220.0;
 
+/// Letterbox size for an inline chat image (contain — never crop).
+///
+/// Sizes are in egui points: texel counts are divided by `pixels_per_point`
+/// so high-DPI Android layouts match the lightbox viewer.
+fn embed_image_display_size(
+    width: usize,
+    height: usize,
+    max_w: f32,
+    max_h: f32,
+    pixels_per_point: f32,
+) -> Vec2 {
+    let ppp = pixels_per_point.max(1.0);
+    let native_w = (width.max(1) as f32 / ppp).max(1.0);
+    let native_h = (height.max(1) as f32 / ppp).max(1.0);
+    let scale = (max_w / native_w).min(max_h / native_h);
+    Vec2::new(
+        (native_w * scale).max(1.0),
+        (native_h * scale).max(1.0),
+    )
+}
+
 /// Resolved message body line for bubble rendering.
 enum MessageBodyLine {
     /// Visible text (caption-only for image/video when prose exists).
@@ -1939,24 +1960,32 @@ fn inline_image_preview(
         }
         Some((tex, width, height)) => {
             let max_w = ui.available_width().max(80.0);
-            // Fill bubble width; clamp height so portrait media doesn't dominate.
-            let fill_scale = max_w / width.max(1) as f32;
-            let display_h = (height as f32 * fill_scale)
-                .min(EMBED_MEDIA_MAX_H)
-                .max(1.0);
-            let display_w = if height as f32 * fill_scale > EMBED_MEDIA_MAX_H {
-                (width as f32 * (EMBED_MEDIA_MAX_H / height.max(1) as f32)).max(1.0)
-            } else {
-                max_w
-            };
-            let display = Vec2::new(display_w, display_h);
-            let resp = ui
-                .add(
-                    egui::Image::new((tex.id(), display))
-                        .fit_to_exact_size(display)
-                        .corner_radius(sp.radius_sm)
-                        .sense(Sense::click()),
-                )
+            let display = embed_image_display_size(
+                width,
+                height,
+                max_w,
+                EMBED_MEDIA_MAX_H,
+                ui.ctx().pixels_per_point(),
+            );
+            // Paint like the lightbox: full UV, letterboxed rect. `egui::Image` +
+            // `fit_to_exact_size` with a synthetic `SizedTexture` size can stretch
+            // tall screenshots on high-DPI Android so only a horizontal slice shows.
+            let mut resp = None;
+            ui.horizontal(|ui| {
+                let pad = (ui.available_width() - display.x).max(0.0) * 0.5;
+                if pad > 0.0 {
+                    ui.add_space(pad);
+                }
+                let (rect, r) = ui.allocate_exact_size(display, Sense::click());
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().add(
+                    egui::epaint::RectShape::filled(rect, sp.radius_sm, Color32::WHITE)
+                        .with_texture(tex.id(), uv),
+                );
+                resp = Some(r);
+            });
+            let resp = resp
+                .expect("inline image row")
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Tap to enlarge");
             media_embed_link_footer(ui, th, url, id_salt, caption);
@@ -2547,4 +2576,37 @@ pub fn empty_state(ui: &mut egui::Ui, th: &Theme, title: &str, blurb: &str) {
         ui.set_max_width((ui.available_width() - 24.0).max(120.0));
         dim_label(ui, th, blurb);
     });
+}
+
+#[cfg(test)]
+mod embed_image_tests {
+    use super::*;
+
+    #[test]
+    fn tall_image_shrinks_width_instead_of_cropping() {
+        // Phone screenshot aspect — must not fill bubble width at max height.
+        let size = embed_image_display_size(1080, 5000, 360.0, 420.0, 3.0);
+        assert!(
+            size.x < 360.0,
+            "portrait preview should letterbox horizontally: {size:?}"
+        );
+        assert!((size.y - 420.0).abs() < 0.01, "height should hit cap: {size:?}");
+        let aspect = size.x / size.y;
+        let native_aspect = (1080.0 / 3.0) / (5000.0 / 3.0);
+        assert!((aspect - native_aspect).abs() < 0.001, "aspect preserved");
+    }
+
+    #[test]
+    fn wide_image_fills_width() {
+        let size = embed_image_display_size(1600, 900, 360.0, 420.0, 2.0);
+        assert!((size.x - 360.0).abs() < 0.01);
+        assert!(size.y < 420.0);
+    }
+
+    #[test]
+    fn pixels_per_point_does_not_change_aspect() {
+        let a = embed_image_display_size(800, 2400, 320.0, 420.0, 1.0);
+        let b = embed_image_display_size(800, 2400, 320.0, 420.0, 3.0);
+        assert!((a.x / a.y - b.x / b.y).abs() < 0.001);
+    }
 }
