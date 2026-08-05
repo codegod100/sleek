@@ -1336,6 +1336,13 @@ impl AppState {
                 }
                 if let Some(h) = &state.handle {
                     state.form_handle = h.clone();
+                    // Ensure saved Bluesky handle appears in login history even
+                    // if prefs were lost / written to a legacy path before #42.
+                    let prior = state.recent_handles.clone();
+                    push_mru(&mut state.recent_handles, h, MAX_RECENT_HANDLES);
+                    if state.recent_handles != prior {
+                        state.persist_prefs();
+                    }
                 }
                 state.connect_mode = ConnectMode::Bluesky;
             } else if saved.has_guest() {
@@ -1693,6 +1700,17 @@ impl AppState {
         self.form_handle.clear();
         self.auto_guest_connect = false;
         crate::auth::SavedSession::clear();
+        // Reload MRU lists from disk in case in-memory state was cleared without
+        // a matching prefs write (e.g. process death mid-login).
+        if self.recent_handles.is_empty() || self.recent_nicks.is_empty() {
+            let prefs = crate::auth::SavedPrefs::load();
+            if self.recent_handles.is_empty() {
+                self.recent_handles = normalize_recent_handles(prefs.recent_handles);
+            }
+            if self.recent_nicks.is_empty() {
+                self.recent_nicks = normalize_recent_nicks(prefs.recent_nicks);
+            }
+        }
         // Restore remembered handle from prefs / MRU so it's pre-filled for next login.
         if let Some(handle) = self.recent_handles.first().cloned() {
             self.form_handle = handle;
