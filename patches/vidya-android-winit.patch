@@ -1,0 +1,9 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -23,3 +23,6 @@
+ # Optional: H.264 decode for chat / embed video previews.
+ openh264 = { version = "0.9", optional = true, default-features = false, features = ["source"] }
+ mp4 = { version = "0.14", optional = true }
++
++[target.'cfg(target_os = "android")'.dependencies]
++winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
