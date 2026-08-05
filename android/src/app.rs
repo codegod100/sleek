@@ -313,9 +313,6 @@ impl SleekApp {
         {
             return;
         }
-        self.state
-            .handle_typeahead
-            .sync_from_input(&self.state.form_handle);
         if let Some((request_id, query)) = self.state.handle_typeahead.take_ready_fetch() {
             self.net.send(NetCmd::SearchHandles { request_id, query });
         }

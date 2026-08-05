@@ -52,7 +52,10 @@ pub fn android_app_handle() -> Option<&'static AndroidApp> {
 /// The `dirs` crate does not support Android, so auth storage must use the
 /// NativeActivity internal files dir instead of `dirs::config_dir()`.
 pub fn app_storage_dir() -> Option<PathBuf> {
-    let base = android_app()?.internal_data_path()?;
+    let app = android_app()?;
+    let base = app
+        .internal_data_path()
+        .or_else(|| app.external_data_path())?;
     Some(base.join("sleek"))
 }
 
