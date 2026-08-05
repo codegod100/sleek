@@ -7,6 +7,7 @@ mod av_media;
 mod bsky;
 mod clipboard;
 mod net;
+mod policy;
 mod preview;
 mod reconnect;
 mod slash;

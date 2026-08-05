@@ -1,5 +1,7 @@
 //! Sleek eframe app — desktop + Android.
 
+use std::time::{Duration, Instant};
+
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Vec2};
 use freeq_sdk::event::Event;
 use vidya::{apply, body, button, dim_label, reserve_system_chrome, title, Mode, Theme};
@@ -16,8 +18,8 @@ use crate::state::{
     LinkMeta, MediaFetch, Route, Tab,
 };
 use crate::ui::{
-    self, image_lightbox_overlay, ChatAction, ChatsAction, ConnectAction, DiscoverAction,
-    SettingsAction,
+    self, image_lightbox_overlay, open_verification_url, policy_gate_overlay, ChatAction,
+    ChatsAction, ConnectAction, DiscoverAction, PolicyGateAction, SettingsAction,
 };
 
 /// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
@@ -712,6 +714,27 @@ impl SleekApp {
                         .apply_results(request_id, query, actors);
                 }
             }
+            NetEvent::PolicyFetched {
+                request_id,
+                check,
+                rules,
+            } => {
+                if self.state.policy_gate.fetch_id != request_id {
+                    return;
+                }
+                self.state.policy_gate.loading = false;
+                self.state.policy_gate.accepting = false;
+                match check {
+                    Ok(c) => self.state.policy_gate.check = Some(c),
+                    Err(e) => {
+                        self.state.policy_gate.error = Some(e);
+                        self.state.policy_gate.check = None;
+                    }
+                }
+                if let Ok(text) = rules {
+                    self.state.policy_gate.rules = Some(text);
+                }
+            }
             NetEvent::Sdk(event) => self.handle_sdk_event(event),
         }
     }
@@ -1082,6 +1105,9 @@ impl SleekApp {
                 self.state.status_line = text.clone();
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(text.clone()));
+                if let Some(channel) = crate::policy::parse_policy_accepted(&text) {
+                    self.on_policy_accepted(&channel);
+                }
                 // freeq 477 (guest / policy gate) and other JOIN denials arrive
                 // as ServerNotice: "#policytest This channel requires authentication — …"
                 if let Some((channel, reason)) = parse_join_denial(&text) {
@@ -1780,6 +1806,14 @@ impl SleekApp {
     #[cfg(not(target_os = "android"))]
     fn poll_oauth_deep_link(&mut self, _ctx: &egui::Context) {}
 
+    fn poll_policy_gate_refresh(&mut self) {
+        if let Some(deadline) = self.state.policy_gate.refresh_after {
+            if std::time::Instant::now() >= deadline {
+                self.state.policy_gate.refresh_after = None;
+                self.refresh_policy_gate();
+            }
+        }
+    }
 
     fn do_reconnect_session(&mut self) {
         let Some(broker_token) = self.state.broker_token.clone() else {
@@ -1848,6 +1882,10 @@ impl SleekApp {
             buf.join_error = Some(reason.clone());
             buf.append(ChatMessage::system(reason.clone()));
         }
+        // Authenticated users blocked by ACCEPT rules — open the join-gate modal.
+        if self.state.did.is_some() && crate::policy::is_policy_acceptance_denial(&reason) {
+            self.open_policy_gate(&ch);
+        }
         self.state.error = Some(format!("{ch}: {reason}"));
         self.state.show_toast(format!("{ch}: {reason}"));
         // Keep the chat open so the error empty-state is visible.
@@ -1855,6 +1893,115 @@ impl SleekApp {
             self.state.open_chat(&ch);
         }
         self.state.tab = Tab::Chats;
+    }
+
+    fn open_policy_gate(&mut self, channel: &str) {
+        let did = match self.state.did.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => return,
+        };
+        let request_id = self.state.open_policy_gate(channel);
+        let channel = self
+            .state
+            .policy_gate
+            .channel
+            .clone()
+            .unwrap_or_else(|| AppState::normalize_channel(channel));
+        let api_base = api_base_for_server(&self.state.server);
+        self.net.send(NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        });
+    }
+
+    fn refresh_policy_gate(&mut self) {
+        let channel = match self.state.policy_gate.channel.clone() {
+            Some(c) => c,
+            None => return,
+        };
+        let did = match self.state.did.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => return,
+        };
+        self.state.policy_gate.loading = true;
+        self.state.policy_gate.error = None;
+        self.state.policy_gate.fetch_id = self.state.policy_gate.fetch_id.wrapping_add(1);
+        let request_id = self.state.policy_gate.fetch_id;
+        let api_base = api_base_for_server(&self.state.server);
+        self.net.send(NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        });
+    }
+
+    fn do_policy_accept(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        self.state.policy_gate.accepting = true;
+        self.net
+            .send(NetCmd::Raw(format!("POLICY {ch} ACCEPT\r\n")));
+    }
+
+    fn do_policy_join(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        self.state.policy_gate.joining = true;
+        self.net
+            .send(NetCmd::Raw(format!("POLICY {ch} ACCEPT\r\n")));
+        // Brief delay so the server can issue the attestation before JOIN.
+        let ch_join = ch.clone();
+        if let Some(buf) = self.state.channels.get_mut(&ch) {
+            buf.join_error = None;
+            buf.join_pending = true;
+        }
+        self.net.send(NetCmd::Join(ch_join));
+        self.state.policy_gate.close();
+    }
+
+    fn on_policy_accepted(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        if self.state.policy_gate.channel.as_deref() == Some(ch.as_str()) {
+            self.state.policy_gate.accepting = false;
+            self.refresh_policy_gate();
+        }
+        if let Some(buf) = self.state.channels.get_mut(&ch) {
+            if buf.join_error.is_some() {
+                buf.join_error = None;
+            }
+        }
+        self.state.show_toast(format!("{ch}: policy accepted — you may join"));
+    }
+
+    fn handle_policy_gate_action(&mut self, ctx: &egui::Context, act: PolicyGateAction) {
+        match act {
+            PolicyGateAction::None => {}
+            PolicyGateAction::Close => {
+                self.state.close_policy_gate();
+            }
+            PolicyGateAction::Refresh => {
+                self.refresh_policy_gate();
+            }
+            PolicyGateAction::AcceptRules => {
+                if let Some(ch) = self.state.policy_gate.channel.clone() {
+                    self.do_policy_accept(&ch);
+                    self.state.policy_gate.refresh_after =
+                        Some(Instant::now() + Duration::from_millis(900));
+                }
+            }
+            PolicyGateAction::VerifyExternal { url } => {
+                let api_base = api_base_for_server(&self.state.server);
+                if let Some(did) = self.state.did.clone() {
+                    open_verification_url(ctx, &api_base, &url, &did);
+                }
+            }
+            PolicyGateAction::Join => {
+                if let Some(ch) = self.state.policy_gate.channel.clone() {
+                    self.do_policy_join(&ch);
+                }
+            }
+        }
     }
 
     fn do_send(&mut self, target: String, text: String) {
@@ -2272,6 +2419,7 @@ impl eframe::App for SleekApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.poll_oauth_deep_link(ctx);
+        self.poll_policy_gate_refresh();
 
         let th = self.theme();
         let p = &th.palette;
@@ -2570,6 +2718,9 @@ impl eframe::App for SleekApp {
                             });
                         }
                     }
+                    ChatAction::OpenPolicyGate(channel) => {
+                        self.open_policy_gate(&channel);
+                    }
                     ChatAction::AvStart(channel) => {
                         self.do_av_start(channel);
                     }
@@ -2706,6 +2857,9 @@ impl eframe::App for SleekApp {
 
         // Full-screen image lightbox (above chat / tabs).
         image_lightbox_overlay(ctx, &th, &mut self.state);
+
+        let gate_act = policy_gate_overlay(ctx, &th, &mut self.state);
+        self.handle_policy_gate_action(ctx, gate_act);
     }
 }
 

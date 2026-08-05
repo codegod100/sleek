@@ -54,6 +54,8 @@ pub enum ChatAction {
     },
     /// Soft-delete a message (`+draft/delete`).
     Delete { target: String, msgid: String },
+    /// Open the channel policy join-gate modal.
+    OpenPolicyGate(String),
 }
 
 fn apply_message_bubble_action(
@@ -349,8 +351,12 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
             && (err.to_ascii_lowercase().contains("authentication")
                 || err.to_ascii_lowercase().contains("sign in")
                 || err.to_ascii_lowercase().contains("policy"));
+        let policy_denial =
+            !guest_auth && crate::policy::is_policy_acceptance_denial(err);
         let title = if guest_auth {
             "Guests can't join"
+        } else if policy_denial {
+            "Policy acceptance required"
         } else {
             "Can't join this channel"
         };
@@ -363,6 +369,17 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     th,
                     "Sign in with Bluesky from Settings, then try again.",
                 );
+                ui.add_space(sp.sm);
+            } else if policy_denial {
+                dim_label(
+                    ui,
+                    th,
+                    "Review the channel rules and accept them to join.",
+                );
+                ui.add_space(sp.sm);
+                if primary_button(ui, th, "View policy & accept").clicked() {
+                    action = ChatAction::OpenPolicyGate(channel.to_string());
+                }
                 ui.add_space(sp.sm);
             }
             if button(ui, th, "Dismiss").clicked() {
