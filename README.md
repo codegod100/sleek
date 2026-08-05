@@ -73,21 +73,24 @@ nix build .#flatpak
 
 ### CI artifacts
 
-On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds:
+On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds on [nixbuild.net](https://nixbuild.net) (remote Nix builders — no GitHub runner compile):
 
 | Job | Flake attr | Artifact |
 |-----|------------|----------|
 | APK | `.#android` | `sleek-apk` (`sleek.apk`) |
 | Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
 
+`NIXBUILD_TOKEN` is fetched from **OpenBao** (`secret/data/ai-api-keys`) via `OPENBAO_TOKEN`, or from the `nixbuild_token` repository secret as a fallback.
+
 CI APKs are signed with the committed `android/ci.keystore` (password `android`, alias `androiddebugkey`) so successive installs upgrade cleanly. If you previously installed a build signed with a different key (e.g. an older CI artifact or a local `deploy-android` keystore), uninstall Sleek first — Android shows that as “Something went wrong / App not installed”.
 
 ### Spindle (Tangled CI)
 
-[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs). Hosted Spindle cannot compile these — warm the cache locally with `just android` / `just flatpak` first. On `main` pushes it also force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) also builds `.#android` and `.#flatpak` on nixbuild.net (via `scripts/nixbuild-setup.sh`) on pushes/PRs to `main` (and manual runs). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
 
 | Secret | Purpose |
 |--------|---------|
+| `NIXBUILD_TOKEN` | nixbuild.net auth token — remote compile |
 | `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
 | `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
 
@@ -99,12 +102,13 @@ Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs 
 
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
-On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes store paths to the same cache. CI pulls `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
+On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` on nixbuild.net and pushes store paths to the same cache. CI pulls `NIXBUILD_TOKEN` and `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
 
 | Secret / env | Purpose |
 |--------------|---------|
-| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch Cachix credentials |
+| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch nixbuild + Cachix credentials |
 | `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` so agents can manage Actions secrets |
+| `NIXBUILD_TOKEN` | nixbuild.net auth token in OpenBao — remote CI builds |
 | `CACHIX_AUTH_TOKEN` | Write token in OpenBao / Codespaces ([cachix.org](https://app.cachix.org) → codegod100) |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |

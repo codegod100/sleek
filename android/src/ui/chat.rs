@@ -1452,10 +1452,13 @@ fn active_call_panel_body(
 
         // Paint tiles as soon as we are Connecting or Live so self-view can
         // appear the moment capture starts (not only after MoQ Live toast).
+        // Also keep the stage up while MoQ re-dials (status stays Connecting).
         if matches!(
             lc.media,
             crate::av::MediaStatus::Live | crate::av::MediaStatus::Connecting
-        ) {
+        ) || state.media_reconnect_at.is_some()
+            || state.av_video.as_ref().is_some_and(|s| !s.is_empty())
+        {
             let screen_h = ui.ctx().screen_rect().height();
             let min_h = 96.0;
             let max_h = (screen_h * 0.72).max(min_h + 40.0);
@@ -1546,12 +1549,23 @@ fn av_call_chrome_meta(
         &state.route,
         crate::state::Route::Chat(ch) if ch.eq_ignore_ascii_case(&lc.channel)
     );
-    let status_line = match &lc.media {
-        crate::av::MediaStatus::Live => format!("{n} in call"),
-        crate::av::MediaStatus::Idle => format!("{n} in call"),
-        crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
-        crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
-        crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+    let status_line = if state.media_reconnect_at.is_some() {
+        let delay = state
+            .media_reconnect_at
+            .map(|at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+            })
+            .unwrap_or(0);
+        format!("Reconnecting media in {delay}s… · {n}")
+    } else {
+        match &lc.media {
+            crate::av::MediaStatus::Live => format!("{n} in call"),
+            crate::av::MediaStatus::Idle => format!("{n} in call"),
+            crate::av::MediaStatus::Connecting => format!("Connecting… · {n}"),
+            crate::av::MediaStatus::Failed(e) => format!("Media failed · {e}"),
+            crate::av::MediaStatus::BrowserOnly => "Open in browser for media".to_string(),
+        }
     };
     (headline, status_line, on_call_channel)
 }
@@ -2231,12 +2245,16 @@ fn paint_av_video_tiles(
                 width: 8,
                 height: 8,
                 rgba: Arc::<[u8]>::from(px),
+                gen: 0,
             },
         ));
     }
     if frames.is_empty() {
         return;
     }
+    // Keep painting while frames arrive (software GL + MoQ can stall idle ticks).
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
     // Local preview first, then remotes alphabetically (key = nick or nick~instance).
     frames.sort_by(|a, b| {
         let a_local = a.0 == crate::av::LOCAL_PREVIEW_KEY;
@@ -2252,7 +2270,7 @@ fn paint_av_video_tiles(
     }
 
     let live: std::collections::HashSet<String> = frames.iter().map(|(n, _)| n.clone()).collect();
-    state.av_video_textures.retain(|k, _| live.contains(k));
+    state.av_video_textures.retain(|k| live.contains(k));
     // Drop focus if that participant left / stopped publishing.
     if state
         .av_focused_video
@@ -2263,29 +2281,37 @@ fn paint_av_video_tiles(
     }
 
     // Upload / refresh GPU textures first so paint helpers only need ids + dims.
+    // Skip `TextureHandle::set` when the frame gen is unchanged — full RGBA
+    // re-uploads every tick were thrashing software GL and looked like drops.
     let mut tiles: Vec<(String, egui::TextureId, u32, u32)> = Vec::with_capacity(frames.len());
     for (key, frame) in &frames {
-        // Build an *opaque* ColorImage from RGB only. Camera/OBS paths sometimes
-        // deliver A=0 (or weird alpha); from_rgba_unmultiplied then draws a
-        // fully transparent tile that looks like an empty square.
-        let color = color_image_opaque_rgb(
-            frame.width as usize,
-            frame.height as usize,
-            frame.rgba.as_ref(),
-        );
-        let tex_id = match state.av_video_textures.entry(key.clone()) {
+        let tex_id = match state.av_video_textures.0.entry(key.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().set(color, egui::TextureOptions::LINEAR);
-                e.get().id()
+                let (tex, uploaded_gen) = e.get_mut();
+                if *uploaded_gen != frame.gen {
+                    let color = color_image_opaque_rgb(
+                        frame.width as usize,
+                        frame.height as usize,
+                        frame.rgba.as_ref(),
+                    );
+                    tex.set(color, egui::TextureOptions::LINEAR);
+                    *uploaded_gen = frame.gen;
+                }
+                tex.id()
             }
             std::collections::hash_map::Entry::Vacant(e) => {
+                let color = color_image_opaque_rgb(
+                    frame.width as usize,
+                    frame.height as usize,
+                    frame.rgba.as_ref(),
+                );
                 let tex = ui.ctx().load_texture(
                     format!("av_video_{key}"),
                     color,
                     egui::TextureOptions::LINEAR,
                 );
                 let id = tex.id();
-                e.insert(tex);
+                e.insert((tex, frame.gen));
                 id
             }
         };

@@ -329,14 +329,9 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
         let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
-        let preview = parent.preview();
-        let label = if parent.from.is_empty() {
-            preview
-        } else {
-            format!("{}: {preview}", parent.from)
-        };
+        // `ChatMessage::preview()` already prefixes the sender nick.
         ui.label(
-            RichText::new(label)
+            RichText::new(parent.preview())
                 .size(th.type_scale.caption)
                 .color(p.text_secondary),
         );
@@ -607,12 +602,215 @@ fn message_inline_action_chip(
     action
 }
 
-/// Track a press that started over a bubble so long-press works on the whole
-/// bubble (not only the selectable body label) without stealing click sense.
+/// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
+/// whole popup sits above the contact point (not under the fingertip).
 #[derive(Clone, Copy)]
-struct BubblePress {
+struct MenuAnchor {
+    pos: Pos2,
+    above_finger: bool,
+}
+
+/// Track a press that started over a widget so long-press works without
+/// stealing click sense.
+#[derive(Clone, Copy)]
+struct PressHold {
     t0: f64,
     pos: Pos2,
+    long_fired: bool,
+}
+
+/// Edge-trigger long-press over `rect` (APK / touch). Returns
+/// `(long_press_this_frame, suppress_short_click)` — the latter stays true from
+/// the long-press frame until the primary button is released.
+fn touch_long_press(ui: &mut egui::Ui, press_id: Id, rect: Rect) -> (bool, bool) {
+    let clipped = rect.intersect(ui.clip_rect());
+    let over = clipped.is_positive() && ui.rect_contains_pointer(clipped);
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let time = ui.input(|i| i.time);
+    let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
+    let max_slide = ui
+        .ctx()
+        .options(|o| o.input_options.max_click_dist as f32)
+        .max(8.0);
+    let pos = ui.ctx().pointer_interact_pos();
+
+    if primary_pressed && over {
+        if let Some(pos) = pos {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(press_id, PressHold {
+                    t0: time,
+                    pos,
+                    long_fired: false,
+                }));
+        }
+    }
+
+    let mut long_this_frame = false;
+    let mut suppress_click = false;
+    if primary_down {
+        if let Some(mut start) = ui.ctx().data(|d| d.get_temp::<PressHold>(press_id)) {
+            suppress_click = start.long_fired;
+            let moved = pos
+                .map(|p| (p - start.pos).length() > max_slide)
+                .unwrap_or(false);
+            if moved {
+                ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+                suppress_click = false;
+            } else if !start.long_fired && time - start.t0 >= max_dur {
+                long_this_frame = true;
+                start.long_fired = true;
+                suppress_click = true;
+                ui.ctx().data_mut(|d| d.insert_temp(press_id, start));
+            }
+        }
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+    }
+    (long_this_frame, suppress_click)
+}
+
+/// Long-press (APK) popup listing nicknames who used one reaction emoji.
+fn reaction_reactors_popup(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    popup_id: Id,
+    chip_rect: Rect,
+    emoji: &str,
+    nicks: &[String],
+    opening: bool,
+) {
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    if opening {
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui {
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else {
+            MenuAnchor {
+                pos: Pos2::new(chip_rect.center().x, chip_rect.top() - 8.0),
+                above_finger: true,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(popup_id));
+        ui.ctx().data_mut(|d| d.insert_temp(popup_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(popup_id)) {
+        return;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(popup_id))
+        .unwrap_or(MenuAnchor {
+            pos: chip_rect.left_top(),
+            above_finger: touch_ui,
+        });
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let shown_emoji = display_emoji(emoji);
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+
+    let popup = egui::Area::new(popup_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .default_width(200.0)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(p.card_bg)
+                .stroke(Stroke::new(1.0_f32, p.border_soft))
+                .corner_radius(sp.radius_md)
+                .inner_margin(egui::Margin::same(8))
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let icon_size = (th.type_scale.caption * 1.15).max(14.0);
+                        let (ir, _) =
+                            ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
+                        paint_emoji_in(ui, ir, emoji, p.text);
+                        ui.label(
+                            RichText::new(format!("{shown_emoji} · {}", nicks.len()))
+                                .size(th.type_scale.caption)
+                                .color(p.text_secondary)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for nick in nicks {
+                                ui.label(
+                                    RichText::new(nick)
+                                        .size(th.type_scale.body)
+                                        .color(p.text),
+                                );
+                            }
+                        });
+                });
+        });
+
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    popup_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    if escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| d.remove::<MenuAnchor>(popup_id));
+    }
 }
 
 /// Right-click / long-press menu for a message bubble: React, Edit, Delete icons.
@@ -637,14 +835,6 @@ fn message_context_menu(
         return None;
     }
 
-    /// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
-    /// whole popup sits above the contact point (not under the fingertip).
-    #[derive(Clone, Copy)]
-    struct MenuAnchor {
-        pos: Pos2,
-        above_finger: bool,
-    }
-
     let press_id = menu_id.with("press");
     let clipped = bubble_rect.intersect(ui.clip_rect());
     let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
@@ -652,43 +842,7 @@ fn message_context_menu(
     let touch_ui =
         cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
 
-    // Whole-bubble long-press (APK): track primary press start over the bubble.
-    // Edge-triggers once duration exceeds egui's max_click_duration (~0.8s) and
-    // the finger hasn't moved enough to look like a scroll.
-    let long_press_anywhere = {
-        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
-        let primary_down = ui.input(|i| i.pointer.primary_down());
-        let time = ui.input(|i| i.time);
-        let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
-        // Match egui's "still a click / long-press" slide budget (points).
-        let max_slide = ui.ctx().options(|o| o.input_options.max_click_dist as f32).max(8.0);
-        let pos = ui.ctx().pointer_interact_pos();
-
-        if primary_pressed && over_bubble {
-            if let Some(pos) = pos {
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(press_id, BubblePress { t0: time, pos }));
-            }
-        }
-
-        let mut fired = false;
-        if primary_down {
-            if let Some(start) = ui.ctx().data(|d| d.get_temp::<BubblePress>(press_id)) {
-                let moved = pos
-                    .map(|p| (p - start.pos).length() > max_slide)
-                    .unwrap_or(false);
-                if moved {
-                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-                } else if time - start.t0 >= max_dur {
-                    fired = true;
-                    ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-                }
-            }
-        } else {
-            ui.ctx().data_mut(|d| d.remove::<BubblePress>(press_id));
-        }
-        fired
-    };
+    let (long_press_anywhere, _) = touch_long_press(ui, press_id, bubble_rect);
 
     let long_press = body_long_touched || long_press_anywhere;
     let opening = over_bubble && (secondary || long_press);
@@ -819,7 +973,7 @@ fn message_context_menu(
         ui.memory_mut(|m| m.close_popup());
         ui.ctx().data_mut(|d| {
             d.remove::<MenuAnchor>(menu_id);
-            d.remove::<BubblePress>(press_id);
+            d.remove::<PressHold>(press_id);
         });
     }
 
@@ -878,10 +1032,8 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
-    let video_url = match &embed {
-        Some(Embed::Video { url }) => Some(url.clone()),
-        _ => None,
-    };
+    let body_line = message_body_line(&body_text, embed.as_ref());
+    let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
@@ -931,17 +1083,18 @@ pub fn message_bubble(
     }
 
     let mut bubble_rect = Rect::NOTHING;
-    let row_resp = ui.horizontal(|ui| {
-        if swipe_offset > 0.0 {
-            ui.add_space(swipe_offset);
-        }
-        let frame_resp = egui::Frame::new()
+    if swipe_offset > 0.0 {
+        ui.add_space(swipe_offset);
+    }
+    let inner_w = ui.available_width().max(1.0);
+    let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+            ui.set_max_width(inner_w);
+            ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(&msg.from)
@@ -984,74 +1137,119 @@ pub fn message_bubble(
             // Sense on the body — URL tap opens browser; double-click heart.
             // Hover / right-click action icons are handled on the whole bubble
             // (below) so selectable text drag-sense can't swallow the clicks.
-            let url_spans = preview::extract_url_spans(&body_text);
-            let mut job = linkify_layout_job(&body_text, &url_spans, th);
-            job.wrap.max_width = ui.available_width();
-            let galley = ui.fonts(|f| f.layout_job(job));
-            let body_resp = ui.add(
-                egui::Label::new(egui::WidgetText::Galley(galley.clone()))
-                    .sense(Sense::click())
-                    .selectable(true),
-            );
-            body_long_touched = body_resp.long_touched();
-            let galley_origin = body_resp.rect.min;
-            let hovered_url = body_resp.hover_pos().and_then(|pos| {
-                url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+            let mut body_resp = None;
+            let mut galley = None;
+            let mut galley_origin = egui::Pos2::ZERO;
+            let mut url_spans = Vec::new();
+            if let MessageBodyLine::Skip = body_line {
+                // URL-only link — OG card below carries the content.
+            } else {
+                let (visible, cleared) = match &body_line {
+                    MessageBodyLine::Text(t) => (t.as_str(), false),
+                    MessageBodyLine::Cleared => ("[message cleared]", true),
+                    MessageBodyLine::Skip => unreachable!(),
+                };
+                url_spans = preview::extract_url_spans(visible);
+                let (resp, laid_out, origin) =
+                    render_message_body(ui, th, visible, cleared, inner_w, &url_spans);
+                body_long_touched = resp.long_touched();
+                galley_origin = origin;
+                galley = laid_out;
+                body_resp = Some(resp);
+            }
+            let hovered_url = body_resp.as_ref().and_then(|body_resp| {
+                body_resp.hover_pos().and_then(|pos| {
+                    url_at_galley_pos(
+                        galley.as_ref()?,
+                        galley_origin,
+                        match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => return None,
+                        },
+                        &url_spans,
+                        pos,
+                    )
+                })
             });
-            let tip = if let Some(url) = hovered_url.as_deref() {
-                url.to_string()
-            } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
-                if can_edit || can_delete {
-                    "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
+            if let Some(mut body_resp) = body_resp {
+                let tip = if let Some(url) = hovered_url.as_deref() {
+                    url.to_string()
+                } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+                    if can_edit || can_delete {
+                        "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
+                    } else if can_react {
+                        "Long-press for React, Reply · swipe right to reply".to_string()
+                    } else if can_reply {
+                        "Swipe right to reply".to_string()
+                    } else {
+                        String::new()
+                    }
+                } else if can_edit || can_delete {
+                    "Hover or right-click for React, Edit, Delete".to_string()
                 } else if can_react {
-                    "Long-press for React, Reply · swipe right to reply".to_string()
-                } else if can_reply {
-                    "Swipe right to reply".to_string()
+                    let heart = display_emoji(DEFAULT_REACT_EMOJI);
+                    format!("Double-click {heart} · hover or right-click for React")
                 } else {
                     String::new()
+                };
+                body_resp = body_resp.on_hover_text(tip);
+                if hovered_url.is_some() {
+                    body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
                 }
-            } else if can_edit || can_delete {
-                "Select to copy · hover or right-click for React, Edit, Delete".to_string()
-            } else if can_react {
-                let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                format!("Select to copy · double-click {heart} · hover or right-click for React")
-            } else {
-                "Select to copy".into()
-            };
-            let mut body_resp = body_resp.on_hover_text(tip);
-            if hovered_url.is_some() {
-                body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
-            }
-            let mut opened_link = false;
-            if body_resp.clicked() {
-                if let Some(pos) = body_resp.interact_pointer_pos() {
-                    if let Some(url) =
-                        url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
+                let mut opened_link = false;
+                if body_resp.clicked() {
+                    if let (Some(pos), Some(galley)) =
+                        (body_resp.interact_pointer_pos(), galley.as_ref())
                     {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                        opened_link = true;
+                        let visible = match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => "",
+                        };
+                        if let Some(url) =
+                            url_at_galley_pos(galley, galley_origin, visible, &url_spans, pos)
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            opened_link = true;
+                        }
                     }
                 }
-            }
-            if can_react
-                && !opened_link
-                && matches!(action, MessageBubbleAction::None)
-                && body_resp.double_clicked()
-            {
-                action = MessageBubbleAction::ToggleReaction {
-                    msgid: msg.id.clone(),
-                    emoji: DEFAULT_REACT_EMOJI.to_string(),
-                };
+                if can_react
+                    && !opened_link
+                    && matches!(action, MessageBubbleAction::None)
+                    && body_resp.double_clicked()
+                {
+                    action = MessageBubbleAction::ToggleReaction {
+                        msgid: msg.id.clone(),
+                        emoji: DEFAULT_REACT_EMOJI.to_string(),
+                    };
+                }
             }
 
             if let Some(embed) = embed.as_ref() {
                 match embed {
-                    // Video mounts outside the bubble frame (below) so play
-                    // clicks are not stolen by later bubble interacts.
-                    Embed::Video { .. } => {}
+                    Embed::Video { url } => {
+                        ui.add_space(sp.sm);
+                        inline_video_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        );
+                    }
                     Embed::Image { url } => {
                         ui.add_space(sp.sm);
-                        if inline_image_preview(ui, th, media, url) {
+                        if inline_image_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        ) {
                             action = MessageBubbleAction::OpenImage {
                                 url: url.clone(),
                             };
@@ -1067,9 +1265,8 @@ pub fn message_bubble(
                 }
             }
         });
-        bubble_rect = frame_resp.response.rect;
-    })
-    .response;
+    bubble_rect = frame_resp.response.rect;
+    let row_resp = frame_resp.response;
 
     if swipe_offset > 0.0 {
         let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
@@ -1084,12 +1281,6 @@ pub fn message_bubble(
 
     ui.ctx()
         .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp.rect));
-
-    // Video below the bubble — same layering rule as reaction chips.
-    if let Some(url) = video_url {
-        ui.add_space(sp.xs);
-        inline_video_preview(ui, th, media, &url, &msg.id);
-    }
 
     // Store bubble rect for next-frame hover hit-testing (inline chip fade).
     if action_metrics.is_some() {
@@ -1138,10 +1329,10 @@ pub fn message_bubble(
                     Stroke::new(1.0_f32, p.border_soft)
                 };
                 let shown_emoji = display_emoji(emoji);
+                let mut names: Vec<_> = nicks.iter().cloned().collect();
+                names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                 let tip = {
-                    let mut names: Vec<_> = nicks.iter().cloned().collect();
-                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-                    let shown: Vec<_> = names.into_iter().take(12).collect();
+                    let shown: Vec<_> = names.iter().take(12).cloned().collect();
                     let extra = count.saturating_sub(shown.len());
                     let mut s = format!("reacted with {shown_emoji}: {}", shown.join(", "));
                     if extra > 0 {
@@ -1149,6 +1340,7 @@ pub fn message_bubble(
                     }
                     s
                 };
+                let chip_id = ui.id().with("react_chip").with(&msg.id).with(emoji.as_str());
                 let chip = egui::Frame::new()
                     .fill(fill)
                     .stroke(stroke)
@@ -1169,15 +1361,26 @@ pub fn message_bubble(
                             }
                         });
                     });
+                let (long_press, suppress_click) = if touch_ui {
+                    touch_long_press(ui, chip_id.with("press"), chip.response.rect)
+                } else {
+                    (false, false)
+                };
+                let popup_id = chip_id.with("reactors");
+                reaction_reactors_popup(
+                    ui,
+                    th,
+                    popup_id,
+                    chip.response.rect,
+                    emoji,
+                    &names,
+                    long_press,
+                );
                 let resp = ui
-                    .interact(
-                        chip.response.rect,
-                        ui.id().with("react_chip").with(&msg.id).with(emoji.as_str()),
-                        Sense::click(),
-                    )
+                    .interact(chip.response.rect, chip_id, Sense::click())
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text(tip);
-                if can_react && resp.clicked() {
+                if can_react && resp.clicked() && !suppress_click && !long_press {
                     action = MessageBubbleAction::ToggleReaction {
                         msgid: msg.id.clone(),
                         emoji: emoji.clone(),
@@ -1510,9 +1713,133 @@ fn emoji_pick_cell(
     btn.clicked()
 }
 
-/// Max width for inline image / link cards inside a bubble.
-const EMBED_MAX_W: f32 = 280.0;
-const EMBED_MAX_H: f32 = 220.0;
+/// Inline video card width (message bubble is full-width; player stays compact).
+const EMBED_VIDEO_MAX_W: f32 = 280.0;
+/// Cap image height when filling the bubble; video uses 16:9 within its max W.
+const EMBED_MEDIA_MAX_H: f32 = 420.0;
+const EMBED_VIDEO_MAX_H: f32 = 220.0;
+
+/// Letterbox size for an inline chat image (contain — never crop).
+///
+/// Sizes are in egui points: texel counts are divided by `pixels_per_point`
+/// so high-DPI Android layouts match the lightbox viewer.
+fn embed_image_display_size(
+    width: usize,
+    height: usize,
+    max_w: f32,
+    max_h: f32,
+    pixels_per_point: f32,
+) -> Vec2 {
+    let ppp = pixels_per_point.max(1.0);
+    let native_w = (width.max(1) as f32 / ppp).max(1.0);
+    let native_h = (height.max(1) as f32 / ppp).max(1.0);
+    let scale = (max_w / native_w).min(max_h / native_h);
+    Vec2::new(
+        (native_w * scale).max(1.0),
+        (native_h * scale).max(1.0),
+    )
+}
+
+/// Resolved message body line for bubble rendering.
+enum MessageBodyLine {
+    /// Visible text (caption-only for image/video when prose exists).
+    Text(String),
+    /// Whitespace-only / cleared message.
+    Cleared,
+    /// URL-only link message — OG card carries the content.
+    Skip,
+}
+
+/// Caption text for image/video embeds (URL stripped). `None` when URL-only.
+fn media_embed_caption(text: &str, embed: Option<&Embed>) -> Option<String> {
+    let embed = embed?;
+    let url = match embed {
+        Embed::Image { url } | Embed::Video { url } => url.as_str(),
+        Embed::Link { .. } => return None,
+    };
+    let caption = preview::caption_without_embed_url(text, url);
+    if caption.is_empty() {
+        None
+    } else {
+        Some(caption)
+    }
+}
+
+/// Choose visible bubble body text (strip bare media URLs; flag cleared bodies).
+fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return MessageBodyLine::Cleared;
+    }
+    if let Some(embed) = embed {
+        if preview::is_embed_only_message(trimmed, Some(embed)) {
+            MessageBodyLine::Skip
+        } else {
+            match embed {
+                Embed::Image { url } | Embed::Video { url } => {
+                    MessageBodyLine::Text(preview::caption_without_embed_url(trimmed, url))
+                }
+                Embed::Link { .. } => MessageBodyLine::Text(trimmed.to_string()),
+            }
+        }
+    } else {
+        MessageBodyLine::Text(trimmed.to_string())
+    }
+}
+
+/// Render a message body line. Plain text uses `RichText` (reliable on GLES);
+/// linkified bodies use a pre-built galley with selection disabled.
+fn render_message_body(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    visible: &str,
+    cleared: bool,
+    wrap_w: f32,
+    url_spans: &[UrlSpan],
+) -> (egui::Response, Option<std::sync::Arc<egui::Galley>>, egui::Pos2) {
+    let p = &th.palette;
+    if url_spans.is_empty() {
+        let resp = if cleared {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary)
+                        .italics(),
+                )
+                .wrap(),
+            )
+        } else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.body)
+                        .color(p.text),
+                )
+                .wrap(),
+            )
+        };
+        let origin = resp.rect.min;
+        return (resp, None, origin);
+    }
+
+    let mut job = linkify_layout_job(visible, url_spans, th);
+    if cleared {
+        if let Some(section) = job.sections.first_mut() {
+            section.format.color = p.text_secondary;
+            section.format.italics = true;
+        }
+    }
+    job.wrap.max_width = wrap_w;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let resp = ui.add(
+        egui::Label::new(egui::WidgetText::Galley(galley.clone()))
+            .sense(Sense::click())
+            .selectable(false),
+    );
+    let origin = resp.rect.min;
+    (resp, Some(galley), origin)
+}
 
 /// LayoutJob with http(s) spans styled as accent underlines.
 fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
@@ -1588,7 +1915,14 @@ fn url_at_galley_pos(
 }
 
 /// Inline chat image. Returns `true` when the user taps to open the lightbox.
-fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, url: &str) -> bool {
+fn inline_image_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
     media.touch_image(url);
@@ -1621,25 +1955,40 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                         dim_label(ui, th, "Loading image…");
                     });
                 });
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             false
         }
         Some((tex, width, height)) => {
-            let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
-            let scale = (max_w / width.max(1) as f32)
-                .min(EMBED_MAX_H / height.max(1) as f32)
-                .min(1.0);
-            let size = Vec2::new(
-                (width as f32 * scale).max(1.0),
-                (height as f32 * scale).max(1.0),
+            let max_w = ui.available_width().max(80.0);
+            let display = embed_image_display_size(
+                width,
+                height,
+                max_w,
+                EMBED_MEDIA_MAX_H,
+                ui.ctx().pixels_per_point(),
             );
-            let resp = ui
-                .add(
-                    egui::Image::new((tex.id(), size))
-                        .corner_radius(sp.radius_sm)
-                        .sense(Sense::click()),
-                )
+            // Paint like the lightbox: full UV, letterboxed rect. `egui::Image` +
+            // `fit_to_exact_size` with a synthetic `SizedTexture` size can stretch
+            // tall screenshots on high-DPI Android so only a horizontal slice shows.
+            let mut resp = None;
+            ui.horizontal(|ui| {
+                let pad = (ui.available_width() - display.x).max(0.0) * 0.5;
+                if pad > 0.0 {
+                    ui.add_space(pad);
+                }
+                let (rect, r) = ui.allocate_exact_size(display, Sense::click());
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().add(
+                    egui::epaint::RectShape::filled(rect, sp.radius_sm, Color32::WHITE)
+                        .with_texture(tex.id(), uv),
+                );
+                resp = Some(r);
+            });
+            let resp = resp
+                .expect("inline image row")
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Tap to enlarge");
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             resp.clicked()
         }
     }
@@ -1654,13 +2003,16 @@ fn inline_video_preview(
     media: &mut MediaCache,
     url: &str,
     id_salt: &str,
+    caption: Option<&str>,
 ) {
     use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
 
     media.touch_video(url);
 
     let sp = &th.spacing;
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
+    // Compact player — bubble is full-width; don't stretch the video surface.
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
 
     match media.videos.get(url) {
         Some(crate::state::VideoState::Loading) | None => {
@@ -1669,12 +2021,14 @@ fn inline_video_preview(
                 .corner_radius(sp.radius_sm)
                 .inner_margin(egui::Margin::symmetric(12, 16))
                 .show(ui, |ui| {
+                    ui.set_width(max_w);
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.add_space(sp.sm);
                         dim_label(ui, th, "Loading video…");
                     });
                 });
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             return;
         }
         Some(crate::state::VideoState::Failed) => {
@@ -1701,14 +2055,53 @@ fn inline_video_preview(
 
     let opts = VideoPlayerOpts {
         max_width: max_w,
-        max_height: EMBED_MAX_H,
-        title: Some(preview::display_filename(url)),
+        max_height: max_h,
+        title: caption
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         open_url_on_unsupported: Some(url.to_string()),
     };
-    let (_resp, action) = video_player(ui, th, player, &opts);
+    let playing = player.is_playing();
+    let (resp, action) = video_player(ui, th, player, &opts);
+    // High-contrast play affordance — theme accent blends into solid-blue
+    // first frames; paint a dark circle + white triangle on top.
+    if !playing {
+        paint_video_play_affordance(ui, resp.rect);
+    }
     if action == VideoPlayerAction::OpenExternally {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+    media_embed_link_footer(ui, th, url, id_salt, caption);
+}
+
+/// Dark play circle that stays visible on blue / accent-tinted video frames.
+fn paint_video_play_affordance(ui: &egui::Ui, rect: Rect) {
+    if !rect.is_positive() {
+        return;
+    }
+    let play_r = (rect.height() * 0.18).clamp(18.0, 32.0);
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(
+        center,
+        play_r,
+        Color32::from_rgba_unmultiplied(20, 20, 24, 220),
+    );
+    painter.circle_stroke(
+        center,
+        play_r,
+        Stroke::new(1.5_f32, Color32::from_rgb(245, 245, 250)),
+    );
+    let tri_w = play_r * 0.7;
+    let tri_h = play_r * 0.85;
+    let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+    let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+    let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, bot, top],
+        Color32::from_rgb(255, 255, 255),
+        Stroke::NONE,
+    ));
 }
 
 /// Play-card that only opens the URL (fetch/decode failed).
@@ -1716,8 +2109,8 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     let p = &th.palette;
     let sp = &th.spacing;
 
-    let max_w = ui.available_width().min(EMBED_MAX_W).max(120.0);
-    let height = (max_w * 9.0 / 16.0).min(EMBED_MAX_H).max(72.0);
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
     let size = Vec2::new(max_w, height);
     let card_id = ui.id().with("video_fallback").with(id_salt);
 
@@ -1729,20 +2122,7 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter()
                 .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
-            let play_r = (height * 0.18).clamp(16.0, 28.0);
-            let center = rect.center();
-            ui.painter()
-                .circle_filled(center, play_r, p.accent.gamma_multiply(0.92));
-            let tri_w = play_r * 0.7;
-            let tri_h = play_r * 0.85;
-            let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
-            let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
-            let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
-            ui.painter().add(egui::Shape::convex_polygon(
-                vec![tip, bot, top],
-                Color32::from_rgb(255, 255, 255),
-                Stroke::NONE,
-            ));
+            paint_video_play_affordance(ui, rect);
             let name = preview::display_filename(url);
             let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
             let foot = Rect::from_min_max(
@@ -1776,6 +2156,46 @@ fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) 
     if resp.clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+}
+
+/// Clickable full URL under inline image/video embeds (optional caption above).
+fn media_embed_link_footer(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let link_line = url.trim();
+
+    ui.add_space(sp.xs);
+    ui.push_id(id_salt, |ui| {
+        if let Some(caption) = caption.filter(|s| !s.is_empty()) {
+            ui.label(
+                RichText::new(caption)
+                    .size(th.type_scale.caption)
+                    .color(p.text)
+                    .strong(),
+            );
+        }
+        let resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(link_line)
+                        .size(th.type_scale.caption)
+                        .color(p.accent),
+                )
+                .wrap()
+                .sense(Sense::click()),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Open in browser");
+        if resp.clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    });
 }
 
 fn og_link_preview(
@@ -2156,4 +2576,37 @@ pub fn empty_state(ui: &mut egui::Ui, th: &Theme, title: &str, blurb: &str) {
         ui.set_max_width((ui.available_width() - 24.0).max(120.0));
         dim_label(ui, th, blurb);
     });
+}
+
+#[cfg(test)]
+mod embed_image_tests {
+    use super::*;
+
+    #[test]
+    fn tall_image_shrinks_width_instead_of_cropping() {
+        // Phone screenshot aspect — must not fill bubble width at max height.
+        let size = embed_image_display_size(1080, 5000, 360.0, 420.0, 3.0);
+        assert!(
+            size.x < 360.0,
+            "portrait preview should letterbox horizontally: {size:?}"
+        );
+        assert!((size.y - 420.0).abs() < 0.01, "height should hit cap: {size:?}");
+        let aspect = size.x / size.y;
+        let native_aspect = (1080.0 / 3.0) / (5000.0 / 3.0);
+        assert!((aspect - native_aspect).abs() < 0.001, "aspect preserved");
+    }
+
+    #[test]
+    fn wide_image_fills_width() {
+        let size = embed_image_display_size(1600, 900, 360.0, 420.0, 2.0);
+        assert!((size.x - 360.0).abs() < 0.01);
+        assert!(size.y < 420.0);
+    }
+
+    #[test]
+    fn pixels_per_point_does_not_change_aspect() {
+        let a = embed_image_display_size(800, 2400, 320.0, 420.0, 1.0);
+        let b = embed_image_display_size(800, 2400, 320.0, 420.0, 3.0);
+        assert!((a.x / a.y - b.x / b.y).abs() < 0.001);
+    }
 }

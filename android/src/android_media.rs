@@ -47,6 +47,18 @@ pub fn android_app_handle() -> Option<&'static AndroidApp> {
     android_app()
 }
 
+/// App-private directory for `prefs.json` / `session.json` (survives restarts).
+///
+/// The `dirs` crate does not support Android, so auth storage must use the
+/// NativeActivity internal files dir instead of `dirs::config_dir()`.
+pub fn app_storage_dir() -> Option<PathBuf> {
+    let app = android_app()?;
+    let base = app
+        .internal_data_path()
+        .or_else(|| app.external_data_path())?;
+    Some(base.join("sleek"))
+}
+
 /// Load an **application** class (APK `classes.dex`) by binary name.
 ///
 /// `Env::find_class` from a native-created thread (tokio / media worker,

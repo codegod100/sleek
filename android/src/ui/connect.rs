@@ -31,7 +31,7 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 body(ui, th, "Bluesky handle");
                 ui.add_space(sp.xs);
                 handle_field(ui, th, state, loading);
-                if !state.handle_typeahead.open && !state.recent_handles.is_empty() {
+                if !handle_typeahead_dropdown_visible(state) && !state.recent_handles.is_empty() {
                     ui.add_space(sp.xs);
                     let handles = state.recent_handles.clone();
                     history_chips(ui, th, "Recent", &handles, |picked| {
@@ -199,6 +199,12 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
     action
 }
 
+/// True when the Bluesky handle typeahead popover is on screen (loading or results).
+fn handle_typeahead_dropdown_visible(state: &AppState) -> bool {
+    state.handle_typeahead.open
+        && (!state.handle_typeahead.suggestions.is_empty() || state.handle_typeahead.loading)
+}
+
 /// Clickable MRU chips under a connect-form field (recent nicks / handles).
 fn history_chips(
     ui: &mut egui::Ui,
@@ -250,10 +256,13 @@ fn handle_field(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, login_loadi
             .interactive(!login_loading),
     );
 
-    state.handle_typeahead.sync_from_input(&state.form_handle);
+    // Only sync while the user is editing — prefilled handles from prefs should
+    // not open typeahead on cold start and hide the Recent chips.
+    if resp.has_focus() || resp.changed() {
+        state.handle_typeahead.sync_from_input(&state.form_handle);
+    }
 
-    let typeahead_open = state.handle_typeahead.open
-        && (!state.handle_typeahead.suggestions.is_empty() || state.handle_typeahead.loading);
+    let typeahead_open = handle_typeahead_dropdown_visible(state);
 
     if resp.has_focus() && typeahead_open {
         let mut accept = false;
