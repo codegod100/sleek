@@ -151,7 +151,10 @@
         in
         pkgs.runCommand "sleek-src-tree"
           {
-            nativeBuildInputs = [ pkgs.rsync ];
+            nativeBuildInputs = [
+              pkgs.rsync
+              pkgs.patch
+            ];
           }
           ''
             mkdir -p $out/{sleek,vidya,freeq}
@@ -159,6 +162,8 @@
             cp -a ${vidya}/. $out/vidya/
             cp -a ${freeq}/. $out/freeq/
             chmod -R u+w $out
+            # vidya @ 5e9f26c references winit on Android but omits the dep.
+            patch -p1 -d $out/vidya < ${./patches/vidya-android-winit.patch}
             # Drop heavy/irrelevant freeq crates so cargo metadata stays lean
             # (path dep only needs freeq-sdk + its workspace graph).
             rm -rf $out/sleek/{.git,host/target,android/target} 2>/dev/null || true

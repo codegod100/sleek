@@ -46,6 +46,9 @@ sync_input() {
   find "$dest" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
   cp -a "$src/." "$dest/"
   chmod -R u+w "$dest"
+  if [[ "$input" == "vidya" && -f "$ROOT/patches/vidya-android-winit.patch" ]]; then
+  patch -p1 -d "$dest" < "$ROOT/patches/vidya-android-winit.patch"
+  fi
 }
 
 want() {
