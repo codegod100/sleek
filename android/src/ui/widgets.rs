@@ -2418,7 +2418,7 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
                 egui::pos2(
                     full.right() - img_pad,
-                    full.bottom() - img_pad - safe.bottom,
+                    full.bottom() - img_pad - safe.bottom(),
                 ),
             );
 

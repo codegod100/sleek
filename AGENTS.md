@@ -29,13 +29,17 @@ support).
 ### Sibling path dependencies (required for working-tree builds)
 `android/Cargo.toml` uses path deps `../../vidya` and `../../freeq/freeq-sdk`.
 Because the repo root is `/workspace`, those resolve to **`/vidya`** and
-**`/freeq`** (filesystem root). Both are cloned there and persist in the VM
-image. They must track the **latest `main`** of each upstream — the committed
-`flake.lock` pins older revs that are too stale to compile the current sleek
-branch (missing `vidya::escape_label`, `command_shortcut_label`, `lead_trail`,
-etc.). Upstreams: `https://github.com/codegod100/freeq.git` and
-`https://tangled.org/nandi.uk/vidya`. Do not `git pull` them blindly if a build
-is working — the pinned checkout in the image is known-good.
+**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`** as
+`github:codegod100/vidya` and `github:codegod100/freeq`. Materialize siblings
+from the lock with:
+
+```bash
+bash scripts/sync-flake-path-deps.sh
+```
+
+(`scripts/codespace-host.sh` runs this automatically when `nix` is available.)
+Do not `git pull` sibling checkouts blindly — use `nix flake update vidya` (or
+`freeq`) in the sleek repo, then re-sync.
 
 ### Build / lint / test / run (desktop host)
 - Build: `nix develop /workspace --command cargo build --manifest-path host/Cargo.toml`

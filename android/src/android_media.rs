@@ -454,7 +454,7 @@ pub fn measured_system_chrome(ctx: &Context) -> Option<vidya::SystemChrome> {
         }
     }
 
-    Some(vidya::SystemChrome { top, bottom })
+    Some(vidya::SystemChrome::from_insets(top, bottom))
 }
 
 /// Physical-pixel insets from `AndroidApp::content_rect` (may be zero/wrong).
