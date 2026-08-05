@@ -7,7 +7,7 @@ use vidya::{
 };
 
 use crate::clipboard;
-use crate::state::{AppState, ComposeAttach, NickTabComplete};
+use crate::state::{AppState, ComposeAttach, NickTabComplete, ReplyTarget};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
     avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
@@ -522,28 +522,16 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let is_replying = state.replying_to.is_some();
                 if is_replying {
                     if let Some(reply) = state.replying_to.clone() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("Replying to {}", reply.from))
-                                    .size(th.type_scale.caption)
-                                    .color(p.accent)
-                                    .strong(),
-                            );
-                            ui.label(
-                                RichText::new(reply.preview)
-                                    .size(th.type_scale.caption)
-                                    .color(p.text_secondary),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .small_button("Cancel")
-                                    .on_hover_text("Cancel reply (Esc)")
-                                    .clicked()
-                                {
-                                    state.cancel_reply();
-                                }
-                            });
-                        });
+                        let body = reply_body_preview(&reply);
+                        if compose_context_dismiss_bar(
+                            ui,
+                            th,
+                            &format!("Replying to {}", reply.from),
+                            Some(&body),
+                            "Cancel reply (Esc)",
+                        ) {
+                            state.cancel_reply();
+                        }
                         ui.add_space(sp.xs);
                         if state.react_picker_msg.is_none() && consume_escape(ui) {
                             state.cancel_reply();
@@ -551,23 +539,15 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     }
                 }
                 if is_editing {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Editing message")
-                                .size(th.type_scale.caption)
-                                .color(p.accent)
-                                .strong(),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .small_button("Cancel")
-                                .on_hover_text("Cancel edit (Esc)")
-                                .clicked()
-                            {
-                                state.cancel_edit();
-                            }
-                        });
-                    });
+                    if compose_context_dismiss_bar(
+                        ui,
+                        th,
+                        "Editing message",
+                        None,
+                        "Cancel edit (Esc)",
+                    ) {
+                        state.cancel_edit();
+                    }
                     ui.add_space(sp.xs);
                     if state.react_picker_msg.is_none() && consume_escape(ui) {
                         state.cancel_edit();
@@ -791,6 +771,81 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
 /// Media attachment preview + caption/submit row (mirrors the normal compose bar).
 ///
 /// Returns `Some(caption)` when the user submits.
+/// Body line for the reply compose bar (`ReplyTarget::preview` includes the nick).
+fn reply_body_preview(reply: &ReplyTarget) -> String {
+    let prefix = format!("{}: ", reply.from);
+    if reply.preview.starts_with(&prefix) {
+        reply.preview[prefix.len()..].to_string()
+    } else {
+        reply.preview.clone()
+    }
+}
+
+/// Compose-bar context row (reply / edit) with a fixed dismiss control on the right.
+///
+/// Matches the attach composer layout: meta text uses bounded width + truncation so
+/// the ✕ button stays visible on narrow APK screens (a single `horizontal` with
+/// unbounded labels was clipping "Cancel" off the right edge).
+fn compose_context_dismiss_bar(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    title: &str,
+    subtitle: Option<&str>,
+    dismiss_tooltip: &str,
+) -> bool {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let dismiss_w = 32.0_f32;
+    let bar_w = ui.available_width().max(48.0);
+    let meta_w = (bar_w - dismiss_w - sp.xs).max(48.0);
+    let mut dismissed = false;
+
+    ui.horizontal(|ui| {
+        ui.set_width(bar_w);
+        ui.vertical(|ui| {
+            ui.set_width(meta_w);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(title)
+                        .size(th.type_scale.caption)
+                        .color(p.accent)
+                        .strong(),
+                )
+                .truncate(),
+            );
+            if let Some(sub) = subtitle.filter(|s| !s.is_empty()) {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(sub)
+                            .size(th.type_scale.caption)
+                            .color(p.text_secondary),
+                    )
+                    .truncate(),
+                );
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let dismiss = ui
+                .add_sized(
+                    Vec2::splat(28.0),
+                    egui::Button::new(
+                        RichText::new("✕")
+                            .size(14.0)
+                            .color(p.text_secondary),
+                    )
+                    .fill(p.button_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
+                    .corner_radius(sp.radius_sm),
+                )
+                .on_hover_text(dismiss_tooltip)
+                .on_hover_cursor(CursorIcon::PointingHand);
+            dismissed = dismiss.clicked();
+        });
+    });
+
+    dismissed
+}
+
 fn compose_attach_composer(
     ui: &mut egui::Ui,
     th: &Theme,
