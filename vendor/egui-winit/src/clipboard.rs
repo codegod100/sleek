@@ -7,7 +7,9 @@ use raw_window_handle::RawDisplayHandle;
 ///
 /// On Android, register hooks via [`set_android_clipboard_hooks`] so long-press
 /// paste reads the system clipboard (stock egui-winit only keeps in-app text).
-#[cfg(target_os = "android")]
+///
+/// The hook registry is compiled on all targets so host unit tests can cover it;
+/// [`Clipboard::get`] / [`Clipboard::set_text`] only call the hooks on Android.
 mod android_clipboard {
     use std::sync::OnceLock;
 
@@ -27,12 +29,28 @@ mod android_clipboard {
     pub fn set_text(text: &str) -> bool {
         HOOKS.get().is_some_and(|(_, s)| s(text))
     }
+
+    #[cfg(test)]
+    pub fn is_registered() -> bool {
+        HOOKS.get().is_some()
+    }
 }
 
 /// Wire Android system clipboard read/write (call from `android_main` before eframe).
-#[cfg(target_os = "android")]
 pub fn set_android_clipboard_hooks(get: fn() -> Option<String>, set: fn(&str) -> bool) {
     android_clipboard::set(get, set);
+}
+
+/// Prefer non-empty system-clipboard hook text; otherwise keep the in-app fallback.
+///
+/// Empty hook text means "no primary clip" / coerce failed — do not clobber the
+/// in-app buffer with an empty paste.
+#[cfg(any(target_os = "android", test))]
+fn text_from_android_hook_or_fallback(hook: Option<String>, fallback: &str) -> Option<String> {
+    match hook {
+        Some(text) if !text.is_empty() => Some(text),
+        _ => Some(fallback.to_owned()),
+    }
 }
 
 pub struct Clipboard {
@@ -114,13 +132,14 @@ impl Clipboard {
         }
 
         #[cfg(target_os = "android")]
-        if let Some(text) = android_clipboard::get() {
-            if !text.is_empty() {
-                return Some(text);
-            }
+        {
+            text_from_android_hook_or_fallback(android_clipboard::get(), &self.clipboard)
         }
 
-        Some(self.clipboard.clone())
+        #[cfg(not(target_os = "android"))]
+        {
+            Some(self.clipboard.clone())
+        }
     }
 
     pub fn set_text(&mut self, text: String) {
@@ -218,5 +237,78 @@ fn init_smithay_clipboard(
             "Cannot init smithay clipboard: the 'wayland' feature of 'egui-winit' is not enabled"
         );
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static MOCK_CLIP: Mutex<Option<String>> = Mutex::new(None);
+
+    fn mock_get() -> Option<String> {
+        MOCK_CLIP.lock().expect("mock clip lock").clone()
+    }
+
+    fn mock_set(text: &str) -> bool {
+        *MOCK_CLIP.lock().expect("mock clip lock") = Some(text.to_owned());
+        true
+    }
+
+    fn mock_set_fail(_text: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn hook_text_prefers_nonempty_system_clip_over_fallback() {
+        assert_eq!(
+            text_from_android_hook_or_fallback(Some("from-os".into()), "in-app").as_deref(),
+            Some("from-os")
+        );
+        assert_eq!(
+            text_from_android_hook_or_fallback(Some(String::new()), "in-app").as_deref(),
+            Some("in-app")
+        );
+        assert_eq!(
+            text_from_android_hook_or_fallback(None, "in-app").as_deref(),
+            Some("in-app")
+        );
+    }
+
+    #[test]
+    fn android_clipboard_hooks_round_trip() {
+        // Unregistered: paste/copy hooks are inert (stock in-app-only behavior).
+        if !android_clipboard::is_registered() {
+            assert!(android_clipboard::get().is_none());
+            assert!(!android_clipboard::set_text("no-hooks"));
+        }
+
+        set_android_clipboard_hooks(mock_get, mock_set);
+        assert!(android_clipboard::is_registered());
+
+        assert!(android_clipboard::set_text("hold-to-paste"));
+        assert_eq!(android_clipboard::get().as_deref(), Some("hold-to-paste"));
+
+        // Empty primary clip must not win over the in-app fallback buffer.
+        *MOCK_CLIP.lock().expect("mock clip lock") = Some(String::new());
+        assert_eq!(
+            text_from_android_hook_or_fallback(android_clipboard::get(), "fallback").as_deref(),
+            Some("fallback")
+        );
+
+        *MOCK_CLIP.lock().expect("mock clip lock") = Some("system".into());
+        assert_eq!(
+            text_from_android_hook_or_fallback(android_clipboard::get(), "fallback").as_deref(),
+            Some("system")
+        );
+
+        // OnceLock: a later registration must not replace the first hooks.
+        set_android_clipboard_hooks(mock_get, mock_set_fail);
+        assert!(
+            android_clipboard::set_text("still-ok"),
+            "first successful set hook must remain installed"
+        );
+        assert_eq!(android_clipboard::get().as_deref(), Some("still-ok"));
     }
 }

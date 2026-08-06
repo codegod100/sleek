@@ -20,9 +20,10 @@ falls back to X11 — which still works for many image pastes when the composito
 2. **`lib.rs` paste shortcut**: if clipboard text is missing/empty, still push `Event::Key` for
    the paste key so apps can handle Ctrl+V image paste.
 3. **`clipboard.rs` Android hooks**: `set_android_clipboard_hooks` so long-press paste reads the
-   system `ClipboardManager` (stock fallback is in-app text only). Sleek attaches a Cut/Copy/Paste
-   menu on `TextEdit`s (`text_edit_clipboard_menu`) that issues `ViewportCommand::RequestPaste`;
-   without that menu the hooks never run for hold-to-paste.
+   system `ClipboardManager` (stock fallback is in-app text only). Hook registry is compiled on
+   all targets for unit tests; `Clipboard` only invokes it under `target_os = "android"`.
+   Sleek attaches a Cut/Copy/Paste menu on `TextEdit`s (`text_edit_clipboard_menu`) that issues
+   `ViewportCommand::RequestPaste`; without that menu the hooks never run for hold-to-paste.
 4. **`lib.rs` Android back**: map `NamedKey::BrowserBack` (KEYCODE_BACK / gesture back) to
    `Key::Escape`. Upstream egui ≥0.32 adds `Key::BrowserBack` instead; drop this when upgrading.
 
