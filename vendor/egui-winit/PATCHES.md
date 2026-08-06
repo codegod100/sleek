@@ -19,6 +19,8 @@ falls back to X11 — which still works for many image pastes when the composito
    Demote paste miss logs from `error` to `debug` (image-only offers are normal).
 2. **`lib.rs` paste shortcut**: if clipboard text is missing/empty, still push `Event::Key` for
    the paste key so apps can handle Ctrl+V image paste.
+3. **`clipboard.rs` Android hooks**: `set_android_clipboard_hooks` so long-press paste reads the
+   system `ClipboardManager` (stock fallback is in-app text only).
 
 Remove this vendor once upgrading to an egui that ships image paste events
 (https://github.com/emilk/egui/issues/2108) or equivalent.
