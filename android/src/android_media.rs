@@ -2087,7 +2087,7 @@ pub fn clipboard_set_text(text: &str) -> bool {
     if text.is_empty() {
         return true;
     }
-    with_activity_jni(|env, _activity| {
+    with_activity_jni(|env, activity| {
         use jni::objects::JValue;
         use jni::{jni_sig, jni_str};
 
