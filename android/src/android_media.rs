@@ -2087,7 +2087,7 @@ pub fn clipboard_set_text(text: &str) -> bool {
     if text.is_empty() {
         return true;
     }
-    with_activity_jni(|env, _activity| {
+    with_activity_jni(|env, activity| {
         use jni::objects::JValue;
         use jni::{jni_sig, jni_str};
 
@@ -2163,11 +2163,10 @@ where
 
     // SAFETY: vm comes from the live AndroidApp for this process.
     let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
-    vm.attach_current_thread(|env| -> Result<T, String> {
+    vm.attach_current_thread(|env| -> jni::errors::Result<Result<T, String>> {
         // SAFETY: activity is a global ref owned by the Android runtime.
-        let activity =
-            unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr).map_err(|e| format!("{e}"))? };
-        f(env, &activity)
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+        Ok(f(env, &activity))
     })
     .map_err(|e| format!("{e}"))?
 }
