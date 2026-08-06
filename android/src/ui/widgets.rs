@@ -8,7 +8,7 @@ use vidya::{
     dim_label, icon_colored, paint_emoji_in, paint_icon_in, system_chrome, title_2, Icon, Theme,
 };
 
-use crate::preview::{self, Embed, UrlSpan};
+use crate::preview::{self, Embed, MessageLinkSpan};
 use crate::state::{
     display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
     ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
@@ -34,6 +34,8 @@ pub enum MessageBubbleAction {
     Reply { msgid: String },
     /// Soft-delete this message (`+draft/delete`).
     Delete { msgid: String },
+    /// Open / join an IRC channel mentioned in the message body.
+    OpenChannel { channel: String },
 }
 
 /// Card frame filling parent width.
@@ -1140,7 +1142,7 @@ pub fn message_bubble(
             let mut body_resp = None;
             let mut galley = None;
             let mut galley_origin = egui::Pos2::ZERO;
-            let mut url_spans = Vec::new();
+            let mut link_spans = Vec::new();
             if let MessageBodyLine::Skip = body_line {
                 // URL-only link — OG card below carries the content.
             } else {
@@ -1149,17 +1151,17 @@ pub fn message_bubble(
                     MessageBodyLine::Cleared => ("[message cleared]", true),
                     MessageBodyLine::Skip => unreachable!(),
                 };
-                url_spans = preview::extract_url_spans(visible);
+                link_spans = preview::extract_message_link_spans(visible);
                 let (resp, laid_out, origin) =
-                    render_message_body(ui, th, visible, cleared, inner_w, &url_spans);
+                    render_message_body(ui, th, visible, cleared, inner_w, &link_spans);
                 body_long_touched = resp.long_touched();
                 galley_origin = origin;
                 galley = laid_out;
                 body_resp = Some(resp);
             }
-            let hovered_url = body_resp.as_ref().and_then(|body_resp| {
+            let hovered_link = body_resp.as_ref().and_then(|body_resp| {
                 body_resp.hover_pos().and_then(|pos| {
-                    url_at_galley_pos(
+                    link_at_galley_pos(
                         galley.as_ref()?,
                         galley_origin,
                         match &body_line {
@@ -1167,14 +1169,17 @@ pub fn message_bubble(
                             MessageBodyLine::Cleared => "[message cleared]",
                             MessageBodyLine::Skip => return None,
                         },
-                        &url_spans,
+                        &link_spans,
                         pos,
                     )
                 })
             });
             if let Some(mut body_resp) = body_resp {
-                let tip = if let Some(url) = hovered_url.as_deref() {
-                    url.to_string()
+                let tip = if let Some(link) = hovered_link.as_ref() {
+                    match link {
+                        MessageLinkTarget::Url(url) => url.clone(),
+                        MessageLinkTarget::Channel(ch) => format!("Open {ch}"),
+                    }
                 } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
                     if can_edit || can_delete {
                         "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
@@ -1194,7 +1199,7 @@ pub fn message_bubble(
                     String::new()
                 };
                 body_resp = body_resp.on_hover_text(tip);
-                if hovered_url.is_some() {
+                if hovered_link.is_some() {
                     body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
                 }
                 let mut opened_link = false;
@@ -1207,10 +1212,17 @@ pub fn message_bubble(
                             MessageBodyLine::Cleared => "[message cleared]",
                             MessageBodyLine::Skip => "",
                         };
-                        if let Some(url) =
-                            url_at_galley_pos(galley, galley_origin, visible, &url_spans, pos)
+                        if let Some(link) =
+                            link_at_galley_pos(galley, galley_origin, visible, &link_spans, pos)
                         {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            match link {
+                                MessageLinkTarget::Url(url) => {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                }
+                                MessageLinkTarget::Channel(channel) => {
+                                    action = MessageBubbleAction::OpenChannel { channel };
+                                }
+                            }
                             opened_link = true;
                         }
                     }
@@ -1795,10 +1807,10 @@ fn render_message_body(
     visible: &str,
     cleared: bool,
     wrap_w: f32,
-    url_spans: &[UrlSpan],
+    link_spans: &[MessageLinkSpan],
 ) -> (egui::Response, Option<std::sync::Arc<egui::Galley>>, egui::Pos2) {
     let p = &th.palette;
-    if url_spans.is_empty() {
+    if link_spans.is_empty() {
         let resp = if cleared {
             ui.add(
                 egui::Label::new(
@@ -1823,7 +1835,7 @@ fn render_message_body(
         return (resp, None, origin);
     }
 
-    let mut job = linkify_layout_job(visible, url_spans, th);
+    let mut job = linkify_layout_job(visible, link_spans, th);
     if cleared {
         if let Some(section) = job.sections.first_mut() {
             section.format.color = p.text_secondary;
@@ -1841,8 +1853,8 @@ fn render_message_body(
     (resp, Some(galley), origin)
 }
 
-/// LayoutJob with http(s) spans styled as accent underlines.
-fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
+/// LayoutJob with http(s) and channel spans styled as accent underlines.
+fn linkify_layout_job(text: &str, spans: &[MessageLinkSpan], th: &Theme) -> LayoutJob {
     let p = &th.palette;
     let size = th.type_scale.body;
     let base = TextFormat {
@@ -1865,12 +1877,13 @@ fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
 
     let mut cursor = 0usize;
     for span in spans {
-        if span.start > cursor && span.start <= text.len() {
-            job.append(&text[cursor..span.start], 0.0, base.clone());
+        let start = span.start();
+        if start > cursor && start <= text.len() {
+            job.append(&text[cursor..start], 0.0, base.clone());
         }
-        let end = span.end.min(text.len());
-        if span.start < end {
-            job.append(&text[span.start..end], 0.0, link.clone());
+        let end = span.end().min(text.len());
+        if start < end {
+            job.append(&text[start..end], 0.0, link.clone());
         }
         cursor = end;
     }
@@ -1882,14 +1895,21 @@ fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
     job
 }
 
-/// URL under a pointer position within a laid-out message body galley, if any.
-fn url_at_galley_pos(
+/// Click target under a pointer position within a laid-out message body galley.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MessageLinkTarget {
+    Url(String),
+    Channel(String),
+}
+
+/// URL or channel under a pointer position within a laid-out message body galley.
+fn link_at_galley_pos(
     galley: &egui::Galley,
     galley_origin: egui::Pos2,
     text: &str,
-    spans: &[UrlSpan],
+    spans: &[MessageLinkSpan],
     pos: egui::Pos2,
-) -> Option<String> {
+) -> Option<MessageLinkTarget> {
     if spans.is_empty() {
         return None;
     }
@@ -1901,17 +1921,19 @@ fn url_at_galley_pos(
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(text.len());
-    spans
+    let hit = spans
         .iter()
-        .find(|s| byte_idx >= s.start && byte_idx < s.end)
+        .find(|s| byte_idx >= s.start() && byte_idx < s.end())
         .or_else(|| {
-            // Cursor often lands just after the last glyph of a link.
             let prev = byte_idx.saturating_sub(1);
             spans
                 .iter()
-                .find(|s| byte_idx == s.end && prev >= s.start && prev < s.end)
-        })
-        .map(|s| s.url.clone())
+                .find(|s| byte_idx == s.end() && prev >= s.start() && prev < s.end())
+        });
+    hit.map(|s| match s {
+        MessageLinkSpan::Url(u) => MessageLinkTarget::Url(u.url.clone()),
+        MessageLinkSpan::Channel(c) => MessageLinkTarget::Channel(c.channel.clone()),
+    })
 }
 
 /// Inline chat image. Returns `true` when the user taps to open the lightbox.

@@ -76,6 +76,39 @@ pub struct UrlSpan {
     pub url: String,
 }
 
+/// An IRC channel name (`#foo` / `&bar`) found in free-form text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSpan {
+    /// Inclusive start byte index in the source text.
+    pub start: usize,
+    /// Exclusive end byte index.
+    pub end: usize,
+    pub channel: String,
+}
+
+/// Clickable span in a chat message body (URL or channel mention).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageLinkSpan {
+    Url(UrlSpan),
+    Channel(ChannelSpan),
+}
+
+impl MessageLinkSpan {
+    pub fn start(&self) -> usize {
+        match self {
+            Self::Url(s) => s.start,
+            Self::Channel(s) => s.start,
+        }
+    }
+
+    pub fn end(&self) -> usize {
+        match self {
+            Self::Url(s) => s.end,
+            Self::Channel(s) => s.end,
+        }
+    }
+}
+
 /// Pull http(s) URLs from free-form text (stops at whitespace / common trailers).
 pub fn extract_urls(text: &str) -> Vec<String> {
     extract_url_spans(text).into_iter().map(|s| s.url).collect()
@@ -119,6 +152,99 @@ pub fn extract_url_spans(text: &str) -> Vec<UrlSpan> {
         }
         i = start + end_rel.max(1);
     }
+    out
+}
+
+fn in_url_span(pos: usize, url_spans: &[UrlSpan]) -> bool {
+    url_spans
+        .iter()
+        .any(|s| pos >= s.start && pos < s.end)
+}
+
+/// True when `prefix` (`#` or `&`) should not start a channel link at `start`.
+fn channel_prefix_blocked(text: &str, start: usize, prefix: char) -> bool {
+    if start == 0 {
+        return false;
+    }
+    let prev = text[..start].chars().last().unwrap_or('\0');
+    if prev.is_ascii_alphanumeric() || prev == '_' {
+        return true;
+    }
+    match prefix {
+        '#' => prev == '/' || prev == '#',
+        '&' => prev == '/' || prev == '&',
+        _ => true,
+    }
+}
+
+fn channel_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+/// Like [`extract_url_spans`], but for `#channel` / `&channel` mentions.
+///
+/// Skips spans that overlap `url_spans` and matches freeq-app's conservative
+/// channel token rules (no `.` hoovered from trailing sentence punctuation).
+pub fn extract_channel_spans(text: &str, url_spans: &[UrlSpan]) -> Vec<ChannelSpan> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        if in_url_span(i, url_spans) {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        let rel = rest.find(['#', '&']);
+        let Some(rel) = rel else { break };
+        let start = i + rel;
+        let prefix = text[start..].chars().next().unwrap_or('#');
+        if channel_prefix_blocked(text, start, prefix) {
+            i = start + 1;
+            continue;
+        }
+        let mut end = start + prefix.len_utf8();
+        while let Some(c) = text[end..].chars().next() {
+            if !channel_name_char(c) {
+                break;
+            }
+            end += c.len_utf8();
+        }
+        while end > start + prefix.len_utf8() {
+            let last = text[..end].chars().last().unwrap_or('\0');
+            if matches!(last, '.' | ',' | ';' | ')' | ']' | '}' | '!' | '?' | ':') {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end > start + prefix.len_utf8() {
+            out.push(ChannelSpan {
+                start,
+                end,
+                channel: text[start..end].to_string(),
+            });
+            i = end;
+        } else {
+            i = start + 1;
+        }
+    }
+    out
+}
+
+/// Combined URL + channel spans for linkifying chat message bodies.
+pub fn extract_message_link_spans(text: &str) -> Vec<MessageLinkSpan> {
+    let url_spans = extract_url_spans(text);
+    let mut out: Vec<MessageLinkSpan> = url_spans
+        .iter()
+        .cloned()
+        .map(MessageLinkSpan::Url)
+        .chain(
+            extract_channel_spans(text, &url_spans)
+                .into_iter()
+                .map(MessageLinkSpan::Channel),
+        )
+        .collect();
+    out.sort_by_key(|s| s.start());
     out
 }
 
@@ -331,6 +457,42 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(&text[spans[0].start..spans[0].end], spans[0].url);
         assert_eq!(spans[0].url, "https://example.com/a.png");
+    }
+
+    #[test]
+    fn extract_channel_spans_basic() {
+        let text = "join us in #general and #test-room";
+        let urls = extract_url_spans(text);
+        let spans = extract_channel_spans(text, &urls);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].channel, "#general");
+        assert_eq!(spans[1].channel, "#test-room");
+    }
+
+    #[test]
+    fn extract_channel_spans_skips_urls_and_inline_hashes() {
+        let text = "see https://ex.com/x#anchor and foo#bar but #real";
+        let urls = extract_url_spans(text);
+        let spans = extract_channel_spans(text, &urls);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].channel, "#real");
+    }
+
+    #[test]
+    fn extract_channel_spans_strips_trailing_punct() {
+        let text = "try #freeq-dev.";
+        let spans = extract_channel_spans(text, &[]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].channel, "#freeq-dev");
+    }
+
+    #[test]
+    fn extract_message_link_spans_merges_urls_and_channels() {
+        let text = "see #general or https://example.com";
+        let spans = extract_message_link_spans(text);
+        assert_eq!(spans.len(), 2);
+        assert!(matches!(&spans[0], MessageLinkSpan::Channel(c) if c.channel == "#general"));
+        assert!(matches!(&spans[1], MessageLinkSpan::Url(u) if u.url == "https://example.com"));
     }
 
     #[test]
