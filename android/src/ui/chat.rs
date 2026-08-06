@@ -54,6 +54,8 @@ pub enum ChatAction {
     },
     /// Soft-delete a message (`+draft/delete`).
     Delete { target: String, msgid: String },
+    /// Open / join an IRC channel mentioned in a message.
+    OpenChannel(String),
     /// Open the channel policy join-gate modal.
     OpenPolicyGate(String),
 }
@@ -101,6 +103,9 @@ fn apply_message_bubble_action(
                 target: channel.to_string(),
                 msgid,
             };
+        }
+        MessageBubbleAction::OpenChannel { channel } => {
+            *action = ChatAction::OpenChannel(channel);
         }
     }
 }
