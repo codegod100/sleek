@@ -20,6 +20,8 @@ pub use winit;
 pub mod clipboard;
 mod window_settings;
 
+pub use clipboard::set_android_clipboard_hooks;
+
 pub use window_settings::WindowSettings;
 
 use ahash::HashSet;

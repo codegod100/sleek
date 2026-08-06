@@ -134,6 +134,9 @@ eframe = { version = "0.31", default-features = false, features = [
     "glow",
     "android-native-activity",
 ] }
+egui-winit = { path = "../vendor/egui-winit", default-features = false, features = [
+    "android-native-activity",
+] }
 android_logger = "0.14"
 winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
 # Same major as android-activity — runtime permission prompts for image attach.
