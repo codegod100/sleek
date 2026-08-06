@@ -2702,6 +2702,21 @@ impl eframe::App for SleekApp {
                     ChatAction::Part(channel) => {
                         self.do_part(channel);
                     }
+                    ChatAction::OpenChannel(channel) => {
+                        let ch = AppState::normalize_channel(&channel);
+                        if !ch.is_empty() {
+                            if self
+                                .state
+                                .channels
+                                .get(&ch)
+                                .is_some_and(|b| b.is_joined())
+                            {
+                                self.state.open_chat(&ch);
+                            } else {
+                                self.do_join(ch);
+                            }
+                        }
+                    }
                     ChatAction::OpenDm(nick) => {
                         let key = self.state.dm_buffer_key(&nick);
                         let need_history = self
