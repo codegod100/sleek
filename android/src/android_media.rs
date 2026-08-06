@@ -1967,3 +1967,207 @@ pub fn take_pending_deep_link() -> Option<String> {
         }
     }
 }
+
+/// Read plain text from the Android system clipboard (for long-press paste in egui).
+pub fn clipboard_get_text() -> Option<String> {
+    with_activity_jni(|env, activity| {
+        use jni::objects::{JString, JValue};
+        use jni::{jni_sig, jni_str};
+
+        let svc = env.new_string("clipboard").map_err(|e| format!("{e}"))?;
+        let mgr = env
+            .call_method(
+                activity,
+                jni_str!("getSystemService"),
+                jni_sig!((java.lang.String) -> java.lang.Object),
+                &[JValue::Object(svc.as_ref())],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if mgr.is_null() {
+            return Ok(None);
+        }
+
+        let has = env
+            .call_method(
+                &mgr,
+                jni_str!("hasPrimaryClip"),
+                jni_sig!(() -> boolean),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .z()
+            .map_err(|e| format!("{e}"))?;
+        if !has {
+            return Ok(None);
+        }
+
+        let clip = env
+            .call_method(
+                &mgr,
+                jni_str!("getPrimaryClip"),
+                jni_sig!(() -> android.content.ClipData),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if clip.is_null() {
+            return Ok(None);
+        }
+
+        let count = env
+            .call_method(&clip, jni_str!("getItemCount"), jni_sig!(() -> jint), &[])
+            .map_err(|e| format!("{e}"))?
+            .i()
+            .map_err(|e| format!("{e}"))?;
+        if count <= 0 {
+            return Ok(None);
+        }
+
+        let item = env
+            .call_method(
+                &clip,
+                jni_str!("getItemAt"),
+                jni_sig!((jint) -> android.content.ClipData::Item),
+                &[JValue::Int(0)],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if item.is_null() {
+            return Ok(None);
+        }
+
+        let seq = env
+            .call_method(
+                &item,
+                jni_str!("coerceToText"),
+                jni_sig!((android.content.Context) -> java.lang.CharSequence),
+                &[JValue::Object(activity)],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if seq.is_null() {
+            return Ok(None);
+        }
+
+        let jstr = env
+            .call_method(
+                &seq,
+                jni_str!("toString"),
+                jni_sig!(() -> java.lang.String),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if jstr.is_null() {
+            return Ok(None);
+        }
+
+        let js = env
+            .cast_local::<JString>(jstr)
+            .map_err(|e| format!("{e}"))?;
+        let text = format!("{js}");
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    })
+    .ok()
+    .flatten()
+}
+
+/// Write plain text to the Android system clipboard (copy/cut from egui).
+pub fn clipboard_set_text(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    with_activity_jni(|env, _activity| {
+        use jni::objects::JValue;
+        use jni::{jni_sig, jni_str};
+
+        let svc = env.new_string("clipboard").map_err(|e| format!("{e}"))?;
+        let mgr = env
+            .call_method(
+                activity,
+                jni_str!("getSystemService"),
+                jni_sig!((java.lang.String) -> java.lang.Object),
+                &[JValue::Object(svc.as_ref())],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if mgr.is_null() {
+            return Err("ClipboardManager missing".into());
+        }
+
+        let clip_data = env
+            .find_class(jni_str!("android/content/ClipData"))
+            .map_err(|e| format!("{e}"))?;
+        let label = env.new_string("text").map_err(|e| format!("{e}"))?;
+        let payload = env.new_string(text).map_err(|e| format!("{e}"))?;
+        let clip = env
+            .call_static_method(
+                &clip_data,
+                jni_str!("newPlainText"),
+                jni_sig!(
+                    (java.lang.CharSequence, java.lang.CharSequence) -> android.content.ClipData
+                ),
+                &[
+                    JValue::Object(label.as_ref()),
+                    JValue::Object(payload.as_ref()),
+                ],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if clip.is_null() {
+            return Err("ClipData.newPlainText returned null".into());
+        }
+
+        env.call_method(
+            &mgr,
+            jni_str!("setPrimaryClip"),
+            jni_sig!((android.content.ClipData)),
+            &[JValue::Object(&clip)],
+        )
+        .map_err(|e| format!("{e}"))?;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Run a JNI closure with the stored Activity (egui / worker threads).
+fn with_activity_jni<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut jni::Env<'_>, &jni::objects::JObject<'_>) -> Result<T, String>,
+{
+    let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return Err("null JavaVM".into());
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return Err("null Activity".into());
+    }
+
+    use jni::objects::JObject;
+    use jni::refs::Global;
+    use jni::JavaVM;
+
+    // SAFETY: vm comes from the live AndroidApp for this process.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+    vm.attach_current_thread(|env| -> Result<T, String> {
+        // SAFETY: activity is a global ref owned by the Android runtime.
+        let activity =
+            unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr).map_err(|e| format!("{e}"))? };
+        f(env, &activity)
+    })
+    .map_err(|e| format!("{e}"))?
+}

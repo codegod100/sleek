@@ -20,6 +20,9 @@ pub use winit;
 pub mod clipboard;
 mod window_settings;
 
+#[cfg(target_os = "android")]
+pub use clipboard::set_android_clipboard_hooks;
+
 pub use window_settings::WindowSettings;
 
 use ahash::HashSet;

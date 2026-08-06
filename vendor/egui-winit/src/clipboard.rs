@@ -4,6 +4,37 @@ use raw_window_handle::RawDisplayHandle;
 ///
 /// If the "clipboard" feature is off, or we cannot connect to the OS clipboard,
 /// then a fallback clipboard that just works within the same app is used instead.
+///
+/// On Android, register hooks via [`set_android_clipboard_hooks`] so long-press
+/// paste reads the system clipboard (stock egui-winit only keeps in-app text).
+#[cfg(target_os = "android")]
+mod android_clipboard {
+    use std::sync::OnceLock;
+
+    type GetFn = fn() -> Option<String>;
+    type SetFn = fn(&str) -> bool;
+
+    static HOOKS: OnceLock<(GetFn, SetFn)> = OnceLock::new();
+
+    pub fn set(get: GetFn, set: SetFn) {
+        let _ = HOOKS.set((get, set));
+    }
+
+    pub fn get() -> Option<String> {
+        HOOKS.get().and_then(|(g, _)| g())
+    }
+
+    pub fn set_text(text: &str) -> bool {
+        HOOKS.get().is_some_and(|(_, s)| s(text))
+    }
+}
+
+/// Wire Android system clipboard read/write (call from `android_main` before eframe).
+#[cfg(target_os = "android")]
+pub fn set_android_clipboard_hooks(get: fn() -> Option<String>, set: fn(&str) -> bool) {
+    android_clipboard::set(get, set);
+}
+
 pub struct Clipboard {
     #[cfg(all(feature = "arboard", not(target_os = "android")))]
     arboard: Option<arboard::Clipboard>,
@@ -82,6 +113,13 @@ impl Clipboard {
             };
         }
 
+        #[cfg(target_os = "android")]
+        if let Some(text) = android_clipboard::get() {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+
         Some(self.clipboard.clone())
     }
 
@@ -103,9 +141,15 @@ impl Clipboard {
 
         #[cfg(all(feature = "arboard", not(target_os = "android")))]
         if let Some(clipboard) = &mut self.arboard {
-            if let Err(err) = clipboard.set_text(text) {
+            if let Err(err) = clipboard.set_text(text.clone()) {
                 log::error!("arboard copy/cut error: {err}");
             }
+            return;
+        }
+
+        #[cfg(target_os = "android")]
+        if android_clipboard::set_text(&text) {
+            self.clipboard = text;
             return;
         }
 

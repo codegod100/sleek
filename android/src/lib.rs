@@ -57,6 +57,10 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
     );
     // Clone for eframe; keep a handle for storage paths + runtime permissions.
     android_media::set_android_app(android_app.clone());
+    egui_winit::set_android_clipboard_hooks(
+        android_media::clipboard_get_text,
+        android_media::clipboard_set_text,
+    );
     log::info!("sleek android_main start");
     match run_android(android_app) {
         Ok(()) => log::info!("sleek run_android returned Ok"),
