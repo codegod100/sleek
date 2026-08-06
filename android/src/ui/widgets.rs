@@ -1856,7 +1856,7 @@ fn render_message_body(
     );
     let origin = resp.rect.min;
     // Pre-layout galley at the bubble's inner width for URL tap hit-testing.
-    let mut hit_job = linkify_layout_job(visible, url_spans, th);
+    let mut hit_job = linkify_layout_job(visible, link_spans, th);
     if cleared {
         if let Some(section) = hit_job.sections.first_mut() {
             section.format.color = p.text_secondary;
