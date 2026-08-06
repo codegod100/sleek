@@ -330,10 +330,13 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
         // `ChatMessage::preview()` already prefixes the sender nick.
-        ui.label(
-            RichText::new(parent.preview())
-                .size(th.type_scale.caption)
-                .color(p.text_secondary),
+        ui.add(
+            egui::Label::new(
+                RichText::new(parent.preview())
+                    .size(th.type_scale.caption)
+                    .color(p.text_secondary),
+            )
+            .wrap(),
         );
     });
     ui.add_space(sp.xs);
@@ -1086,13 +1089,15 @@ pub fn message_bubble(
     if swipe_offset > 0.0 {
         ui.add_space(swipe_offset);
     }
-    let inner_w = ui.available_width().max(1.0);
     let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
+            // Use the frame's inner width only — outer width overflows margins and
+            // clips wrapped text on narrow APK screens (same as compose bar).
+            let inner_w = ui.available_width().max(1.0);
             ui.set_max_width(inner_w);
             ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
@@ -1788,7 +1793,8 @@ fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
 }
 
 /// Render a message body line. Plain text uses `RichText` (reliable on GLES);
-/// linkified bodies use a pre-built galley with selection disabled.
+/// linkified bodies use `Label::wrap()` (same as search hits) with a separate
+/// galley for URL hit-testing.
 fn render_message_body(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -1830,14 +1836,23 @@ fn render_message_body(
             section.format.italics = true;
         }
     }
-    job.wrap.max_width = wrap_w;
-    let galley = ui.fonts(|f| f.layout_job(job));
     let resp = ui.add(
-        egui::Label::new(egui::WidgetText::Galley(galley.clone()))
+        egui::Label::new(job)
+            .wrap()
             .sense(Sense::click())
             .selectable(false),
     );
     let origin = resp.rect.min;
+    // Pre-layout galley at the bubble's inner width for URL tap hit-testing.
+    let mut hit_job = linkify_layout_job(visible, url_spans, th);
+    if cleared {
+        if let Some(section) = hit_job.sections.first_mut() {
+            section.format.color = p.text_secondary;
+            section.format.italics = true;
+        }
+    }
+    hit_job.wrap.max_width = wrap_w;
+    let galley = ui.fonts(|f| f.layout_job(hit_job));
     (resp, Some(galley), origin)
 }
 
