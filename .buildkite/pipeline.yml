@@ -10,8 +10,12 @@
 #   - NIXBUILD_TOKEN (preferred) — soft-loaded; skip artifacts if missing
 #   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
+# Pipeline: https://buildkite.com/nandi/sleek
 #
-# Agents must reach github.com/codegod100/{sleek,freeq} and tangled.org/nandi.uk/vidya.
+# Path deps (android/Cargo.toml → ../../vidya, ../../freeq/freeq-sdk) must match
+# flake.lock pins from github:codegod100/{vidya,freeq}. Do not clone tangled tip.
+#
+# Agents must reach github.com/codegod100/{sleek,vidya,freeq}.
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
 
@@ -27,16 +31,50 @@ steps:
     command: |
       set -euo pipefail
 
-      # Path deps: vidya + freeq live next to this checkout.
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          jq git patch \
+          libxkbcommon-dev libxkbcommon-x11-dev \
+          libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+          libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
+          libclang-dev pkg-config libssl-dev cmake g++
+      fi
+      command -v jq >/dev/null 2>&1 || {
+        echo "jq required to read flake.lock path-dep pins" >&2
+        exit 1
+      }
+
+      # Path deps: pin to flake.lock revs (github:codegod100/{vidya,freeq}).
       parent="$$(dirname "$$PWD")"
       vidya_dir="$$parent/vidya"
       freeq_dir="$$parent/freeq"
-      if [[ ! -d "$$vidya_dir/.git" && ! -f "$$vidya_dir/Cargo.toml" ]]; then
-        git clone --depth 1 https://tangled.org/nandi.uk/vidya "$$vidya_dir"
+      vidya_rev="$$(jq -r '.nodes.vidya.locked.rev // empty' flake.lock)"
+      freeq_rev="$$(jq -r '.nodes.freeq.locked.rev // empty' flake.lock)"
+      [[ -n "$$vidya_rev" ]] || { echo "vidya rev missing from flake.lock" >&2; exit 1; }
+      [[ -n "$$freeq_rev" ]] || { echo "freeq rev missing from flake.lock" >&2; exit 1; }
+
+      clone_pinned() {
+        local url="$$1" dest="$$2" rev="$$3"
+        echo "--- :git: $$url @ $${rev:0:7} → $$dest"
+        rm -rf "$$dest"
+        mkdir -p "$$dest"
+        git -C "$$dest" init
+        git -C "$$dest" remote add origin "$$url"
+        git -C "$$dest" fetch --depth 1 origin "$$rev"
+        git -C "$$dest" checkout --detach FETCH_HEAD
+      }
+
+      clone_pinned https://github.com/codegod100/vidya "$$vidya_dir" "$$vidya_rev"
+      if [[ -f patches/vidya-android-winit.patch ]]; then
+        patch -p1 -d "$$vidya_dir" < patches/vidya-android-winit.patch
       fi
-      if [[ ! -d "$$freeq_dir/.git" && ! -f "$$freeq_dir/freeq-sdk/Cargo.toml" ]]; then
-        git clone --depth 1 https://github.com/codegod100/freeq.git "$$freeq_dir"
-      fi
+      clone_pinned https://github.com/codegod100/freeq "$$freeq_dir" "$$freeq_rev"
+      [[ -f "$$vidya_dir/Cargo.toml" ]] || { echo "vidya Cargo.toml missing" >&2; exit 1; }
+      [[ -f "$$freeq_dir/freeq-sdk/Cargo.toml" ]] || {
+        echo "freeq-sdk Cargo.toml missing" >&2
+        exit 1
+      }
 
       if ! command -v rustup >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -46,15 +84,6 @@ steps:
       fi
       rustup toolchain install 1.85 --profile minimal --component clippy
       rustup default 1.85
-
-      if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo apt-get install -y \
-          libxkbcommon-dev libxkbcommon-x11-dev \
-          libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
-          libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
-          libclang-dev pkg-config
-      fi
 
       cargo clippy --manifest-path host/Cargo.toml -- -D warnings
       cargo test --manifest-path android/Cargo.toml --lib
@@ -75,6 +104,7 @@ steps:
       if [[ "$${SKIP:-1}" == "1" ]]; then
         echo "--- :warning: Skipping nixbuild artifacts (no nixbuild credentials)"
         echo "Check step still ran; add NIXBUILD_TOKEN on the Default cluster to build APK/Flatpak."
+        echo "Scope the secret to pipeline_slug sleek (see cluster Secrets UI)."
         exit 0
       fi
       # shellcheck disable=SC1090
