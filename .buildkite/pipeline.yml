@@ -15,6 +15,9 @@
 # Path deps (android/Cargo.toml → ../../vidya, ../../freeq/freeq-sdk) must match
 # flake.lock pins from github:codegod100/{vidya,freeq}. Do not clone tangled tip.
 #
+# Check runs in `nix develop` so mold + egui/pipewire libs + rustc come from the
+# flake (same as local AGENTS.md), not apt/rustup.
+#
 # Agents must reach github.com/codegod100/{sleek,vidya,freeq}.
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
@@ -28,32 +31,16 @@ env:
 steps:
   - label: ":rust: Check"
     key: check
+    timeout_in_minutes: 120
     command: |
       set -euo pipefail
 
       if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          jq git patch binutils build-essential \
-          libxkbcommon-dev libxkbcommon-x11-dev \
-          libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
-          libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
-          libclang-dev pkg-config libssl-dev cmake g++
-        # .cargo/config.toml requests -fuse-ld=mold; jammy may lack the package.
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mold \
-          || echo "mold package unavailable — will clear mold rustflags"
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq git patch curl ca-certificates
       fi
       command -v jq >/dev/null 2>&1 || {
         echo "jq required to read flake.lock path-dep pins" >&2
-        exit 1
-      }
-      if ! command -v mold >/dev/null 2>&1; then
-        echo "--- :warning: mold missing; override .cargo mold rustflags to use system ld"
-        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=""
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=""
-      fi
-      command -v ld >/dev/null 2>&1 || {
-        echo "system linker (ld) missing after binutils install" >&2
         exit 1
       }
 
@@ -88,20 +75,36 @@ steps:
         exit 1
       }
 
-      # Match flake.nix rust-overlay `stable.latest` (deps need ≥1.91; 1.85 is too old).
-      if ! command -v rustup >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-          | sh -s -- -y --default-toolchain stable
+      # Nix + flake shell: mold (.cargo/config.toml), rustc, libclang, pipewire, …
+      if ! command -v nix >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf -L \
+          https://install.determinate.systems/nix \
+          | sh -s -- install linux --no-confirm --init none
         # shellcheck disable=SC1091
-        source "$$HOME/.cargo/env"
+        . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh || true
+        export PATH="/nix/var/nix/profiles/default/bin:$$PATH"
       fi
-      rustup toolchain install stable --profile minimal --component clippy
-      rustup default stable
-      rustc --version
-      cargo --version
+      command -v nix >/dev/null 2>&1 || {
+        echo "nix not on PATH after install" >&2
+        exit 1
+      }
+      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+        sudo /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon-check.log 2>&1 &
+        for _ in $$(seq 1 30); do
+          [[ -S /nix/var/nix/daemon-socket/socket ]] && break
+          sleep 1
+        done
+      fi
 
-      cargo clippy --manifest-path host/Cargo.toml -- -D warnings
-      cargo test --manifest-path android/Cargo.toml --lib
+      echo "--- :nix: develop (mold + rustc from flake)"
+      nix develop --command bash -lc '
+        set -euo pipefail
+        command -v mold >/dev/null
+        rustc --version
+        cargo --version
+        cargo clippy --manifest-path host/Cargo.toml -- -D warnings
+        cargo test --manifest-path android/Cargo.toml --lib
+      '
 
   - label: ":android: APK + Flatpak (nixbuild.net)"
     key: artifacts

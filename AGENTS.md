@@ -85,7 +85,8 @@ Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
 and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
 `baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check clones flake.lock–
-pinned `vidya`/`freeq` from GitHub (not tangled tip).
+pinned `vidya`/`freeq` from GitHub and runs `cargo` inside `nix develop`
+(mold + libs from the flake, not apt).
 
 ```bash
 eval "$(./scripts/configure-buildkite-from-openbao.sh)"

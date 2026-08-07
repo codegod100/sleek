@@ -18,10 +18,9 @@ check (cargo clippy + test)
   fetch of the locked SHA). Do not use floating tangled.org tips — they lag and
   can miss features (e.g. sleek needs vidya `video`).
 - Apply repo patches (e.g. `patches/vidya-android-winit.patch`) when present.
-- Install rustup **stable** (+ clippy) when absent — match flake
-  `rust-bin.stable.latest` (baogui historically used 1.85; bump when deps
-  raise MSRV).
-- Install egui system libs via apt when available.
+- Prefer **`nix develop --command …`** so mold (`.cargo/config.toml`), rustc,
+  and native libs come from the flake — same as local AGENTS.md. Avoid apt
+  mold / rustup when the flake already provides them.
 - `cargo clippy -- -D warnings` then `cargo test`.
 
 ## Flatpak step essentials
