@@ -19,6 +19,7 @@ pub use settings::{settings_tab, SettingsAction};
 // Widget helpers are used from screens via `widgets::` or direct calls as needed.
 #[allow(unused_imports)]
 pub use widgets::{
-    avatar_circle, card, conversation_row, image_lightbox_overlay, message_bubble,
-    react_picker_overlay, section_label, MessageBubbleAction,
+    avatar_circle, card, conversation_row, date_separator, format_day_separator,
+    image_lightbox_overlay, message_bubble, react_picker_overlay, section_label,
+    MessageBubbleAction,
 };
