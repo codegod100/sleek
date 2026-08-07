@@ -13,9 +13,14 @@ check (cargo clippy + test)
 
 ## Check step essentials
 
-- Clone sibling `vidya` next to the checkout if missing (`dirname $PWD/vidya`).
-- Install rustup toolchain **1.85** + clippy when absent.
-- Install egui system libs via apt when available.
+- Clone sibling path deps next to the checkout (`dirname $PWD/{vidya,freeq}`).
+  Prefer **flake.lock** revs from `github:codegod100/{vidya,freeq}` (depth-1
+  fetch of the locked SHA). Do not use floating tangled.org tips — they lag and
+  can miss features (e.g. sleek needs vidya `video`).
+- Apply repo patches (e.g. `patches/vidya-android-winit.patch`) when present.
+- Prefer **`nix develop --command …`** so mold (`.cargo/config.toml`), rustc,
+  and native libs come from the flake — same as local AGENTS.md. Avoid apt
+  mold / rustup when the flake already provides them.
 - `cargo clippy -- -D warnings` then `cargo test`.
 
 ## Flatpak step essentials

@@ -78,12 +78,15 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 [baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
-[sleek](https://buildkite.com/nandi/sleek) (created via API; steps in
+[sleek](https://buildkite.com/nandi/sleek) (GitHub `codegod100/sleek`; steps in
 `.buildkite/pipeline.yml`). API token is `BUILDKITE_API_KEY` in OpenBao
 (same KV). Agent skill: `.cursor/skills/configure-buildkite/`.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
-and/or `OPENBAO_TOKEN`. Helper: `scripts/ci-nixbuild.sh`.
+and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
+`baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check clones flake.lock–
+pinned `vidya`/`freeq` from GitHub and runs `cargo` inside `nix develop`
+(mold + libs from the flake, not apt).
 
 ```bash
 eval "$(./scripts/configure-buildkite-from-openbao.sh)"
