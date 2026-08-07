@@ -21,6 +21,8 @@ falls back to X11 — which still works for many image pastes when the composito
    the paste key so apps can handle Ctrl+V image paste.
 3. **`clipboard.rs` Android hooks**: `set_android_clipboard_hooks` so long-press paste reads the
    system `ClipboardManager` (stock fallback is in-app text only).
+4. **`lib.rs` Android back**: map `NamedKey::BrowserBack` (KEYCODE_BACK / gesture back) to
+   `Key::Escape`. Upstream egui ≥0.32 adds `Key::BrowserBack` instead; drop this when upgrading.
 
 Remove this vendor once upgrading to an egui that ships image paste events
-(https://github.com/emilk/egui/issues/2108) or equivalent.
+(https://github.com/emilk/egui/issues/2108) or equivalent, and `Key::BrowserBack`.

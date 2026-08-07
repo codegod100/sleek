@@ -6925,6 +6925,7 @@ dependencies = [
  "cpal",
  "dirs",
  "eframe",
+ "egui-winit",
  "emojis",
  "env_logger",
  "freeq-sdk",
@@ -8147,6 +8148,7 @@ dependencies = [
  "mp4",
  "openh264",
  "png 0.17.16",
+ "winit",
  "zip",
 ]
 

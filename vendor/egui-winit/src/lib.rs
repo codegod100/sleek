@@ -1152,6 +1152,12 @@ fn key_from_named_key(named_key: winit::keyboard::NamedKey) -> Option<egui::Key>
         NamedKey::F33 => Key::F33,
         NamedKey::F34 => Key::F34,
         NamedKey::F35 => Key::F35,
+
+        // Android KEYCODE_BACK / gesture back arrives as BrowserBack. egui 0.31
+        // has no Key::BrowserBack yet (added upstream later), so map to Escape
+        // so apps can dismiss overlays / pop navigation. Desktop Esc is unchanged.
+        NamedKey::BrowserBack => Key::Escape,
+
         _ => {
             log::trace!("Unknown key: {named_key:?}");
             return None;
