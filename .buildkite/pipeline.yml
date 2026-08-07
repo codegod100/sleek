@@ -102,8 +102,7 @@ steps:
       if ! sudo grep -q 'accept-flake-config' /etc/nix/nix.conf 2>/dev/null; then
         echo 'accept-flake-config = true' | sudo tee -a /etc/nix/nix.conf >/dev/null
       fi
-      export NIX_CONFIG="experimental-features = nix-command flakes
-accept-flake-config = true"
+      export NIX_CONFIG=$$'experimental-features = nix-command flakes\naccept-flake-config = true'
 
       echo "--- :nix: develop (mold + rustc from flake)"
       nix develop --option accept-flake-config true --command bash -lc '
