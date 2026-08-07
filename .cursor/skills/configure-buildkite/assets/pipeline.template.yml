@@ -1,0 +1,84 @@
+# Template adapted from baogui (.buildkite/pipeline.yml).
+# Replace APP_NAME / artifact paths / nix flake attrs for the target repo.
+# Hosted queue: auto (LINUX_AMD64_2X4). Cluster secrets: NIXBUILD_TOKEN, OPENBAO_TOKEN.
+# Use $$ so Buildkite does not interpolate shell vars at pipeline-upload time.
+
+agents:
+  queue: auto
+
+env:
+  RUST_BACKTRACE: "1"
+
+steps:
+  - label: ":rust: Check"
+    key: check
+    command: |
+      set -euo pipefail
+
+      vidya_dir="$$(dirname "$$PWD")/vidya"
+      if [[ ! -d "$$vidya_dir/.git" && ! -f "$$vidya_dir/Cargo.toml" ]]; then
+        git clone --depth 1 https://tangled.org/nandi.uk/vidya "$$vidya_dir"
+      fi
+
+      if ! command -v rustup >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --default-toolchain 1.85
+        # shellcheck disable=SC1091
+        source "$$HOME/.cargo/env"
+      fi
+      rustup toolchain install 1.85 --profile minimal --component clippy
+      rustup default 1.85
+
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y \
+          libxkbcommon-dev libxkbcommon-x11-dev \
+          libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+          libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev pkg-config
+      fi
+
+      cargo clippy -- -D warnings
+      cargo test
+
+  - label: ":package: Artifacts"
+    key: artifacts
+    depends_on: check
+    timeout_in_minutes: 120
+    command: |
+      set -euo pipefail
+
+      echo "--- :lock: Resolve nixbuild credentials"
+      if command -v buildkite-agent >/dev/null 2>&1; then
+        if [[ -z "$${NIXBUILD_TOKEN:-}" ]]; then
+          if nt="$$(buildkite-agent secret get NIXBUILD_TOKEN 2>/dev/null || true)"; then
+            if [[ -n "$$nt" ]]; then
+              export NIXBUILD_TOKEN="$$nt"
+              echo "Loaded NIXBUILD_TOKEN from Buildkite secret"
+            fi
+          fi
+        fi
+        if [[ -z "$${OPENBAO_TOKEN:-}" ]]; then
+          if ot="$$(buildkite-agent secret get OPENBAO_TOKEN 2>/dev/null || true)"; then
+            if [[ -n "$$ot" ]]; then
+              export OPENBAO_TOKEN="$$ot"
+              echo "Loaded OPENBAO_TOKEN from Buildkite secret"
+            fi
+          fi
+        fi
+      fi
+
+      if [[ -z "$${NIXBUILD_TOKEN:-}" && -n "$${OPENBAO_TOKEN:-}" ]]; then
+        chmod +x scripts/fetch-openbao-env.sh
+        # shellcheck disable=SC1091
+        eval "$$(./scripts/fetch-openbao-env.sh --export --keys NIXBUILD_TOKEN)"
+      fi
+
+      if [[ -z "$${NIXBUILD_TOKEN:-}" ]]; then
+        echo "--- :warning: Skipping artifacts (no nixbuild credentials)"
+        echo "UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets"
+        exit 0
+      fi
+
+      export NIXBUILDNET_TOKEN="$${NIXBUILD_TOKEN}"
+      echo "Customize this step: nix build flake attrs + buildkite-agent artifact upload"
+      exit 1

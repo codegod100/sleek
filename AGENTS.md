@@ -74,3 +74,15 @@ export OPENBAO_TOKEN=…   # or use Cursor env
 ./scripts/configure-gh-from-openbao.sh
 printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ```
+
+### Buildkite (baogui reference)
+Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
+[baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). API token is
+`BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
+`.cursor/skills/configure-buildkite/` — use when creating pipelines or
+`.buildkite/pipeline.yml` from the baogui layout.
+
+```bash
+eval "$(./scripts/configure-buildkite-from-openbao.sh)"
+./scripts/configure-buildkite-from-openbao.sh --check
+```
