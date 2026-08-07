@@ -6,6 +6,7 @@ use egui::text::{LayoutJob, TextFormat};
 use vidya::{button, dim_label, lead_trail, Theme};
 
 use crate::state::{AppState, MessageSearchHit};
+use crate::ui::widgets::text_edit_clipboard_menu;
 
 pub enum SearchAction {
     None,
@@ -42,6 +43,7 @@ pub fn message_search_panel(ui: &mut egui::Ui, th: &Theme, state: &mut AppState)
                             .min_size(egui::vec2(0.0, th.spacing.control_height))
                             .hint_text("Search messages…"),
                     );
+                    text_edit_clipboard_menu(ui, th, &resp);
                     if want_focus {
                         resp.request_focus();
                     }

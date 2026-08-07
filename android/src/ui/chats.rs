@@ -4,7 +4,7 @@ use eframe::egui::{self, Align, Layout};
 use vidya::{button, dim_label, primary_button, text_field_singleline, title, title_2, Theme};
 
 use crate::state::AppState;
-use crate::ui::widgets::{card, conversation_row, empty_state};
+use crate::ui::widgets::{card, conversation_row, empty_state, text_edit_clipboard_menu};
 
 pub enum ChatsAction {
     None,
@@ -53,6 +53,7 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            text_edit_clipboard_menu(ui, th, &resp);
             // singleline TextEdit surrenders focus on Enter — join when that happens.
             let enter = resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));

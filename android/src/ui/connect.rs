@@ -7,7 +7,7 @@ use vidya::{
 };
 
 use crate::state::{AppState, ConnectMode, ConnectionState};
-use crate::ui::widgets::{avatar_circle, card};
+use crate::ui::widgets::{avatar_circle, card, text_edit_clipboard_menu};
 
 pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ConnectAction {
     let mut action = ConnectAction::None;
@@ -255,6 +255,9 @@ fn handle_field(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, login_loadi
             .hint_text("you.bsky.social")
             .interactive(!login_loading),
     );
+    if !login_loading {
+        text_edit_clipboard_menu(ui, th, &resp);
+    }
 
     // Only sync while the user is editing — prefilled handles from prefs should
     // not open typeahead on cold start and hide the Recent chips.

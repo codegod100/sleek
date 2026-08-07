@@ -4,7 +4,7 @@ use eframe::egui::{self, Align, CursorIcon, Layout, RichText};
 use vidya::{body, dim_label, primary_button, title, title_2, Theme};
 
 use crate::state::{AppState, POPULAR_CHANNELS};
-use crate::ui::widgets::{avatar_circle, card};
+use crate::ui::widgets::{avatar_circle, card, text_edit_clipboard_menu};
 
 pub enum DiscoverAction {
     None,
@@ -36,6 +36,7 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            text_edit_clipboard_menu(ui, th, &resp);
             // singleline TextEdit surrenders focus on Enter — join when that happens.
             let enter = resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));

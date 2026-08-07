@@ -11,7 +11,7 @@ use crate::state::{AppState, ComposeAttach, NickTabComplete, ReplyTarget};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
     avatar_circle, date_separator, empty_state, format_day_separator, message_bubble,
-    react_picker_overlay, MessageBubbleAction,
+    react_picker_overlay, text_edit_clipboard_menu, MessageBubbleAction,
 };
 
 pub enum ChatAction {
@@ -1167,7 +1167,12 @@ fn compose_input_row(
                     egui::Modifiers::SHIFT,
                     egui::Key::Enter,
                 ));
-            text_resp = Some(ui.add_sized(Vec2::new(field_w, control_h), te));
+            let resp = ui.add_sized(Vec2::new(field_w, control_h), te);
+            if field_interactive {
+                // Press-and-hold / right-click → Cut / Copy / Paste (APK system clipboard).
+                text_edit_clipboard_menu(ui, th, &resp);
+            }
+            text_resp = Some(resp);
 
             ui.add_space(gap);
 
