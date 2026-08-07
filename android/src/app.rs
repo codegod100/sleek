@@ -2808,6 +2808,21 @@ impl eframe::App for SleekApp {
                                 match ui::discover_tab(ui, &th, &mut self.state) {
                                     DiscoverAction::None => {}
                                     DiscoverAction::Join(ch) => self.do_join(ch),
+                                    DiscoverAction::Open(name) => {
+                                        let need_history = self
+                                            .state
+                                            .channels
+                                            .get(&name)
+                                            .map(|b| !b.has_chat_messages())
+                                            .unwrap_or(true);
+                                        self.state.open_chat(&name);
+                                        if need_history {
+                                            self.net.send(NetCmd::HistoryLatest {
+                                                target: name,
+                                                count: 100,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             Tab::Settings => {

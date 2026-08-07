@@ -9,6 +9,8 @@ use crate::ui::widgets::{avatar_circle, card};
 pub enum DiscoverAction {
     None,
     Join(String),
+    /// Already a member — open the channel buffer.
+    Open(String),
 }
 
 pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> DiscoverAction {
@@ -92,10 +94,14 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
             .interact(egui::Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
 
-        if resp.clicked() && !joined {
-            action = DiscoverAction::Join((*name).to_string());
+        if resp.clicked() {
+            action = if joined {
+                DiscoverAction::Open((*name).to_string())
+            } else {
+                DiscoverAction::Join((*name).to_string())
+            };
         }
-        if resp.hovered() && !joined {
+        if resp.hovered() {
             ui.painter().rect_filled(
                 resp.rect,
                 sp.radius_md,
