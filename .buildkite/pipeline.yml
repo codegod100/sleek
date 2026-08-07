@@ -76,14 +76,17 @@ steps:
         exit 1
       }
 
+      # Match flake.nix rust-overlay `stable.latest` (deps need ≥1.91; 1.85 is too old).
       if ! command -v rustup >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-          | sh -s -- -y --default-toolchain 1.85
+          | sh -s -- -y --default-toolchain stable
         # shellcheck disable=SC1091
         source "$$HOME/.cargo/env"
       fi
-      rustup toolchain install 1.85 --profile minimal --component clippy
-      rustup default 1.85
+      rustup toolchain install stable --profile minimal --component clippy
+      rustup default stable
+      rustc --version
+      cargo --version
 
       cargo clippy --manifest-path host/Cargo.toml -- -D warnings
       cargo test --manifest-path android/Cargo.toml --lib
