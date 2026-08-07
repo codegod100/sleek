@@ -6,9 +6,13 @@
 #                   Writes an env file path on stdout as NIXBUILD_CREDS_ENV=...
 #                   and SKIP=0|1. Never prints the token.
 #   setup           Install/configure Nix + SSH to eu.nixbuild.net; requires token.
-#   remote-build ATTR [OUT_LINK]
-#                   nix build ATTR on ssh-ng://nixbuild (→ eu.nixbuild.net),
-#                   copy result locally, symlink OUT_LINK (default: result).
+#   remote-build ATTR [OUT_LINK] [ARTIFACT_REL …]
+#                   nix build ATTR on ssh-ng://nixbuild (→ eu.nixbuild.net).
+#                   If ARTIFACT_REL args are given, stream those files out of
+#                   the remote store path with `nix store cat` (no full closure
+#                   copy — flatpak outs reference multi‑GiB runtimes that OOM
+#                   hosted 2x4 agents). Otherwise `nix copy` the out path and
+#                   symlink OUT_LINK (default: result).
 #
 # Env:
 #   NIXBUILD_TOKEN / NIXBUILDNET_TOKEN — auth token (never logged)
@@ -243,6 +247,8 @@ setup_nixbuild() {
 remote_build() {
   local attr="${1:?flake attr required, e.g. .#android}"
   local out_link="${2:-result}"
+  shift 2 || true
+  local -a artifacts=("$@")
   : "${NIX_SSHOPTS:?run setup first (NIX_SSHOPTS unset)}"
 
   # Recommended remote-store path (docs.nixbuild.net/remote-builds):
@@ -265,6 +271,27 @@ remote_build() {
     cat "$out_json" >&2 || true
     exit 1
   }
+
+  if [[ ${#artifacts[@]} -gt 0 ]]; then
+    # Stream named files from the remote out path — avoids `nix copy` of the
+    # full runtime closure (OOM on Buildkite LINUX_AMD64_2X4).
+    mkdir -p "$out_link"
+    local rel dest
+    for rel in "${artifacts[@]}"; do
+      dest="$out_link/$rel"
+      mkdir -p "$(dirname "$dest")"
+      echo "Streaming $out_path/$rel → $dest (nix store cat, no closure copy)"
+      nix store cat --store "$store_uri" "$out_path/$rel" >"$dest"
+      [[ -s "$dest" ]] || {
+        echo "empty/missing artifact after store cat: $dest" >&2
+        exit 1
+      }
+      ls -lh "$dest"
+    done
+    echo "out_link=$out_link (streamed from $out_path)"
+    return 0
+  fi
+
   echo "Copying $out_path from nixbuild → local store"
   nix copy --from "$store_uri" "$out_path"
   ln -sfn "$out_path" "$out_link"
