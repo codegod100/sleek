@@ -10,7 +10,8 @@ use crate::clipboard;
 use crate::state::{AppState, ComposeAttach, NickTabComplete, ReplyTarget};
 use crate::ui::search::{message_search_panel, SearchAction};
 use crate::ui::widgets::{
-    avatar_circle, empty_state, message_bubble, react_picker_overlay, MessageBubbleAction,
+    avatar_circle, date_separator, empty_state, format_day_separator, message_bubble,
+    react_picker_overlay, MessageBubbleAction,
 };
 
 pub enum ChatAction {
@@ -668,7 +669,16 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 let mut target_in_view = false;
                 let msg_by_id: std::collections::HashMap<&str, &crate::state::ChatMessage> =
                     messages.iter().map(|m| (m.id.as_str(), m)).collect();
+                let mut prev_day: Option<chrono::NaiveDate> = None;
                 for msg in &messages {
+                    let day = msg.timestamp.date_naive();
+                    if prev_day != Some(day) {
+                        let label = format_day_separator(msg.timestamp);
+                        ui.push_id(("day_sep", day), |ui| {
+                            date_separator(ui, th, &label);
+                        });
+                        prev_day = Some(day);
+                    }
                     let highlighted = highlight_id.as_ref().is_some_and(|id| id == &msg.id);
                     let picker_open = state
                         .react_picker_msg

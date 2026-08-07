@@ -59,6 +59,57 @@ pub fn section_label(ui: &mut egui::Ui, th: &Theme, text: &str) {
     );
 }
 
+/// Local-calendar day label for chat stream separators (freeq-android `formatDate`).
+pub fn format_day_separator(ts: chrono::DateTime<chrono::Local>) -> String {
+    let today = chrono::Local::now().date_naive();
+    let day = ts.date_naive();
+    if day == today {
+        "Today".into()
+    } else if day + chrono::Duration::days(1) == today {
+        "Yesterday".into()
+    } else {
+        ts.format("%B %-d, %Y").to_string()
+    }
+}
+
+/// Centered day divider between messages when the calendar day changes.
+pub fn date_separator(ui: &mut egui::Ui, th: &Theme, label: &str) {
+    let sp = &th.spacing;
+    let p = &th.palette;
+    ui.add_space(sp.md);
+    let full = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(full, th.type_scale.caption + sp.sm),
+        Sense::hover(),
+    );
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(th.type_scale.caption),
+        p.text_secondary.gamma_multiply(0.85),
+    );
+    let text_w = galley.size().x;
+    let gap = sp.md;
+    let line_y = rect.center().y;
+    let mid = rect.center().x;
+    let left_end = (mid - text_w * 0.5 - gap).max(rect.left());
+    let right_start = (mid + text_w * 0.5 + gap).min(rect.right());
+    let stroke = Stroke::new(1.0_f32, p.border_soft.gamma_multiply(0.7));
+    if left_end > rect.left() + 1.0 {
+        ui.painter()
+            .hline(rect.left()..=left_end, line_y, stroke);
+    }
+    if right_start + 1.0 < rect.right() {
+        ui.painter()
+            .hline(right_start..=rect.right(), line_y, stroke);
+    }
+    ui.painter().galley(
+        egui::pos2(mid - text_w * 0.5, rect.center().y - galley.size().y * 0.5),
+        galley,
+        p.text_secondary,
+    );
+    ui.add_space(sp.sm);
+}
+
 /// Colored initial circle (freeq-style avatar stand-in).
 pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
     let letter = name
@@ -2645,5 +2696,30 @@ mod embed_image_tests {
         let a = embed_image_display_size(800, 2400, 320.0, 420.0, 1.0);
         let b = embed_image_display_size(800, 2400, 320.0, 420.0, 3.0);
         assert!((a.x / a.y - b.x / b.y).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod day_separator_tests {
+    use super::format_day_separator;
+    use chrono::{Duration, Local, TimeZone};
+
+    #[test]
+    fn today_and_yesterday_labels() {
+        let now = Local::now();
+        assert_eq!(format_day_separator(now), "Today");
+        assert_eq!(format_day_separator(now - Duration::days(1)), "Yesterday");
+    }
+
+    #[test]
+    fn older_day_uses_month_day_year() {
+        let ts = Local
+            .with_ymd_and_hms(2024, 3, 5, 14, 30, 0)
+            .single()
+            .expect("valid local datetime");
+        let label = format_day_separator(ts);
+        assert_eq!(label, "March 5, 2024");
+        assert!(!label.contains("Today"));
+        assert!(!label.contains("Yesterday"));
     }
 }
