@@ -2890,6 +2890,25 @@ impl eframe::App for SleekApp {
 
         let gate_act = policy_gate_overlay(ctx, &th, &mut self.state);
         self.handle_policy_gate_action(ctx, gate_act);
+
+        // Android back gesture → Escape (egui-winit). At the root shell with
+        // nothing left to dismiss, finish the Activity (leave the app).
+        #[cfg(target_os = "android")]
+        {
+            let at_root = matches!(self.state.route, Route::Tabs)
+                || self.state.connection == ConnectionState::Disconnected;
+            let overlay_open = self.state.image_lightbox.is_some()
+                || self.state.react_picker_msg.is_some()
+                || self.state.policy_gate.channel.is_some();
+            if at_root
+                && !overlay_open
+                && ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                })
+            {
+                crate::android_media::finish_activity();
+            }
+        }
     }
 }
 

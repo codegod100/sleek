@@ -2170,3 +2170,17 @@ where
     })
     .map_err(|e| format!("{e}"))?
 }
+
+/// Finish the host Activity (leave the app). Used when Android back / Esc is
+/// pressed at the root shell (tabs or connect) with nothing left to dismiss.
+pub fn finish_activity() {
+    match with_activity_jni(|env, activity| {
+        use jni::{jni_sig, jni_str};
+        env.call_method(activity, jni_str!("finish"), jni_sig!(()), &[])
+            .map_err(|e| format!("Activity.finish: {e}"))?;
+        Ok(())
+    }) {
+        Ok(()) => log::info!("android finish_activity: leaving"),
+        Err(e) => log::warn!("android finish_activity: {e}"),
+    }
+}

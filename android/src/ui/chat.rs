@@ -117,18 +117,23 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
 
     state.tick_search_highlight();
 
-    // Message search hotkeys (vidya): Cmd/Ctrl+F open/refocus, Esc close.
-    // Lightbox / react-picker Esc are handled in their overlays.
-    let overlay_open =
-        state.image_lightbox.is_some() || state.react_picker_msg.is_some();
+    // Message search hotkeys (vidya): Cmd/Ctrl+F open/refocus.
+    // Esc / Android back: dismiss overlays then leave chat (see chat_back_step).
+    // Lightbox / react-picker / policy-gate Esc are handled in their overlays.
+    let overlay_open = state.image_lightbox.is_some()
+        || state.react_picker_msg.is_some()
+        || state.policy_gate.channel.is_some();
     if !overlay_open && consume_command(ui, Key::F) {
         if state.show_message_search {
             state.focus_message_search = true;
         } else if !state.show_members {
             state.open_message_search();
         }
-    } else if !overlay_open && state.show_message_search && consume_escape(ui) {
-        state.close_message_search();
+    } else if !overlay_open && consume_escape(ui) {
+        // Android maps KEYCODE_BACK → Escape (vendored egui-winit).
+        if state.chat_back_step() {
+            action = ChatAction::Back;
+        }
     }
 
     // Snapshot buffer data we need (avoid holding borrow across mut compose)
@@ -175,15 +180,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // under Leave/Users or past the panel edge.
     ui.horizontal(|ui| {
         if button(ui, th, "←").clicked() {
-            if state.image_lightbox.is_some() {
-                state.close_image_lightbox();
-            } else if state.react_picker_msg.is_some() {
-                state.close_react_picker();
-            } else if show_search {
-                state.close_message_search();
-            } else if show_members {
-                state.show_members = false;
-            } else {
+            // Same dismiss stack as Esc / Android back gesture.
+            if state.chat_back_step() {
                 action = ChatAction::Back;
             }
         }
@@ -555,9 +553,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                             state.cancel_reply();
                         }
                         ui.add_space(sp.xs);
-                        if state.react_picker_msg.is_none() && consume_escape(ui) {
-                            state.cancel_reply();
-                        }
+                        // Esc / Android back cancel reply via chat_back_step above.
                     }
                 }
                 if is_editing {
@@ -571,9 +567,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         state.cancel_edit();
                     }
                     ui.add_space(sp.xs);
-                    if state.react_picker_msg.is_none() && consume_escape(ui) {
-                        state.cancel_edit();
-                    }
+                    // Esc / Android back cancel edit via chat_back_step above.
                 }
                 let attach_tip = if pick_busy {
                     "Opening file picker…"

@@ -1981,6 +1981,35 @@ impl AppState {
         self.cancel_reply();
     }
 
+    /// One step of in-chat back navigation (header ← / Esc / Android back gesture).
+    ///
+    /// Dismisses the topmost overlay or sheet; returns `true` when the chat page
+    /// itself should close (`Route::Tabs`). Reply/edit compose chrome is included
+    /// so Esc and system back peel those before leaving the conversation.
+    pub fn chat_back_step(&mut self) -> bool {
+        if self.image_lightbox.is_some() {
+            self.close_image_lightbox();
+            false
+        } else if self.react_picker_msg.is_some() {
+            self.close_react_picker();
+            false
+        } else if self.show_message_search {
+            self.close_message_search();
+            false
+        } else if self.show_members {
+            self.show_members = false;
+            false
+        } else if self.replying_to.is_some() {
+            self.cancel_reply();
+            false
+        } else if self.editing_msgid.is_some() {
+            self.cancel_edit();
+            false
+        } else {
+            true
+        }
+    }
+
     /// Open the full-screen image lightbox for a chat embed URL.
     pub fn open_image_lightbox(&mut self, url: String) {
         if url.is_empty() {
@@ -2564,6 +2593,54 @@ mod tests {
         assert_eq!(state.scroll_to_msgid.as_deref(), Some("msg-42"));
         assert_eq!(state.highlight_msgid.as_deref(), Some("msg-42"));
         assert!(state.highlight_until.is_some());
+    }
+
+    #[test]
+    fn chat_back_step_peels_overlays_then_signals_leave() {
+        let mut state = AppState::new();
+        state.open_chat("#room");
+        state.open_image_lightbox("https://example.com/a.png".into());
+        assert!(!state.chat_back_step());
+        assert!(state.image_lightbox.is_none());
+
+        state.open_react_picker("m1".into());
+        assert!(!state.chat_back_step());
+        assert!(state.react_picker_msg.is_none());
+
+        state.open_message_search();
+        assert!(!state.chat_back_step());
+        assert!(!state.show_message_search);
+
+        state.show_members = true;
+        assert!(!state.chat_back_step());
+        assert!(!state.show_members);
+
+        state.begin_reply(&ChatMessage {
+            id: "m1".into(),
+            from: "alice".into(),
+            text: "hi".into(),
+            is_system: false,
+            is_action: false,
+            is_edited: false,
+            is_deleted: false,
+            timestamp: Local::now(),
+            reply_to: None,
+            edit_of: None,
+            is_signed: false,
+            embed: None,
+            link_meta: None,
+            reactions: HashMap::new(),
+        });
+        assert!(state.replying_to.is_some());
+        assert!(!state.chat_back_step());
+        assert!(state.replying_to.is_none());
+
+        state.begin_edit("m1".into(), "hi".into());
+        assert!(state.editing_msgid.is_some());
+        assert!(!state.chat_back_step());
+        assert!(state.editing_msgid.is_none());
+
+        assert!(state.chat_back_step());
     }
 
     #[test]
