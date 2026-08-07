@@ -77,10 +77,13 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
-[baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). API token is
-`BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
-`.cursor/skills/configure-buildkite/` — use when creating pipelines or
-`.buildkite/pipeline.yml` from the baogui layout.
+[baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
+[sleek](https://buildkite.com/nandi/sleek) (created via API; steps in
+`.buildkite/pipeline.yml`). API token is `BUILDKITE_API_KEY` in OpenBao
+(same KV). Agent skill: `.cursor/skills/configure-buildkite/`.
+
+Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
+and/or `OPENBAO_TOKEN`. Helper: `scripts/ci-nixbuild.sh`.
 
 ```bash
 eval "$(./scripts/configure-buildkite-from-openbao.sh)"
