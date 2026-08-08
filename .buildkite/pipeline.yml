@@ -1,5 +1,5 @@
 # Buildkite CI for sleek (baogui-shaped org layout).
-# Mirrors AGENTS.md check commands + GHA artifacts (nix .#android / .#flatpak)
+# Mirrors AGENTS.md check commands + nix artifacts (nix .#android / .#flatpak)
 # via nixbuild.net when cluster secrets are present.
 #
 # Artifacts:
@@ -100,7 +100,7 @@ steps:
       fi
 
       # Flake nixConfig (cachix substituter) must not prompt (y/N) on agents.
-      # Match GHA / ci-nixbuild.sh; also drain stdin so a TTY cannot block.
+      # Match ci-nixbuild.sh; also drain stdin so a TTY cannot block.
       sudo mkdir -p /etc/nix
       if ! sudo grep -q 'accept-flake-config' /etc/nix/nix.conf 2>/dev/null; then
         echo 'accept-flake-config = true' | sudo tee -a /etc/nix/nix.conf >/dev/null

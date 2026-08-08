@@ -73,14 +73,15 @@ nix build .#flatpak
 
 ### CI artifacts
 
-On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds on [nixbuild.net](https://nixbuild.net) (remote Nix builders — no GitHub runner compile):
+CI runs on **[Buildkite](https://buildkite.com/nandi/sleek-5u9xbr)** ([`.buildkite/pipeline.yml`](.buildkite/pipeline.yml)). The pipeline clones from **Radicle Garden** (not GitHub); pushes and patches trigger builds via the Garden adapter. Check, APK, and Flatpak steps use [nixbuild.net](https://nixbuild.net) remote builders when cluster secrets are set.
 
-| Job | Flake attr | Artifact |
-|-----|------------|----------|
+| Step | Flake attr | Artifact |
+|------|------------|----------|
+| Check | `cargo clippy` / `cargo test` in `nix develop` | — |
 | APK | `.#android` | `sleek-apk` (`sleek.apk`) |
 | Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
 
-`NIXBUILD_TOKEN` is fetched from **OpenBao** (`secret/data/ai-api-keys`) via `OPENBAO_TOKEN`, or from the `nixbuild_token` repository secret as a fallback.
+Cluster secrets (org `nandi`, Default cluster): `NIXBUILD_TOKEN` and/or `OPENBAO_TOKEN` (soft-loaded via `scripts/buildkite/bootstrap.sh` and `scripts/ci-nixbuild.sh`). Issue-agent steps also need `CURSOR_API_KEY` and `RADICLE_SECRET_KEY`.
 
 CI APKs are signed with the committed `android/ci.keystore` (password `android`, alias `androiddebugkey`) so successive installs upgrade cleanly. If you previously installed a build signed with a different key (e.g. an older CI artifact or a local `deploy-android` keystore), uninstall Sleek first — Android shows that as “Something went wrong / App not installed”.
 
@@ -109,12 +110,12 @@ include) and reloads `nix-daemon`. Without that, `nix run` / `nix build` print
 
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
-On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` on nixbuild.net and pushes store paths to the same cache. CI pulls `NIXBUILD_TOKEN` and `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
+With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** after each build (see above). There is no separate scheduled Cachix workflow — use local `just android` / `just push` or add a Buildkite step if you want push-on-merge.
 
 | Secret / env | Purpose |
 |--------------|---------|
-| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch nixbuild + Cachix credentials |
-| `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` so agents can manage Actions secrets |
+| `OPENBAO_TOKEN` | OpenBao token — Cursor env + Buildkite cluster secret; CI uses it to fetch nixbuild + Cachix credentials |
+| `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` for repo automation |
 | `NIXBUILD_TOKEN` | nixbuild.net auth token in OpenBao — remote CI builds |
 | `CACHIX_AUTH_TOKEN` | Write token in OpenBao / Codespaces ([cachix.org](https://app.cachix.org) → codegod100) |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
@@ -269,7 +270,8 @@ sleek/
   assets/           # desktop entry + icons (Flatpak / host)
   .tangled/         # Spindle CI (Tangled)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
-  .github/workflows # CI: APK + Flatpak artifacts
+  .buildkite/       # Buildkite CI (check, APK, Flatpak, issue agent)
+  .github/workflows # automerge only (no compile CI)
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake
   justfile
