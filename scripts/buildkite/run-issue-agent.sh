@@ -140,6 +140,10 @@ ${PATCH_DESCRIPTION}
 
    If using radicle MCP \`create_patch\`, set the same title and the full description body
    (issue id, title, issue body, and link) — never omit description.
+   Resolve Cursor \`environmentPublicId\` via cursor-cloud \`environment-info\` and pass it
+   as \`env_name\` on \`create_patch\` / \`issue_device_key\` so this environment reuses one
+   Radicle DID (do not run \`rad auth\` to mint a fresh identity).
+   - env_name: <environment.environmentPublicId>
    - branch: "${RADICLE_ISSUE_BRANCH}"
    - title: "${PATCH_TITLE}"
    - description: the Required description block above (verbatim or equivalent)
