@@ -89,6 +89,10 @@ pub struct SavedPrefs {
     /// Previously used guest nicknames — MRU, shown on the guest connect screen.
     #[serde(default)]
     pub recent_nicks: Vec<String>,
+    /// When false, JOIN / PART / QUIT presence lines are not appended to chat.
+    /// Member lists still update. Defaults to true (show).
+    #[serde(default = "default_true")]
+    pub show_join_part: bool,
 }
 
 impl Default for SavedPrefs {
@@ -104,6 +108,7 @@ impl Default for SavedPrefs {
             last_bsky_handle: None,
             recent_handles: Vec::new(),
             recent_nicks: Vec::new(),
+            show_join_part: true,
         }
     }
 }
@@ -776,6 +781,7 @@ mod tests {
         assert!(!d.av_pref_muted);
         assert!(!d.av_pref_speaker_muted);
         assert!(d.av_pref_camera);
+        assert!(d.show_join_part);
         assert_eq!(
             d.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]
@@ -785,6 +791,7 @@ mod tests {
         assert!(partial.av_pref_muted);
         assert!(!partial.av_pref_speaker_muted);
         assert!(partial.av_pref_camera);
+        assert!(partial.show_join_part);
         assert_eq!(
             partial.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]
@@ -793,6 +800,10 @@ mod tests {
         assert!(!empty.av_pref_muted);
         assert!(!empty.av_pref_speaker_muted);
         assert!(empty.av_pref_camera);
+        assert!(empty.show_join_part);
+        let hide_jp: SavedPrefs =
+            serde_json::from_str(r#"{"show_join_part":false}"#).unwrap();
+        assert!(!hide_jp.show_join_part);
         assert_eq!(
             empty.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]

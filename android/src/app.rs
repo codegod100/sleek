@@ -824,6 +824,7 @@ impl SleekApp {
                 account: _,
             } => {
                 let own = nick.eq_ignore_ascii_case(&self.state.nick);
+                let show_join_part = self.state.show_join_part;
                 let buf = self.state.ensure_buffer(&channel);
                 if own {
                     buf.join_pending = false;
@@ -840,11 +841,13 @@ impl SleekApp {
                     .iter()
                     .any(|n| n.eq_ignore_ascii_case(&nick));
                 if !already_member {
-                    if own {
-                        buf.append(ChatMessage::system(format!("Joined {channel}")));
-                        // Stay on tabs; user opens the channel from the list.
-                    } else {
-                        buf.append(ChatMessage::system(format!("{nick} joined")));
+                    if show_join_part {
+                        if own {
+                            buf.append(ChatMessage::system(format!("Joined {channel}")));
+                            // Stay on tabs; user opens the channel from the list.
+                        } else {
+                            buf.append(ChatMessage::system(format!("{nick} joined")));
+                        }
                     }
                     buf.members.push(nick);
                 }
@@ -862,9 +865,12 @@ impl SleekApp {
                 }
             }
             Event::Parted { channel, nick } => {
+                let show_join_part = self.state.show_join_part;
                 if let Some(buf) = self.state.channels.get_mut(&channel) {
                     buf.members.retain(|n| !n.eq_ignore_ascii_case(&nick));
-                    buf.append(ChatMessage::system(format!("{nick} left")));
+                    if show_join_part {
+                        buf.append(ChatMessage::system(format!("{nick} left")));
+                    }
                 }
                 if nick.eq_ignore_ascii_case(&self.state.nick) {
                     self.state.channels.remove(&channel);
@@ -1143,10 +1149,13 @@ impl SleekApp {
                 }
             }
             Event::UserQuit { nick, reason } => {
+                let show_join_part = self.state.show_join_part;
                 for buf in self.state.channels.values_mut() {
                     if buf.members.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
                         buf.members.retain(|n| !n.eq_ignore_ascii_case(&nick));
-                        buf.append(ChatMessage::system(format!("{nick} quit ({reason})")));
+                        if show_join_part {
+                            buf.append(ChatMessage::system(format!("{nick} quit ({reason})")));
+                        }
                     }
                 }
             }
