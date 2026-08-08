@@ -19,11 +19,16 @@ bk_require_cmd jq
 bk_require_cmd curl
 
 payload="$(cat)"
-commit="$(echo "$payload" | jq -r '.commit // .Commit // .head // empty')"
-repo="$(echo "$payload" | jq -r '.repo // .repository // .repo_id // empty')"
-branch="$(echo "$payload" | jq -r '.branch // .ref // .refs/heads // empty' | sed 's|^refs/heads/||')"
+commit="$(echo "$payload" | jq -r '.commit // .Commit // .head // .after // empty')"
+repo="$(echo "$payload" | jq -r '.repo // .repo_id // .repository.id // empty')"
+branch="$(echo "$payload" | jq -r '.branch // .ref // .refs/heads // .repository.default_branch // empty' | sed 's|^refs/heads/||; s|.*/refs/heads/||')"
 
 if [[ -z "$commit" ]]; then
+  # Patch / branch-delete Garden events — boxci ignores these too.
+  if echo "$payload" | jq -e '.patch // .deleted // empty' >/dev/null 2>&1; then
+    echo "webhook-to-boxci: patch/delete event — ignoring" >&2
+    exit 0
+  fi
   echo "webhook-to-boxci: no commit in payload — ignoring" >&2
   exit 0
 fi
