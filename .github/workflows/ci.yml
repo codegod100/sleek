@@ -2,6 +2,7 @@
 # APK: nix build .#android → sleek.apk
 # Flatpak: nix build .#flatpak → uk.nandi.sleek.flatpak
 #
+# Prefers substitutes from codegod100.cachix.org (trusted keys set in nix_conf).
 # NIXBUILD_TOKEN is fetched from OpenBao (same KV as Cachix). Falls back to the
 # repository secret nixbuild_token when OPENBAO_TOKEN is unset.
 
@@ -49,9 +50,14 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@v35
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          # Trust Cachix here (not via flake nixConfig): Determinate multi-user
+          # ignores flake trusted-public-keys, but GHA single-user needs the key
+          # or Build rebuilds rust-default on nixbuild and flakes with EOF.
           nix_conf: |
             accept-flake-config = true
             experimental-features = nix-command flakes
+            extra-substituters = https://codegod100.cachix.org
+            extra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA=
 
       - uses: nixbuild/nixbuild-action@v25
         with:
@@ -98,9 +104,14 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@v35
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          # Trust Cachix here (not via flake nixConfig): Determinate multi-user
+          # ignores flake trusted-public-keys, but GHA single-user needs the key
+          # or Build rebuilds rust-default on nixbuild and flakes with EOF.
           nix_conf: |
             accept-flake-config = true
             experimental-features = nix-command flakes
+            extra-substituters = https://codegod100.cachix.org
+            extra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA=
 
       - uses: nixbuild/nixbuild-action@v25
         with:
