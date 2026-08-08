@@ -64,8 +64,9 @@ OpenBao (optional; bootstrap also soft-loads these when OPENBAO_TOKEN is set):
   # If secret/radicle does not exist yet, create it first (bao kv put / UI).
 
 After keys are in Buildkite, re-run an issue-agent build. bootstrap.sh will
-install rad, materialize \$RAD_HOME, start the node, \`rad seed\` the RID into
-local storage, then \`rad init --existing\` so \`git push rad HEAD:refs/patches\`
+install rad, materialize \$RAD_HOME, start the node, hydrate the RID into
+local storage from Garden HTTPS (fallback: public radicle seeds), then
+\`rad init --existing\` so \`git push rad HEAD:refs/patches\` works.
 works from the Garden HTTPS checkout.
 
 Delete $OUT_DIR when secrets are stored.

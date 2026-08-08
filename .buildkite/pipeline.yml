@@ -45,9 +45,10 @@
 #   Manual one issue: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
 #     (or: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>)
 #   Requires CURSOR_API_KEY + RADICLE_SECRET_KEY (bootstrap installs rad, writes
-#   $RAD_HOME/keys, starts node, rad seed into storage, then rad init --existing
-#   so git push rad works from the Garden HTTPS checkout). Agents also need TCP
-#   to garden:58019 for seed/fetch and announce.
+#   $RAD_HOME/keys, starts node, hydrates $RAD_HOME/storage from Garden HTTPS
+#   mirror — no Garden:58019 required — then rad init --existing so git push rad
+#   works). Public seeds rosa/iris :8776 are preferred for connect/announce;
+#   Garden p2p :58019 is optional. Hosted agents already reach Garden HTTPS :443.
 
 agents:
   queue: auto

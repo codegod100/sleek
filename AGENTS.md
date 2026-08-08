@@ -98,7 +98,10 @@ API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
 publishing patches live under OpenBao `secret/data/radicle` (fields
 `RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` / `RAD_PASSPHRASE`) and/or
 matching Buildkite cluster secrets — loaded by
-`scripts/buildkite/bootstrap.sh` for the issue→agent step. Use a dedicated CI
+`scripts/buildkite/bootstrap.sh` for the issue→agent step. Bootstrap hydrates
+`$RAD_HOME/storage` from the Garden HTTPS git URL (same clone Buildkite uses),
+so agents do **not** need egress to Garden p2p `:58019`; public seeds
+(`rosa`/`iris` `:8776`) are used for connect/announce. Use a dedicated CI
 identity (not a personal DID); never commit key material.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`

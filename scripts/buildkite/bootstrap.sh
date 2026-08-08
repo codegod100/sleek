@@ -26,8 +26,23 @@ RAD_HOME="${RAD_HOME:-${HOME}/.radicle}"
 export RAD_HOME
 export PATH="${RAD_HOME}/bin:${PATH}"
 
-# Garden seed (from local preferredSeeds / AGENTS Garden host).
+# Garden HTTPS git (Buildkite clone URL) — exposes refs/namespaces + refs/rad/*.
+# Preferred way to populate $RAD_HOME/storage without radicle p2p (Garden:58019
+# is often firewalled from hosted agents; HTTPS :443 works).
+radicle_rid_naked() {
+  local rid="${1:-$RADICLE_RID}"
+  rid="${rid#rad:}"
+  rid="${rid#rad://}"
+  echo "$rid"
+}
+RADICLE_GARDEN_GIT="${RADICLE_GARDEN_GIT:-https://nandi.radicle.garden/$(radicle_rid_naked).git}"
+
+# Optional Garden p2p seed (may fail from Buildkite hosted agents).
 RADICLE_SEED="${RADICLE_SEED:-z6MknYm3iSpuY5hLCH93K5Ls5KG7cBK4fQwybqcHzxDsT2jU@nandi.radicle.garden:58019}"
+
+# Public seeds that typically seed this RID (TCP 8776). Used for connect +
+# announce when Garden:58019 is unreachable; also p2p fallback for storage.
+RADICLE_PUBLIC_SEEDS="${RADICLE_PUBLIC_SEEDS:-z6Mkmqogy2qEM2ummccUthFEaaHvyYmYBYh3dbe9W4ebScxo@rosa.radicle.network:8776 z6MkrLMMsiPWUcNPHcRajuMi9mDfYckSoJyPwwnknocNYPm7@iris.radicle.network:8776}"
 
 bk_soft_secret() {
   local name=$1 value="" err="" errf rc=0
@@ -175,20 +190,38 @@ load_radicle_secrets() {
   fi
 }
 
+# JSON array string for preferredSeeds / connect (public seeds first, Garden last).
+radicle_seeds_json_array() {
+  local s first=1
+  printf '['
+  for s in $RADICLE_PUBLIC_SEEDS $RADICLE_SEED; do
+    [[ -n "$s" ]] || continue
+    if [[ $first -eq 1 ]]; then
+      first=0
+    else
+      printf ', '
+    fi
+    printf '"%s"' "$s"
+  done
+  printf ']'
+}
+
 write_radicle_config() {
+  local seeds_json
   mkdir -p "$RAD_HOME"
   if [[ -f "$RAD_HOME/config.json" ]]; then
     return 0
   fi
+  seeds_json="$(radicle_seeds_json_array)"
   cat >"$RAD_HOME/config.json" <<EOF
 {
   "publicExplorer": "https://nandi.radicle.garden/nodes/\$host/\$rid\$path",
-  "preferredSeeds": ["${RADICLE_SEED}"],
+  "preferredSeeds": ${seeds_json},
   "node": {
     "alias": "sleek-ci",
     "listen": [],
     "peers": { "type": "dynamic" },
-    "connect": ["${RADICLE_SEED}"],
+    "connect": ${seeds_json},
     "externalAddresses": [],
     "network": "main",
     "log": "INFO",
@@ -249,10 +282,27 @@ ensure_rad_passphrase_env() {
   fi
 }
 
-# RADICLE_SEED is nid@host:port; rad seed --from / rad clone --seed want NID only.
+# nid@host:port → nid (rad seed --from / rad clone --seed want NID only).
 radicle_seed_nid() {
   local seed="${1:-$RADICLE_SEED}"
   echo "${seed%%@*}"
+}
+
+# Connect to public seeds (8776) first, then optional Garden:58019.
+radicle_connect_seeds() {
+  local seed connected=0
+  for seed in $RADICLE_PUBLIC_SEEDS $RADICLE_SEED; do
+    [[ -n "$seed" ]] || continue
+    if rad node connect "$seed" >/dev/null 2>&1; then
+      echo "[bootstrap] connected to seed ${seed}"
+      connected=1
+    else
+      echo "[bootstrap] warn: rad node connect ${seed} failed" >&2
+    fi
+  done
+  if [[ $connected -eq 0 ]]; then
+    echo "[bootstrap] warn: no radicle p2p seeds reachable (HTTPS storage hydrate may still work; patch announce needs egress to :8776 or Garden:58019)" >&2
+  fi
 }
 
 start_rad_node() {
@@ -260,42 +310,98 @@ start_rad_node() {
   # not gate on its exit code. `rad node start` is idempotent when already up.
   echo "[bootstrap] ensuring rad node is running..."
   rad node start >/dev/null
-  # Connect to Garden so seed/fetch and patch announce can reach the seed.
-  local seed_nid
-  seed_nid="$(radicle_seed_nid)"
-  if rad node connect "$RADICLE_SEED" >/dev/null 2>&1; then
-    echo "[bootstrap] connected to Garden seed ${seed_nid}"
-  else
-    echo "[bootstrap] warn: rad node connect ${RADICLE_SEED} failed (will retry on seed)" >&2
+  radicle_connect_seeds
+}
+
+# Populate $RAD_HOME/storage/<rid> via Garden HTTPS mirror (no p2p). Garden's
+# git HTTP advertises refs/namespaces/* and refs/rad/* — enough for
+# `rad init --existing` and `git push rad`.
+hydrate_storage_from_https() {
+  local rid_naked="$1"
+  local dest="$RAD_HOME/storage/$rid_naked"
+  local src="$RADICLE_GARDEN_GIT"
+  local root tmp url
+
+  root="$(bk_repo_root)"
+  # Prefer the checkout's origin when it already points at Garden (same objects).
+  if url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"; then
+    if [[ "$url" == *radicle.garden* || "$url" == https://* || "$url" == http://* ]]; then
+      src="$url"
+    fi
   fi
+
+  echo "[bootstrap] hydrating \$RAD_HOME/storage/${rid_naked} from HTTPS (${src})"
+  mkdir -p "$RAD_HOME/storage"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rad-storage.XXXXXX")"
+  # Mirror into a temp bare repo, then move into place (atomic-ish).
+  if ! git clone --bare --mirror "$src" "$tmp/repo"; then
+    echo "[bootstrap] warn: git clone --mirror from ${src} failed" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  # Minimal sanity: identity + at least one namespace (radicle storage shape).
+  if ! git -C "$tmp/repo" show-ref --verify --quiet refs/rad/id \
+    && ! git -C "$tmp/repo" show-ref 2>/dev/null | grep -q 'refs/namespaces/.*/refs/rad/'; then
+    echo "[bootstrap] warn: HTTPS mirror missing refs/rad/id — not usable as rad storage" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$dest"
+  mv "$tmp/repo" "$dest"
+  rm -rf "$tmp"
+  # Register seeding policy / inventory without another p2p fetch.
+  rad seed "$RADICLE_RID" --scope followed --no-fetch >/dev/null 2>&1 || true
+  echo "[bootstrap] storage hydrated via HTTPS"
+  return 0
+}
+
+# Try rad seed --from each reachable seed NID (public first, Garden last).
+hydrate_storage_from_p2p() {
+  local rid_naked="$1"
+  local timeout seed seed_nid
+  timeout="${RADICLE_SEED_TIMEOUT:-60s}"
+
+  for seed in $RADICLE_PUBLIC_SEEDS $RADICLE_SEED; do
+    [[ -n "$seed" ]] || continue
+    seed_nid="$(radicle_seed_nid "$seed")"
+    echo "[bootstrap] trying rad seed --from ${seed_nid} (${seed})"
+    rad node connect "$seed" >/dev/null 2>&1 || true
+    rad seed "$RADICLE_RID" --scope followed --from "$seed_nid" --timeout "$timeout" || true
+    if [[ -d "$RAD_HOME/storage/$rid_naked" ]]; then
+      echo "[bootstrap] storage populated via p2p seed ${seed_nid}"
+      return 0
+    fi
+  done
+  # Last resort: routing-table seed (needs any connected peer that has the RID).
+  echo "[bootstrap] warn: per-seed fetch empty; trying rad seed via routing table" >&2
+  rad seed "$RADICLE_RID" --scope followed --timeout "$timeout" || true
+  [[ -d "$RAD_HOME/storage/$rid_naked" ]]
 }
 
 # `rad init --existing` only links a working tree; it does not fetch the RID.
-# Garden HTTPS clones have no $RAD_HOME/storage/<rid>, so seed/fetch first.
+# Fresh agents have empty $RAD_HOME/storage — hydrate via HTTPS (preferred) or p2p.
 ensure_rid_in_storage() {
-  local rid_naked seed_nid timeout
-  rid_naked="${RADICLE_RID#rad:}"
-  rid_naked="${rid_naked#rad://}"
-  seed_nid="$(radicle_seed_nid)"
-  timeout="${RADICLE_SEED_TIMEOUT:-120s}"
+  local rid_naked
+  rid_naked="$(radicle_rid_naked)"
 
-  if [[ -d "$RAD_HOME/storage/$rid_naked" ]]; then
+  if [[ -d "$RAD_HOME/storage/$rid_naked" ]] \
+    && git -C "$RAD_HOME/storage/$rid_naked" show-ref >/dev/null 2>&1; then
     echo "[bootstrap] Radicle storage already has ${rid_naked}"
     return 0
   fi
 
   echo "[bootstrap] fetching ${RADICLE_RID} into \$RAD_HOME/storage (required before rad init --existing)"
-  # Prefer Garden seed NID. Note: `rad seed` can exit 0 after only updating the
-  # local seeding policy when no peers are reachable — always verify storage.
-  rad seed "$RADICLE_RID" --scope followed --from "$seed_nid" --timeout "$timeout" || true
-  if [[ ! -d "$RAD_HOME/storage/$rid_naked" ]]; then
-    echo "[bootstrap] warn: storage empty after seed --from; reconnecting and retrying via routing table" >&2
-    rad node connect "$RADICLE_SEED" >/dev/null 2>&1 || true
-    rad seed "$RADICLE_RID" --scope followed --timeout "$timeout" \
-      || bk_die "failed to fetch ${RADICLE_RID} into local storage — is the node connected to Garden (${RADICLE_SEED})?"
+  # 1) Garden HTTPS — works when p2p :58019 is firewalled (Buildkite hosted).
+  if hydrate_storage_from_https "$rid_naked"; then
+    return 0
   fi
-  [[ -d "$RAD_HOME/storage/$rid_naked" ]] \
-    || bk_die "storage path missing after rad seed: $RAD_HOME/storage/$rid_naked"
+  echo "[bootstrap] warn: HTTPS hydrate failed; falling back to radicle p2p seeds" >&2
+  # 2) Public seeds (:8776) then optional Garden (:58019).
+  if hydrate_storage_from_p2p "$rid_naked"; then
+    return 0
+  fi
+
+  bk_die "failed to populate \$RAD_HOME/storage/${rid_naked}. Tried Garden HTTPS (${RADICLE_GARDEN_GIT}) and p2p seeds (${RADICLE_PUBLIC_SEEDS} ${RADICLE_SEED}). If HTTPS works but p2p fails, agents may need egress allowlist for rosa/iris :8776 (announce) — Garden :58019 is optional."
 }
 
 # Garden HTTPS checkouts only have `origin` → https://…garden….git.
@@ -323,8 +429,7 @@ ensure_rad_remote() {
       --public
   )
   if ! git -C "$root" remote get-url rad >/dev/null 2>&1; then
-    rid_naked="${RADICLE_RID#rad:}"
-    rid_naked="${rid_naked#rad://}"
+    rid_naked="$(radicle_rid_naked)"
     echo "[bootstrap] warn: rad init --existing did not add remote; adding rad:// manually" >&2
     git -C "$root" remote add rad "rad://${rid_naked}"
   fi
