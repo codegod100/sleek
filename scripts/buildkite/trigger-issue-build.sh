@@ -5,11 +5,16 @@
 # COB commits (no .buildkite/pipeline.yml at that commit). Call this from a Garden
 # webhook, cron, or manually after opening an issue.
 #
+# For a full poll of pending issues (schedule-equivalent), use instead:
+#   ./scripts/buildkite/dispatch-poll.sh
+#   # or Buildkite UI New Build with env RADICLE_TRIGGER=poll
+#
 # Usage:
 #   BUILDKITE_API_TOKEN=... \
 #   BUILDKITE_ORG=nandi \
 #   BUILDKITE_PIPELINE=sleek \
 #     ./scripts/buildkite/trigger-issue-build.sh 2ac9c51b5df8d3b67fb0a40c738e073e9ff301be
+#   # also: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>
 #
 # Optional:
 #   BUILDKITE_BRANCH=main

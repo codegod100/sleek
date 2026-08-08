@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Poll for Radicle issue COBs and dispatch cursor-agent steps.
 #
-# Intended for a Buildkite schedule with RADICLE_TRIGGER=poll (every few minutes).
+# Intended for RADICLE_TRIGGER=poll builds — the 10m Buildkite schedule, or a
+# manual dispatch (UI New Build / ./scripts/buildkite/dispatch-poll.sh).
 # Garden HTTPS clones expose issue COBs as:
 #   refs/namespaces/*/refs/cobs/xyz.radicle.issue/<id>
 # so this does not require a local `rad` install on agents.

@@ -30,10 +30,14 @@
 #
 # Radicle issue → cursor-agent → patch:
 #   Garden adapter skips issue COB commits (no pipeline.yml there). Auto path:
-#     Buildkite schedule every 5m with RADICLE_TRIGGER=poll
+#     Buildkite schedule every 10m with RADICLE_TRIGGER=poll
 #     → scripts/buildkite/poll-issues.sh lists issue COBs via git ls-remote
 #     → dispatches run-issue-agent.sh (pipeline upload or API trigger)
-#   Manual: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
+#   Manual poll (same as schedule — timer OR on-demand):
+#     UI: New Build → env RADICLE_TRIGGER=poll
+#     CLI: ./scripts/buildkite/dispatch-poll.sh
+#   Manual one issue: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
+#     (or: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>)
 #   Requires cluster secret CURSOR_API_KEY (and rad identity on the agent to push patches).
 
 agents:
@@ -196,7 +200,8 @@ steps:
         || cp --reflink=auto "$$bundle" uk.nandi.sleek.flatpak
       buildkite-agent artifact upload uk.nandi.sleek.flatpak
 
-  # --- Radicle issue poll (Buildkite schedule: RADICLE_TRIGGER=poll) ---
+  # --- Radicle issue poll (schedule every 10m OR manual: RADICLE_TRIGGER=poll) ---
+  # Manual: UI New Build + env, or ./scripts/buildkite/dispatch-poll.sh
   - label: ":radicle: Poll issues → dispatch agent"
     key: radicle-issue-poll
     if: build.env("RADICLE_TRIGGER") == "poll"
