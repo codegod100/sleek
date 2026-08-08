@@ -256,12 +256,10 @@ radicle_seed_nid() {
 }
 
 start_rad_node() {
-  if rad node status >/dev/null 2>&1; then
-    echo "[bootstrap] rad node already running"
-  else
-    echo "[bootstrap] starting rad node..."
-    rad node start >/dev/null
-  fi
+  # IMPORTANT: `rad node status` exits 0 even when the node is stopped, so do
+  # not gate on its exit code. `rad node start` is idempotent when already up.
+  echo "[bootstrap] ensuring rad node is running..."
+  rad node start >/dev/null
   # Connect to Garden so seed/fetch and patch announce can reach the seed.
   local seed_nid
   seed_nid="$(radicle_seed_nid)"
@@ -287,9 +285,11 @@ ensure_rid_in_storage() {
   fi
 
   echo "[bootstrap] fetching ${RADICLE_RID} into \$RAD_HOME/storage (required before rad init --existing)"
-  # Prefer Garden seed NID; fall back to routing table if that peer is not ready.
-  if ! rad seed "$RADICLE_RID" --scope followed --from "$seed_nid" --timeout "$timeout"; then
-    echo "[bootstrap] warn: rad seed --from ${seed_nid} failed; retrying via routing table" >&2
+  # Prefer Garden seed NID. Note: `rad seed` can exit 0 after only updating the
+  # local seeding policy when no peers are reachable — always verify storage.
+  rad seed "$RADICLE_RID" --scope followed --from "$seed_nid" --timeout "$timeout" || true
+  if [[ ! -d "$RAD_HOME/storage/$rid_naked" ]]; then
+    echo "[bootstrap] warn: storage empty after seed --from; reconnecting and retrying via routing table" >&2
     rad node connect "$RADICLE_SEED" >/dev/null 2>&1 || true
     rad seed "$RADICLE_RID" --scope followed --timeout "$timeout" \
       || bk_die "failed to fetch ${RADICLE_RID} into local storage — is the node connected to Garden (${RADICLE_SEED})?"
