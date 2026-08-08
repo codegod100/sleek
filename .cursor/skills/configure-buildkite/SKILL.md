@@ -82,7 +82,17 @@ curl -sS --fail-with-body -X POST \
 
 If `bk` is installed: `bk pipeline create "$name" -r "$repository" --cluster-uuid "$cluster_id"`.
 
-baogui uses a **Radicle Garden** clone URL (`https://nandi.radicle.garden/….git`). GitHub repos work when the org can reach them; agents must reach any sibling path-dep remotes (e.g. vidya on tangled.org).
+baogui and sleek use **Radicle Garden** clone URLs (not GitHub) so Buildkite
+pulls the same tip / patches as Radicle:
+
+| Repo | RID | Garden git URL |
+|------|-----|----------------|
+| baogui | `rad:zWrYATFmb1jp9HN2DFxYG5AopJcH` | `https://nandi.radicle.garden/zWrYATFmb1jp9HN2DFxYG5AopJcH.git` |
+| sleek | `rad:z9mjPzpVK472QXaaP1picc5U9xBR` | `https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git` |
+
+Provider is `private` (no GitHub webhooks). Trigger builds via API, schedule, or
+the Radicle CI adapter. Agents must also reach sibling path-dep remotes (e.g.
+vidya on tangled.org / GitHub).
 
 ## Repo files to add
 

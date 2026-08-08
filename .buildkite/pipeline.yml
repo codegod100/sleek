@@ -11,7 +11,11 @@
 #   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
 #
-# Agents must reach github.com/codegod100/{sleek,freeq} and tangled.org/nandi.uk/vidya.
+# Pipeline repository (Buildkite): Radicle Garden clone URL
+#   https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git
+#   RID rad:z9mjPzpVK472QXaaP1picc5U9xBR (not GitHub — baogui-shaped).
+# Agents must reach nandi.radicle.garden, github.com/codegod100/freeq, and
+# tangled.org/nandi.uk/vidya (or flake.lock GitHub vidya).
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
 
