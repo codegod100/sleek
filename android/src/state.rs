@@ -1221,6 +1221,8 @@ pub struct AppState {
     pub recent_nicks: Vec<String>,
     /// Previously used Bluesky handles (MRU). Persisted; shown on Bluesky login.
     pub recent_handles: Vec<String>,
+    /// Show JOIN / PART / QUIT system lines in channel buffers. Persisted.
+    pub show_join_part: bool,
 
     /// User clicked Disconnect / Cancel / Logout — do not auto-reconnect.
     pub intentional_disconnect: bool,
@@ -1349,6 +1351,7 @@ impl AppState {
             recent_channels: normalize_recent_channels(prefs.recent_channels),
             recent_nicks: normalize_recent_nicks(prefs.recent_nicks),
             recent_handles: normalize_recent_handles(prefs.recent_handles),
+            show_join_part: prefs.show_join_part,
             intentional_disconnect: false,
             reconnect_attempts: 0,
             reconnect_at: None,
@@ -1572,7 +1575,7 @@ impl AppState {
         true
     }
 
-    /// Persist app prefs (AV + recent rooms / nicks / handles) to disk
+    /// Persist app prefs (AV + chat + recent rooms / nicks / handles) to disk
     /// (independent of session logout).
     pub fn persist_prefs(&self) {
         let mut prefs = crate::auth::SavedPrefs::load();
@@ -1585,6 +1588,7 @@ impl AppState {
         prefs.recent_channels = self.recent_channels.clone();
         prefs.recent_nicks = self.recent_nicks.clone();
         prefs.recent_handles = self.recent_handles.clone();
+        prefs.show_join_part = self.show_join_part;
         if let Some(h) = self.recent_handles.first() {
             prefs.last_bsky_handle = Some(h.clone());
         }
