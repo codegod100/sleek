@@ -215,8 +215,9 @@ steps:
     if: build.env("RADICLE_TRIGGER") == "poll"
     command: bash scripts/buildkite/poll-issues.sh
     timeout_in_minutes: 15
-    secrets:
-      - BUILDKITE_API_TOKEN
+    # Do not hard-require BUILDKITE_API_TOKEN — poll soft-loads it when present,
+    # otherwise falls back to pipeline-upload. A missing/denied secret under
+    # secrets: fails the job at "Preparing secrets" (see build #27).
 
   # --- Radicle issue agent (triggered via RADICLE_ISSUE_ID on main) ---
   - label: ":radicle: Issue → :cursor: agent → patch"
@@ -224,12 +225,12 @@ steps:
     if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
     command: bash scripts/buildkite/run-issue-agent.sh
     timeout_in_minutes: 90
-    # Cluster secrets must be listed so the agent can inject / soft-get them.
-    # RADICLE_PUBLIC_KEY is optional (derived from SECRET_KEY when absent).
+    # Only required secrets here. Optional RADICLE_PUBLIC_KEY / RAD_PASSPHRASE /
+    # OPENBAO_TOKEN are soft-loaded in bootstrap (derived / empty OK).
+    # Cluster secret policy for these keys MUST allow pipeline sleek-5u9xbr.
     secrets:
       - CURSOR_API_KEY
       - RADICLE_SECRET_KEY
-      - RADICLE_PUBLIC_KEY
     env:
       # Do not put CURSOR_API_KEY / RADICLE_* secrets in env — Buildkite rejects
       # names that appear in both env and secrets. Cluster secrets inject via secrets:.

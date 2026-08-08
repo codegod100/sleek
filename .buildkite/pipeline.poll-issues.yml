@@ -11,10 +11,8 @@ env:
 steps:
   - label: ":radicle: Poll for new issues"
     command: bash scripts/buildkite/poll-issues.sh
-    secrets:
-      - BUILDKITE_API_TOKEN
+    # BUILDKITE_API_TOKEN is optional (soft-load in poll-issues.sh). Do not list
+    # it under secrets: — missing/denied hard secrets fail job setup.
     env:
-      # BUILDKITE_API_TOKEN / CURSOR_API_KEY must not also appear under env
-      # (Buildkite env+secrets name conflict). Secrets inject via secrets:.
       BUILDKITE_ORG: ${BUILDKITE_ORG}
       BUILDKITE_PIPELINE: ${BUILDKITE_PIPELINE:-sleek-5u9xbr}

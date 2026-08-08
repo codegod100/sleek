@@ -131,7 +131,6 @@ steps:
     secrets:
       - CURSOR_API_KEY
       - RADICLE_SECRET_KEY
-      - RADICLE_PUBLIC_KEY
     env:
       RADICLE_ISSUE_ID: "${id}"
       RADICLE_TRIGGER: "issue"
