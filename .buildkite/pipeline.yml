@@ -9,6 +9,8 @@
 # Secrets (Buildkite cluster → Secrets, org nandi / Default cluster):
 #   - NIXBUILD_TOKEN (preferred) — soft-loaded; skip artifacts if missing
 #   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
+#   - CURSOR_API_KEY (issue agent) — Cursor CLI for Radicle issue → patch
+#   - BUILDKITE_API_TOKEN (optional) — poll/trigger scripts for new issues
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
 # Pipeline: https://buildkite.com/nandi/sleek
 #
@@ -25,16 +27,25 @@
 # github.com/codegod100/freeq, and Flathub when building Flatpak.
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
+#
+# Radicle issue → cursor-agent → patch:
+#   Garden adapter skips issue COB commits (no pipeline.yml there). Trigger on
+#   main with RADICLE_ISSUE_ID / RADICLE_TRIGGER=issue instead:
+#     ./scripts/buildkite/trigger-issue-build.sh <issue-id>
+#   Optional schedule: .buildkite/pipeline.poll-issues.yml
 
 agents:
   queue: auto
 
 env:
   RUST_BACKTRACE: "1"
+  GIT_TERMINAL_PROMPT: "0"
 
 steps:
   - label: ":rust: Check"
     key: check
+    # Issue-triggered builds only need the agent step (see below).
+    if: build.env("RADICLE_TRIGGER") != "issue"
     timeout_in_minutes: 120
     command: |
       set -euo pipefail
@@ -98,6 +109,7 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
+    if: build.env("RADICLE_TRIGGER") != "issue"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 120
@@ -138,6 +150,7 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
+    if: build.env("RADICLE_TRIGGER") != "issue"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 180
@@ -180,3 +193,36 @@ steps:
       ln -f "$$bundle" uk.nandi.sleek.flatpak 2>/dev/null \
         || cp --reflink=auto "$$bundle" uk.nandi.sleek.flatpak
       buildkite-agent artifact upload uk.nandi.sleek.flatpak
+
+  # --- Radicle issue agent (triggered via RADICLE_ISSUE_ID on main) ---
+  - label: ":radicle: Issue → :cursor: agent → patch"
+    key: radicle-issue-agent
+    if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
+    command: bash scripts/buildkite/run-issue-agent.sh
+    timeout_in_minutes: 90
+    env:
+      CURSOR_API_KEY: ${CURSOR_API_KEY}
+      RADICLE_ISSUE_ID: ${RADICLE_ISSUE_ID}
+
+  - label: ":mag: Verify patch (optional)"
+    key: verify-patch
+    if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
+    depends_on: radicle-issue-agent
+    allow_dependency_failure: true
+    command: |
+      set -euo pipefail
+      BRANCH="$$(buildkite-agent meta-data get radicle_issue_branch 2>/dev/null || true)"
+      if [[ -z "$$BRANCH" ]]; then
+        echo "No issue branch metadata — prior step likely skipped (not an issue event)."
+        exit 0
+      fi
+      if git show-ref --verify --quiet "refs/heads/$$BRANCH"; then
+        echo "Branch $$BRANCH exists."
+        git log -1 --oneline "$$BRANCH"
+      else
+        echo "Branch $$BRANCH not found — agent may have declined or failed before branching."
+        exit 0
+      fi
+      echo ""
+      echo "Open patches:"
+      rad patch list --open 2>/dev/null | sed -n '1,15p' || rad patch 2>/dev/null | sed -n '1,15p' || true
