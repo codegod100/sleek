@@ -20,7 +20,7 @@
 #   NIXBUILD_SSH_HOST — default eu.nixbuild.net
 #
 # Docs: https://docs.nixbuild.net/remote-builds/
-# GHA equivalent: nixbuild/nix-quick-install-action + nixbuild/nixbuild-action
+# Replaces the former GitHub Actions nixbuild/nix-quick-install-action stack.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -1,5 +1,5 @@
 # Enable GitHub auto-merge on same-repo PRs once opened/updated.
-# Merge happens only after required status checks (CI) pass — see repo ruleset.
+# Merge happens only after required status checks (Buildkite) pass — see repo ruleset.
 #
 # Fork PRs and drafts are ignored.
 

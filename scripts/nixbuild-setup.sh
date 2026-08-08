@@ -8,8 +8,8 @@
 #   export NIXBUILD_TOKEN=…
 #   ./scripts/nixbuild-setup.sh
 #
-# GitHub Actions should use nixbuild/nixbuild-action instead; this script is
-# for Spindle/Tangled and other shell-only environments.
+# Buildkite uses scripts/ci-nixbuild.sh; this script is for Spindle/Tangled and
+# other shell-only environments.
 set -euo pipefail
 
 TOKEN="${NIXBUILD_TOKEN:-${nixbuild_token:-}}"
