@@ -12,6 +12,7 @@ use crate::android_media::{android_app_handle, load_app_class};
 
 static IME_QUEUE: Mutex<Vec<QueuedIme>> = Mutex::new(Vec::new());
 static LAST_ACTIVE: Mutex<Option<bool>> = Mutex::new(None);
+static LAST_SYNC: Mutex<Option<(String, usize, usize)>> = Mutex::new(None);
 
 enum QueuedIme {
     Enabled,
@@ -62,20 +63,45 @@ pub fn drain_ime_events(ctx: &egui::Context) {
     });
 }
 
-/// Wire egui-winit IME allow/deny to the Java bridge (replaces NativeActivity show/hide).
-pub fn set_ime_allowed(allowed: bool) {
+/// Mirror egui compose text into the hidden editor for Gboard glide context.
+/// Only runs after the bridge is active (keyboard shown) to avoid racing setActive.
+pub fn sync_field_text(text: &str, sel_start: usize, sel_end: usize) {
+    if LAST_ACTIVE.lock().expect("ime active") != Some(true) {
+        return;
+    }
+    let key = (text.to_string(), sel_start, sel_end);
+    {
+        let mut last = LAST_SYNC.lock().expect("ime sync");
+        if last.as_ref() == Some(&key) {
+            return;
+        }
+        *last = Some(key.clone());
+    }
+    if let Err(e) = call_sync_field(&key.0, key.1, key.2) {
+        log::debug!("android IME syncField: {e}");
+    }
+}
+
+/// Wire egui-winit IME allow/deny to the Java bridge.
+/// Returns false when the bridge is unavailable so winit can fall back to show/hide.
+pub fn set_ime_allowed(allowed: bool) -> bool {
     let mut last = LAST_ACTIVE.lock().expect("ime active");
     if *last == Some(allowed) {
-        return;
+        return true;
     }
     *last = Some(allowed);
     if allowed {
         push_ime(QueuedIme::Enabled);
     } else {
         push_ime(QueuedIme::Disabled);
+        *LAST_SYNC.lock().expect("ime sync") = None;
     }
-    if let Err(e) = call_set_active(allowed) {
-        log::warn!("android IME setActive({allowed}): {e}");
+    match call_set_active(allowed) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("android IME setActive({allowed}): {e}");
+            false
+        }
     }
 }
 
@@ -124,6 +150,44 @@ fn call_set_active(active: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn call_sync_field(text: &str, sel_start: usize, sel_end: usize) -> Result<(), String> {
+    let app = android_app_handle().ok_or("AndroidApp not set")?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return Err("null JavaVM".into());
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return Err("null Activity".into());
+    }
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+    let start = i32::try_from(sel_start.min(i32::MAX as usize)).unwrap_or(i32::MAX);
+    let end = i32::try_from(sel_end.min(i32::MAX as usize)).unwrap_or(i32::MAX);
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+        let cls = load_app_class(env, activity.as_ref(), "uk.nandi.sleek.SleekIme")?;
+        let jtext = env.new_string(text)?;
+        env.call_static_method(
+            &cls,
+            jni_str!("syncField"),
+            jni_sig!((android.app.Activity, java.lang.String, int, int) -> void),
+            &[
+                JValue::Object(activity.as_ref()),
+                JValue::Object(&jtext),
+                JValue::Int(start),
+                JValue::Int(end),
+            ],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| format!("JNI syncField: {e}"))
+}
+
 // ── JNI callbacks from SleekIme.java ─────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -162,6 +226,5 @@ pub extern "system" fn Java_uk_nandi_sleek_SleekIme_onDeleteSurrounding<'local>(
     for _ in 0..before {
         push_ime(QueuedIme::Backspace);
     }
-    // egui TextEdit rarely needs forward delete from IME; ignore `after` for now.
     let _ = after;
 }
