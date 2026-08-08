@@ -64,6 +64,14 @@ env:
   GIT_TERMINAL_PROMPT: "0"
 
 steps:
+  - label: ":boxci: Trigger merge build"
+    key: boxci-merge
+    if: build.branch == "main" && build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
+    command: |
+      set -euo pipefail
+      chmod +x scripts/boxci/dispatch-merge.sh
+      ./scripts/boxci/dispatch-merge.sh --sha "$$BUILDKITE_COMMIT"
+
   - label: ":rust: Check"
     key: check
     # Issue/poll builds only need the agent / poll steps.

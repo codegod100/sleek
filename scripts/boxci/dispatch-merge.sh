@@ -8,6 +8,7 @@
 # Env:
 #   BOXCI_URL          — default https://boxci.boxd.sh
 #   SLEEK_BRANCH       — default main
+#   SLEEK_REPO_URL     — passed to boxci (default: Radicle Garden clone URL)
 #   OPENBAO_TOKEN      — optional; not required for trigger itself
 set -euo pipefail
 
@@ -45,6 +46,7 @@ done
 
 BOXCI_URL="${BOXCI_URL:-https://boxci.boxd.sh}"
 BRANCH="${SLEEK_BRANCH:-main}"
+REPO_URL="${SLEEK_REPO_URL:-https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git}"
 
 command -v curl >/dev/null 2>&1 || { echo "curl required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
@@ -59,12 +61,14 @@ payload="$(jq -n \
   --arg trigger "merge" \
   --arg sha "$SHA" \
   --arg branch "$BRANCH" \
+  --arg repo_url "$REPO_URL" \
   '{
     pipeline: $pipeline,
     env: {
       BOXCI_TRIGGER: $trigger,
       GIT_SHA: $sha,
-      SLEEK_BRANCH: $branch
+      SLEEK_BRANCH: $branch,
+      SLEEK_REPO_URL: $repo_url
     }
   }')"
 
