@@ -93,7 +93,10 @@ API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
 patches live under OpenBao `secret/data/radicle`.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
-and/or `OPENBAO_TOKEN`. Helper: `scripts/ci-nixbuild.sh`.
+and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
+`baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check materializes flake.lock–
+pinned `vidya`/`freeq` via `scripts/sync-flake-path-deps.sh` and runs `cargo`
+inside `nix develop` (mold + libs from the flake, not apt).
 
 ```bash
 eval "$(./scripts/configure-buildkite-from-openbao.sh)"

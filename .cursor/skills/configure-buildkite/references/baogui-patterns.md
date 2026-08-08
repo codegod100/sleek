@@ -13,10 +13,13 @@ check (cargo clippy + test)
 
 ## Check step essentials
 
-- Clone sibling `vidya` next to the checkout if missing (`dirname $PWD/vidya`).
-- Install rustup toolchain **1.85** + clippy when absent.
-- Install egui system libs via apt when available.
-- `cargo clippy -- -D warnings` then `cargo test`.
+- Materialize sibling path deps with `scripts/sync-flake-path-deps.sh` (flake.lock
+  pins: vidya from Radicle Garden, freeq from GitHub). Do not clone floating tips.
+- Prefer **`nix develop --command …`** so mold (`.cargo/config.toml`), rustc,
+  and native libs come from the flake — same as local AGENTS.md. Avoid apt
+  mold / rustup when the flake already provides them.
+- Set `accept-flake-config` non-interactively (`/etc/nix/nix.conf` + `NIX_CONFIG`).
+- `cargo clippy -- -D warnings` then `cargo test` inside the flake shell.
 
 ## Flatpak step essentials
 
