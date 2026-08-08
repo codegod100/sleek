@@ -26,8 +26,16 @@ path = "src/lib.rs"
 # lib-only: cargo-apk panics if this package also has [[bin]] targets
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Muted H.264-in-MP4 chat previews need vidya's optional `video` feature.
+# Radicle Garden tip of vidya does not ship that feature yet (GitHub tip does).
+# When Garden catches up, uncomment and add to default:
+#   video-previews = ["vidya/video"]
+#   default = ["video-previews"]
+
 [dependencies]
-vidya = { path = "../../vidya", features = ["video"] }
+vidya = { path = "../../vidya" }
 # Guest IRC + freeq events. Prefer aws-lc-rs to match moq-native / iroh
 # (aws-lc-sys is already required). Note: `ring` still builds via quinn /
 # rustls-webpki defaults — this only avoids enabling rustls' ring *provider*

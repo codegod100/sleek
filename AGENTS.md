@@ -29,9 +29,9 @@ support).
 ### Sibling path dependencies (required for working-tree builds)
 `android/Cargo.toml` uses path deps `../../vidya` and `../../freeq/freeq-sdk`.
 Because the repo root is `/workspace`, those resolve to **`/vidya`** and
-**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`** as
-`github:codegod100/vidya` and `github:codegod100/freeq`. Materialize siblings
-from the lock with:
+**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`**: vidya from
+Radicle Garden (`rad:z2UqGTRH21s3pHnJgSuMwRaPPNNcW`) and freeq from
+`github:codegod100/freeq`. Materialize siblings from the lock with:
 
 ```bash
 bash scripts/sync-flake-path-deps.sh

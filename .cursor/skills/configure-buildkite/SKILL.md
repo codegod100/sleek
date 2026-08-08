@@ -89,10 +89,11 @@ pulls the same tip / patches as Radicle:
 |------|-----|----------------|
 | baogui | `rad:zWrYATFmb1jp9HN2DFxYG5AopJcH` | `https://nandi.radicle.garden/zWrYATFmb1jp9HN2DFxYG5AopJcH.git` |
 | sleek | `rad:z9mjPzpVK472QXaaP1picc5U9xBR` | `https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git` |
+| vidya (flake input) | `rad:z2UqGTRH21s3pHnJgSuMwRaPPNNcW` | `https://nandi.radicle.garden/z2UqGTRH21s3pHnJgSuMwRaPPNNcW.git` |
 
 Provider is `private` (no GitHub webhooks). Trigger builds via API, schedule, or
-the Radicle CI adapter. Agents must also reach sibling path-dep remotes (e.g.
-vidya on tangled.org / GitHub).
+the Radicle CI adapter. Sleek's `vidya` flake input uses the Garden git URL
+above (`flake = false`); agents also need `github.com/codegod100/freeq`.
 
 ## Repo files to add
 

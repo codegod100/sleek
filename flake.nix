@@ -18,8 +18,9 @@
     # Path deps in Cargo.toml are ../../vidya and ../../freeq/freeq-sdk —
     # pin them as flake inputs so `nix build` works without a monorepo checkout.
     # Dev: scripts/sync-flake-path-deps.sh materializes siblings from these inputs.
+    # Vidya is sourced from Radicle Garden (not GitHub/Tangled).
     vidya = {
-      url = "github:codegod100/vidya";
+      url = "git+https://nandi.radicle.garden/z2UqGTRH21s3pHnJgSuMwRaPPNNcW.git?ref=main";
       flake = false;
     };
     freeq = {
@@ -162,8 +163,10 @@
             cp -a ${vidya}/. $out/vidya/
             cp -a ${freeq}/. $out/freeq/
             chmod -R u+w $out
-            # vidya @ 5e9f26c references winit on Android but omits the dep.
-            patch -p1 -d $out/vidya < ${./patches/vidya-android-winit.patch}
+            # Older GitHub tips of vidya referenced winit on Android without
+            # declaring the dep. Radicle tip may not need this; apply if it fits.
+            patch -p1 -d $out/vidya --forward --batch \
+              < ${./patches/vidya-android-winit.patch} || true
             # Drop heavy/irrelevant freeq crates so cargo metadata stays lean
             # (path dep only needs freeq-sdk + its workspace graph).
             rm -rf $out/sleek/{.git,host/target,android/target} 2>/dev/null || true

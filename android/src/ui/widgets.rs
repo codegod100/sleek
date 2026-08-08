@@ -2242,6 +2242,8 @@ fn inline_image_preview(
 /// Inline video card via [`vidya::video_player`] (muted H.264-in-MP4).
 ///
 /// Unsupported formats (WebM, etc.) keep the play-card look and open externally.
+/// Without the `video-previews` feature (Radicle tip of vidya may lack `video`),
+/// falls back to the open-in-browser card.
 fn inline_video_preview(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -2250,73 +2252,84 @@ fn inline_video_preview(
     id_salt: &str,
     caption: Option<&str>,
 ) {
-    use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
+    #[cfg(not(feature = "video-previews"))]
+    {
+        let _ = media;
+        video_open_fallback(ui, th, url, id_salt);
+        media_embed_link_footer(ui, th, url, id_salt, caption);
+        return;
+    }
 
-    media.touch_video(url);
+    #[cfg(feature = "video-previews")]
+    {
+        use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
 
-    let sp = &th.spacing;
-    // Compact player — bubble is full-width; don't stretch the video surface.
-    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
-    let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+        media.touch_video(url);
 
-    match media.videos.get(url) {
-        Some(crate::state::VideoState::Loading) | None => {
-            egui::Frame::new()
-                .fill(th.palette.headerbar_bg)
-                .corner_radius(sp.radius_sm)
-                .inner_margin(egui::Margin::symmetric(12, 16))
-                .show(ui, |ui| {
-                    ui.set_width(max_w);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.add_space(sp.sm);
-                        dim_label(ui, th, "Loading video…");
+        let sp = &th.spacing;
+        // Compact player — bubble is full-width; don't stretch the video surface.
+        let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+        let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+
+        match media.videos.get(url) {
+            Some(crate::state::VideoState::Loading) | None => {
+                egui::Frame::new()
+                    .fill(th.palette.headerbar_bg)
+                    .corner_radius(sp.radius_sm)
+                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(max_w);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(sp.sm);
+                            dim_label(ui, th, "Loading video…");
+                        });
                     });
-                });
-            media_embed_link_footer(ui, th, url, id_salt, caption);
-            return;
+                media_embed_link_footer(ui, th, url, id_salt, caption);
+                return;
+            }
+            Some(crate::state::VideoState::Failed) => {
+                // Fall back to the open-in-browser card without bytes.
+                video_open_fallback(ui, th, url, id_salt);
+                return;
+            }
+            Some(crate::state::VideoState::Ready(_)) => {}
         }
-        Some(crate::state::VideoState::Failed) => {
-            // Fall back to the open-in-browser card without bytes.
-            video_open_fallback(ui, th, url, id_salt);
-            return;
+
+        // Clone Arc so we can mutably borrow the player map separately.
+        let bytes = match media.videos.get(url) {
+            Some(crate::state::VideoState::Ready(b)) => b.clone(),
+            _ => return,
+        };
+
+        // Per-bubble player state — same URL in two messages must not share playhead.
+        let player_key = format!("{url}\0{id_salt}");
+        let player = media
+            .video_players
+            .entry(player_key)
+            .or_insert_with(VideoPlayerState::new);
+        player.load_bytes(ui.ctx(), (url, id_salt), bytes);
+
+        let opts = VideoPlayerOpts {
+            max_width: max_w,
+            max_height: max_h,
+            title: caption
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            open_url_on_unsupported: Some(url.to_string()),
+        };
+        let playing = player.is_playing();
+        let (resp, action) = video_player(ui, th, player, &opts);
+        // High-contrast play affordance — theme accent blends into solid-blue
+        // first frames; paint a dark circle + white triangle on top.
+        if !playing {
+            paint_video_play_affordance(ui, resp.rect);
         }
-        Some(crate::state::VideoState::Ready(_)) => {}
+        if action == VideoPlayerAction::OpenExternally {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+        media_embed_link_footer(ui, th, url, id_salt, caption);
     }
-
-    // Clone Arc so we can mutably borrow the player map separately.
-    let bytes = match media.videos.get(url) {
-        Some(crate::state::VideoState::Ready(b)) => b.clone(),
-        _ => return,
-    };
-
-    // Per-bubble player state — same URL in two messages must not share playhead.
-    let player_key = format!("{url}\0{id_salt}");
-    let player = media
-        .video_players
-        .entry(player_key)
-        .or_insert_with(VideoPlayerState::new);
-    player.load_bytes(ui.ctx(), (url, id_salt), bytes);
-
-    let opts = VideoPlayerOpts {
-        max_width: max_w,
-        max_height: max_h,
-        title: caption
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        open_url_on_unsupported: Some(url.to_string()),
-    };
-    let playing = player.is_playing();
-    let (resp, action) = video_player(ui, th, player, &opts);
-    // High-contrast play affordance — theme accent blends into solid-blue
-    // first frames; paint a dark circle + white triangle on top.
-    if !playing {
-        paint_video_play_affordance(ui, resp.rect);
-    }
-    if action == VideoPlayerAction::OpenExternally {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-    }
-    media_embed_link_footer(ui, th, url, id_salt, caption);
 }
 
 /// Dark play circle that stays visible on blue / accent-tinted video frames.
@@ -2692,7 +2705,7 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
                 egui::pos2(
                     full.right() - img_pad,
-                    full.bottom() - img_pad - safe.bottom(),
+                    full.bottom() - img_pad - safe.bottom,
                 ),
             );
 
