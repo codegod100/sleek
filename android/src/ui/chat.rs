@@ -604,7 +604,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                 }
                 #[cfg(target_os = "android")]
                 if resp.has_focus() {
-                    let (sel_start, sel_end) = compose_cursor_range(ui.ctx(), compose_id);
+                    let (sel_start, sel_end) =
+                        compose_cursor_range(ui.ctx(), compose_id, state.compose.len());
                     crate::android_ime::sync_field_text(&state.compose, sel_start, sel_end);
                 }
                 let enter = resp.has_focus()
@@ -1072,7 +1073,8 @@ fn compose_attach_composer(
     }
     #[cfg(target_os = "android")]
     if resp.has_focus() {
-        let (sel_start, sel_end) = compose_cursor_range(ui.ctx(), compose_id);
+        let (sel_start, sel_end) =
+            compose_cursor_range(ui.ctx(), compose_id, state.compose.len());
         crate::android_ime::sync_field_text(&state.compose, sel_start, sel_end);
     }
     let enter = resp.has_focus()
@@ -1109,14 +1111,20 @@ fn compose_attach_composer(
 /// - `lock_focus(true)` keeps Tab in the field for nick completion (handled
 ///   by [`try_nick_tab_complete`] before this runs).
 #[cfg(target_os = "android")]
-fn compose_cursor_range(ctx: &egui::Context, field_id: egui::Id) -> (usize, usize) {
+fn compose_cursor_range(ctx: &egui::Context, field_id: egui::Id, text_len: usize) -> (usize, usize) {
+    // Never fall back to (0,0) on a non-empty field — that resets the hidden
+    // EditText caret to the start, and Gboard backspace becomes a no-op.
+    let fallback = (text_len, text_len);
     let Some(state) = egui::TextEdit::load_state(ctx, field_id) else {
-        return (0, 0);
+        return fallback;
     };
     let Some(range) = state.cursor.char_range() else {
-        return (0, 0);
+        return fallback;
     };
-    (range.primary.index, range.secondary.index)
+    (
+        range.primary.index.min(text_len),
+        range.secondary.index.min(text_len),
+    )
 }
 
 fn compose_input_row(
