@@ -51,7 +51,7 @@ Created dedicated CI identity (not your personal node):
   home:  $RAD_HOME
   key:   $OUT_DIR/RADICLE_SECRET_KEY.pem
 
-Buildkite (Default cluster → Secrets, scope pipeline sleek if possible):
+Buildkite (Default cluster → Secrets, scope pipeline sleek-5u9xbr if possible):
   RADICLE_SECRET_KEY  = contents of RADICLE_SECRET_KEY.pem (multiline PEM)
   RADICLE_PUBLIC_KEY  = $PUB
   RAD_PASSPHRASE      = (leave unset / empty)

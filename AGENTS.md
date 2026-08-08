@@ -116,5 +116,5 @@ eval "$(./scripts/configure-buildkite-from-openbao.sh)"
 # curl -X POST -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
 #   -H "Content-Type: application/json" \
 #   -d '{"commit":"HEAD","branch":"main"}' \
-#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek/builds
+#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek-5u9xbr/builds
 ```

@@ -68,7 +68,7 @@ resolve_creds() {
     echo "Create a Buildkite cluster secret (do not invent tokens — copy from OpenBao/nixbuild):" >&2
     echo "  UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets" >&2
     echo "  Keys: NIXBUILD_TOKEN  (preferred)  or  OPENBAO_TOKEN  (fetches NIXBUILD_TOKEN from OpenBao)" >&2
-    echo "  Scope policy example: pipeline_slug sleek" >&2
+    echo "  Scope policy example: pipeline_slug sleek-5u9xbr" >&2
     echo "SKIP=1"
     return 0
   fi
