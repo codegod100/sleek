@@ -83,7 +83,7 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 [baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
-[sleek](https://buildkite.com/nandi/sleek) (created via API; steps in
+[sleek-5u9xbr](https://buildkite.com/nandi/sleek-5u9xbr) (created via API; steps in
 `.buildkite/pipeline.yml`).
 
 **Clone source is Radicle Garden** (not GitHub), same shape as baogui:
@@ -103,7 +103,7 @@ identity (not a personal DID); never commit key material.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
 and/or `OPENBAO_TOKEN`. Issue agent also needs `CURSOR_API_KEY` +
-`RADICLE_SECRET_KEY`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
+`RADICLE_SECRET_KEY`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek-5u9xbr` (and
 `baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check materializes flake.lock–
 pinned `vidya`/`freeq` via `scripts/sync-flake-path-deps.sh` and runs `cargo`
 inside `nix develop` (mold + libs from the flake, not apt).

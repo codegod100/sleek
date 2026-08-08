@@ -14,7 +14,11 @@
 #   - RADICLE_PUBLIC_KEY / RAD_PASSPHRASE (optional) — derived / empty OK
 #   - BUILDKITE_API_TOKEN (optional) — poll/trigger scripts for new issues
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
-# Pipeline: https://buildkite.com/nandi/sleek
+# Pipeline: https://buildkite.com/nandi/sleek-5u9xbr
+#
+# Cluster secrets are inaccessible to `buildkite-agent secret get` unless the
+# step declares them under `secrets:` (Buildkite cluster secrets allow-list).
+# Soft-load in scripts/buildkite/bootstrap.sh still applies after declaration.
 #
 # Pipeline repository (Buildkite): Radicle Garden clone URL
 #   https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git
@@ -211,6 +215,8 @@ steps:
     if: build.env("RADICLE_TRIGGER") == "poll"
     command: bash scripts/buildkite/poll-issues.sh
     timeout_in_minutes: 15
+    secrets:
+      - BUILDKITE_API_TOKEN
 
   # --- Radicle issue agent (triggered via RADICLE_ISSUE_ID on main) ---
   - label: ":radicle: Issue → :cursor: agent → patch"
@@ -218,6 +224,12 @@ steps:
     if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
     command: bash scripts/buildkite/run-issue-agent.sh
     timeout_in_minutes: 90
+    # Cluster secrets must be listed so the agent can inject / soft-get them.
+    # RADICLE_PUBLIC_KEY is optional (derived from SECRET_KEY when absent).
+    secrets:
+      - CURSOR_API_KEY
+      - RADICLE_SECRET_KEY
+      - RADICLE_PUBLIC_KEY
     env:
       CURSOR_API_KEY: ${CURSOR_API_KEY}
       RADICLE_ISSUE_ID: ${RADICLE_ISSUE_ID}

@@ -6,7 +6,7 @@
 # Requires BUILDKITE_ORG, BUILDKITE_PIPELINE, BUILDKITE_API_TOKEN.
 #
 # Example (on Garden after an issue open):
-#   echo "$payload" | BUILDKITE_ORG=nandi BUILDKITE_PIPELINE=sleek \
+#   echo "$payload" | BUILDKITE_ORG=nandi BUILDKITE_PIPELINE=sleek-5u9xbr \
 #     BUILDKITE_API_TOKEN=... ./scripts/buildkite/webhook-to-buildkite.sh
 set -euo pipefail
 

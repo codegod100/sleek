@@ -113,7 +113,7 @@ echo "poll: ${#pending[@]} issue(s) to dispatch"
 dispatch_via_api() {
   local id=$1
   BUILDKITE_ORG="${BUILDKITE_ORG:-nandi}" \
-  BUILDKITE_PIPELINE="${BUILDKITE_PIPELINE:-sleek}" \
+  BUILDKITE_PIPELINE="${BUILDKITE_PIPELINE:-sleek-5u9xbr}" \
     "$SCRIPT_DIR/trigger-issue-build.sh" "$id"
 }
 
@@ -128,6 +128,10 @@ steps:
     key: "radicle-issue-agent-${short}"
     command: bash scripts/buildkite/run-issue-agent.sh
     timeout_in_minutes: 90
+    secrets:
+      - CURSOR_API_KEY
+      - RADICLE_SECRET_KEY
+      - RADICLE_PUBLIC_KEY
     env:
       RADICLE_ISSUE_ID: "${id}"
       RADICLE_TRIGGER: "issue"

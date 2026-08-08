@@ -12,7 +12,7 @@
 # Usage:
 #   BUILDKITE_API_TOKEN=... \
 #   BUILDKITE_ORG=nandi \
-#   BUILDKITE_PIPELINE=sleek \
+#   BUILDKITE_PIPELINE=sleek-5u9xbr \
 #     ./scripts/buildkite/trigger-issue-build.sh 2ac9c51b5df8d3b67fb0a40c738e073e9ff301be
 #   # also: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>
 #
@@ -28,7 +28,7 @@ if [[ -z "$ISSUE_ID" ]]; then
 fi
 
 ORG="${BUILDKITE_ORG:-nandi}"
-PIPELINE="${BUILDKITE_PIPELINE:-sleek}"
+PIPELINE="${BUILDKITE_PIPELINE:-sleek-5u9xbr}"
 TOKEN="${BUILDKITE_API_TOKEN:-}"
 BRANCH="${BUILDKITE_BRANCH:-main}"
 API="${BUILDKITE_API_URL:-https://api.buildkite.com/v2}"

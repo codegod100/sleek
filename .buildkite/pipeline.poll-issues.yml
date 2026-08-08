@@ -11,8 +11,10 @@ env:
 steps:
   - label: ":radicle: Poll for new issues"
     command: bash scripts/buildkite/poll-issues.sh
+    secrets:
+      - BUILDKITE_API_TOKEN
     env:
       BUILDKITE_API_TOKEN: ${BUILDKITE_API_TOKEN}
       BUILDKITE_ORG: ${BUILDKITE_ORG}
-      BUILDKITE_PIPELINE: ${BUILDKITE_PIPELINE}
+      BUILDKITE_PIPELINE: ${BUILDKITE_PIPELINE:-sleek-5u9xbr}
       CURSOR_API_KEY: ${CURSOR_API_KEY}

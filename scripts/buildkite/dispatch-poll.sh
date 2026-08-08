@@ -5,7 +5,7 @@
 # want an immediate poll without waiting for the next tick.
 #
 # Buildkite UI (no script needed):
-#   https://buildkite.com/nandi/sleek → New Build
+#   https://buildkite.com/nandi/sleek-5u9xbr → New Build
 #   Branch: main (or tip you want)
 #   Environment variables: RADICLE_TRIGGER=poll
 #   Create Build → runs radicle-issue-poll → poll-issues.sh
@@ -22,7 +22,7 @@
 #
 # Optional env:
 #   BUILDKITE_ORG=nandi
-#   BUILDKITE_PIPELINE=sleek
+#   BUILDKITE_PIPELINE=sleek-5u9xbr
 #   BUILDKITE_BRANCH=main
 #   BUILDKITE_API_URL=https://api.buildkite.com/v2
 set -euo pipefail
@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 ORG="${BUILDKITE_ORG:-nandi}"
-PIPELINE="${BUILDKITE_PIPELINE:-sleek}"
+PIPELINE="${BUILDKITE_PIPELINE:-sleek-5u9xbr}"
 BRANCH="${BUILDKITE_BRANCH:-main}"
 API="${BUILDKITE_API_URL:-https://api.buildkite.com/v2}"
 
