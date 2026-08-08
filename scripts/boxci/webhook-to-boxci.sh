@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Translate a Radicle CI broker push/patch webhook payload into a boxci merge build
-# (APK + Flatpak on main).
+# (APK + Flatpak on main) via POST /api/webhooks/garden.
 #
-# Intended for the Garden webhooks adapter: pipe broker/webhook JSON on stdin.
-# Complements webhook-to-buildkite.sh (issues) and the Garden buildkite-adapter
-# (Buildkite check on merge). boxci runs the artifact builds on the boxd VM.
+# Intended for the Garden webhooks adapter when you cannot register boxci directly.
+# Prefer registering https://boxci.boxd.sh/api/webhooks/garden on Garden instead.
 #
 # Example (Garden after merge to main):
 #   echo "$payload" | ./scripts/boxci/webhook-to-boxci.sh
@@ -48,4 +47,13 @@ if command -v rad >/dev/null 2>&1; then
   fi
 fi
 
-exec "$SCRIPT_DIR/dispatch-merge.sh" --sha "$commit"
+BOXCI_URL="${BOXCI_URL:-https://boxci.boxd.sh}"
+url="${BOXCI_URL%/}/api/webhooks/garden"
+
+# Re-post the broker payload; boxci resolves repo URL and runs .boxci/pipeline.yml.
+echo "POST $url"
+response="$(curl -fsSL -X POST "$url" \
+  -H "Content-Type: application/json" \
+  -d "$payload")"
+
+echo "$response" | jq .

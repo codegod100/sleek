@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Trigger boxci sleek-merge pipeline (APK + Flatpak after merge to main).
+# Trigger boxci merge build from sleek's repo-local .boxci/pipeline.yml.
 #
 # Usage:
 #   ./scripts/boxci/dispatch-merge.sh
@@ -8,7 +8,7 @@
 # Env:
 #   BOXCI_URL          — default https://boxci.boxd.sh
 #   SLEEK_BRANCH       — default main
-#   SLEEK_REPO_URL     — passed to boxci (default: Radicle Garden clone URL)
+#   SLEEK_REPO_URL     — Garden clone URL (default below)
 #   OPENBAO_TOKEN      — optional; not required for trigger itself
 set -euo pipefail
 
@@ -47,6 +47,7 @@ done
 BOXCI_URL="${BOXCI_URL:-https://boxci.boxd.sh}"
 BRANCH="${SLEEK_BRANCH:-main}"
 REPO_URL="${SLEEK_REPO_URL:-https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git}"
+REPO_ID="${SLEEK_REPO_ID:-rad:z9mjPzpVK472QXaaP1picc5U9xBR}"
 
 command -v curl >/dev/null 2>&1 || { echo "curl required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
@@ -57,24 +58,22 @@ if [[ -z "$SHA" ]]; then
 fi
 
 payload="$(jq -n \
-  --arg pipeline "sleek-merge.yml" \
+  --arg repo_url "$REPO_URL" \
+  --arg repo "$REPO_ID" \
   --arg trigger "merge" \
   --arg sha "$SHA" \
   --arg branch "$BRANCH" \
-  --arg repo_url "$REPO_URL" \
   '{
-    pipeline: $pipeline,
-    env: {
-      BOXCI_TRIGGER: $trigger,
-      GIT_SHA: $sha,
-      SLEEK_BRANCH: $branch,
-      SLEEK_REPO_URL: $repo_url
-    }
+    repo_url: $repo_url,
+    repo: $repo,
+    trigger: $trigger,
+    sha: $sha,
+    branch: $branch
   }')"
 
-url="${BOXCI_URL%/}/api/runs"
+url="${BOXCI_URL%/}/api/runs/from-repo"
 echo "POST $url"
-echo "  pipeline=sleek-merge.yml BOXCI_TRIGGER=merge GIT_SHA=${SHA:0:7} branch=$BRANCH"
+echo "  trigger=merge GIT_SHA=${SHA:0:7} branch=$BRANCH repo=$REPO_URL"
 
 response="$(curl -fsSL -X POST "$url" \
   -H "Content-Type: application/json" \
@@ -82,9 +81,11 @@ response="$(curl -fsSL -X POST "$url" \
 
 run_id="$(echo "$response" | jq -r '.id // empty')"
 status="$(echo "$response" | jq -r '.status // empty')"
+pipeline="$(echo "$response" | jq -r '.pipeline // empty')"
 
 if [[ -n "$run_id" ]]; then
   echo "run $run_id: $status"
+  [[ -n "$pipeline" ]] && echo "  pipeline=$pipeline"
   echo "$response" | jq '{id, status, pipeline, duration_s, steps: [.steps[] | {key, label, status}]}'
 else
   echo "$response" | jq .
