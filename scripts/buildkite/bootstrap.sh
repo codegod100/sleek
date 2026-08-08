@@ -49,13 +49,15 @@ bk_soft_secret() {
       export "$name"
       return 0
     fi
-    # Common cause: cluster secret policy excludes this pipeline slug
-    # (e.g. scoped to `sleek` but agents run on `sleek-5u9xbr`).
-    if [[ -n "$err" ]]; then
-      echo "[bootstrap] warn: soft-load $name failed: $err" >&2
-      echo "[bootstrap] hint: Default cluster → Secrets → $name → allow pipeline ${BUILDKITE_PIPELINE_SLUG:-sleek-5u9xbr} (or all pipelines)" >&2
-    else
-      echo "[bootstrap] warn: soft-load $name returned empty (secret missing or policy excludes this pipeline)" >&2
+    # Undeclared optional secrets always 404 under cluster secrets — stay quiet.
+    # Required secrets (listed in step secrets:) must warn so policy misses show up.
+    if [[ "${2:-}" == "--required" ]]; then
+      if [[ -n "$err" ]]; then
+        echo "[bootstrap] warn: soft-load $name failed: $err" >&2
+        echo "[bootstrap] hint: Default cluster → Secrets → $name → allow pipeline ${BUILDKITE_PIPELINE_SLUG:-sleek-5u9xbr} (or all pipelines)" >&2
+      else
+        echo "[bootstrap] warn: soft-load $name returned empty (secret missing or policy excludes this pipeline)" >&2
+      fi
     fi
   fi
 }
@@ -107,9 +109,9 @@ build_radicle_mcp() {
 verify_auth() {
   local cmd
   cmd="$(cursor_agent_cmd)"
-  bk_soft_secret CURSOR_API_KEY
+  bk_soft_secret CURSOR_API_KEY --required
   if [[ -z "${CURSOR_API_KEY:-}" ]]; then
-    bk_die "CURSOR_API_KEY is not set — add it as a Buildkite cluster secret"
+    bk_die "CURSOR_API_KEY is not set — add it as a Buildkite cluster secret (policy must allow sleek-5u9xbr)"
   fi
   if ! "$cmd" status >/dev/null 2>&1; then
     bk_die "Cursor CLI auth failed — check CURSOR_API_KEY"
@@ -129,8 +131,11 @@ install_radicle_cli() {
 }
 
 load_radicle_secrets() {
+  # Only RADICLE_SECRET_KEY is listed under step secrets: (required). Optional
+  # OPENBAO_TOKEN / RADICLE_PUBLIC_KEY / RAD_PASSPHRASE soft-get quietly (404 if
+  # undeclared) and may still come from OpenBao when OPENBAO_TOKEN is present.
   bk_soft_secret OPENBAO_TOKEN
-  bk_soft_secret RADICLE_SECRET_KEY
+  bk_soft_secret RADICLE_SECRET_KEY --required
   bk_soft_secret RADICLE_PUBLIC_KEY
   bk_soft_secret RAD_PASSPHRASE
 
@@ -244,6 +249,12 @@ ensure_rad_passphrase_env() {
   fi
 }
 
+# RADICLE_SEED is nid@host:port; rad seed --from / rad clone --seed want NID only.
+radicle_seed_nid() {
+  local seed="${1:-$RADICLE_SEED}"
+  echo "${seed%%@*}"
+}
+
 start_rad_node() {
   if rad node status >/dev/null 2>&1; then
     echo "[bootstrap] rad node already running"
@@ -251,19 +262,57 @@ start_rad_node() {
     echo "[bootstrap] starting rad node..."
     rad node start >/dev/null
   fi
-  # Best-effort connect to Garden so patch announce can reach the seed.
-  rad node connect "$RADICLE_SEED" >/dev/null 2>&1 || true
+  # Connect to Garden so seed/fetch and patch announce can reach the seed.
+  local seed_nid
+  seed_nid="$(radicle_seed_nid)"
+  if rad node connect "$RADICLE_SEED" >/dev/null 2>&1; then
+    echo "[bootstrap] connected to Garden seed ${seed_nid}"
+  else
+    echo "[bootstrap] warn: rad node connect ${RADICLE_SEED} failed (will retry on seed)" >&2
+  fi
+}
+
+# `rad init --existing` only links a working tree; it does not fetch the RID.
+# Garden HTTPS clones have no $RAD_HOME/storage/<rid>, so seed/fetch first.
+ensure_rid_in_storage() {
+  local rid_naked seed_nid timeout
+  rid_naked="${RADICLE_RID#rad:}"
+  rid_naked="${rid_naked#rad://}"
+  seed_nid="$(radicle_seed_nid)"
+  timeout="${RADICLE_SEED_TIMEOUT:-120s}"
+
+  if [[ -d "$RAD_HOME/storage/$rid_naked" ]]; then
+    echo "[bootstrap] Radicle storage already has ${rid_naked}"
+    return 0
+  fi
+
+  echo "[bootstrap] fetching ${RADICLE_RID} into \$RAD_HOME/storage (required before rad init --existing)"
+  # Prefer Garden seed NID; fall back to routing table if that peer is not ready.
+  if ! rad seed "$RADICLE_RID" --scope followed --from "$seed_nid" --timeout "$timeout"; then
+    echo "[bootstrap] warn: rad seed --from ${seed_nid} failed; retrying via routing table" >&2
+    rad node connect "$RADICLE_SEED" >/dev/null 2>&1 || true
+    rad seed "$RADICLE_RID" --scope followed --timeout "$timeout" \
+      || bk_die "failed to fetch ${RADICLE_RID} into local storage — is the node connected to Garden (${RADICLE_SEED})?"
+  fi
+  [[ -d "$RAD_HOME/storage/$rid_naked" ]] \
+    || bk_die "storage path missing after rad seed: $RAD_HOME/storage/$rid_naked"
 }
 
 # Garden HTTPS checkouts only have `origin` → https://…garden….git.
-# Link them into local storage + add `rad` remote so `git push rad` works.
+# Seed RID into local storage, then link the working tree + add `rad` remote
+# so `git push rad` works.
 ensure_rad_remote() {
-  local root
+  local root rid_naked
   root="$(bk_repo_root)"
   if git -C "$root" remote get-url rad >/dev/null 2>&1; then
     echo "[bootstrap] git remote 'rad' already configured"
+    # Still ensure storage exists (needed for git-remote-rad push/fetch).
+    ensure_rid_in_storage
     return 0
   fi
+
+  ensure_rid_in_storage
+
   echo "[bootstrap] linking Garden checkout via rad init --existing ${RADICLE_RID}"
   (
     cd "$root"
@@ -273,6 +322,12 @@ ensure_rad_remote() {
       --no-confirm \
       --public
   )
+  if ! git -C "$root" remote get-url rad >/dev/null 2>&1; then
+    rid_naked="${RADICLE_RID#rad:}"
+    rid_naked="${rid_naked#rad://}"
+    echo "[bootstrap] warn: rad init --existing did not add remote; adding rad:// manually" >&2
+    git -C "$root" remote add rad "rad://${rid_naked}"
+  fi
   git -C "$root" remote get-url rad >/dev/null 2>&1 \
     || bk_die "rad remote still missing after rad init --existing"
 }
