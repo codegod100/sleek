@@ -1,0 +1,44 @@
+# Trigger boxci sleek-merge pipeline on push to main (post-merge APK + Flatpak).
+# boxci runs on https://boxci.boxd.sh — see boxci/pipelines/sleek-merge.yml.
+#
+# Manual: ./scripts/boxci/dispatch-merge.sh
+
+name: boxci merge
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: boxci-merge-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    name: Trigger boxci merge build
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST boxci /api/runs
+        env:
+          BOXCI_URL: https://boxci.boxd.sh
+        run: |
+          set -euo pipefail
+          payload="$(jq -n \
+            --arg pipeline "sleek-merge.yml" \
+            --arg trigger "merge" \
+            --arg sha "${{ github.sha }}" \
+            --arg ref "${{ github.ref }}" \
+            '{
+              pipeline: $pipeline,
+              env: {
+                BOXCI_TRIGGER: $trigger,
+                GIT_SHA: $sha,
+                GIT_REF: $ref,
+                SLEEK_BRANCH: "main"
+              }
+            }')"
+          echo "POST ${BOXCI_URL}/api/runs"
+          curl -fsSL -X POST "${BOXCI_URL}/api/runs" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            | jq '{id, status, pipeline, duration_s}'
