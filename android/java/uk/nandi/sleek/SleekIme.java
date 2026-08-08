@@ -2,7 +2,9 @@ package uk.nandi.sleek;
 
 import android.app.Activity;
 import android.content.Context;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.Selection;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
@@ -69,9 +71,26 @@ public final class SleekIme {
         activity.runOnUiThread(() -> setActiveOnUiThread(activity, active));
     }
 
+    /**
+     * Mirror egui compose text/cursor into the hidden editor so Gboard can glide-type
+     * mid-edit. Must not call {@code restartInput} — that resets the IME each frame.
+     */
+    public static void syncField(Activity activity, String text, int selStart, int selEnd) {
+        if (activity == null) {
+            return;
+        }
+        final String safeText = text == null ? "" : text;
+        activity.runOnUiThread(
+                () -> syncFieldOnUiThread(activity, safeText, selStart, selEnd));
+    }
+
     private static void setActiveOnUiThread(Activity activity, boolean active) {
         try {
             ensureField(activity);
+            if (field == null) {
+                Log.w(TAG, "setActive(" + active + "): IME bridge field unavailable");
+                return;
+            }
             InputMethodManager imm =
                     (InputMethodManager)
                             activity.getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -88,6 +107,29 @@ public final class SleekIme {
             }
         } catch (Throwable t) {
             Log.w(TAG, "setActive(" + active + ") failed", t);
+        }
+    }
+
+    private static void syncFieldOnUiThread(
+            Activity activity, String text, int selStart, int selEnd) {
+        try {
+            ensureField(activity);
+            if (field == null) {
+                return;
+            }
+            int len = text.length();
+            int start = Math.max(0, Math.min(selStart, len));
+            int end = Math.max(start, Math.min(selEnd, len));
+            Editable editable = field.getText();
+            if (editable == null) {
+                return;
+            }
+            if (!text.contentEquals(editable)) {
+                editable.replace(0, editable.length(), text);
+            }
+            Selection.setSelection(editable, start, end);
+        } catch (Throwable t) {
+            Log.w(TAG, "syncField failed", t);
         }
     }
 
@@ -143,31 +185,35 @@ public final class SleekIme {
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            boolean ok = super.setComposingText(text, newCursorPosition);
             String s = text == null ? "" : text.toString();
             nativePreedit(s);
-            return true;
+            return ok;
         }
 
         @Override
         public boolean finishComposingText() {
+            boolean ok = super.finishComposingText();
             nativePreedit("");
-            return true;
+            return ok;
         }
 
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
+            boolean ok = super.commitText(text, newCursorPosition);
             if (text != null && text.length() > 0) {
                 nativeCommit(text.toString());
             }
-            return true;
+            return ok;
         }
 
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            boolean ok = super.deleteSurroundingText(beforeLength, afterLength);
             if (beforeLength > 0 || afterLength > 0) {
                 nativeDeleteSurrounding(beforeLength, afterLength);
             }
-            return true;
+            return ok;
         }
     }
 }

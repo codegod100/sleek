@@ -602,6 +602,11 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                     resp.request_focus();
                     state.focus_compose = false;
                 }
+                #[cfg(target_os = "android")]
+                if resp.has_focus() {
+                    let (sel_start, sel_end) = compose_cursor_range(ui.ctx(), compose_id);
+                    crate::android_ime::sync_field_text(&state.compose, sel_start, sel_end);
+                }
                 let enter = resp.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 if (send_clicked || enter) && can_send {
@@ -1065,6 +1070,11 @@ fn compose_attach_composer(
         resp.request_focus();
         state.focus_compose = false;
     }
+    #[cfg(target_os = "android")]
+    if resp.has_focus() {
+        let (sel_start, sel_end) = compose_cursor_range(ui.ctx(), compose_id);
+        crate::android_ime::sync_field_text(&state.compose, sel_start, sel_end);
+    }
     let enter = resp.has_focus()
         && !uploading
         && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
@@ -1098,6 +1108,17 @@ fn compose_attach_composer(
 /// - All three controls share `control_height` so baselines match.
 /// - `lock_focus(true)` keeps Tab in the field for nick completion (handled
 ///   by [`try_nick_tab_complete`] before this runs).
+#[cfg(target_os = "android")]
+fn compose_cursor_range(ctx: &egui::Context, field_id: egui::Id) -> (usize, usize) {
+    let Some(state) = egui::TextEdit::load_state(ctx, field_id) else {
+        return (0, 0);
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return (0, 0);
+    };
+    (range.primary.index, range.secondary.index)
+}
+
 fn compose_input_row(
     ui: &mut egui::Ui,
     th: &Theme,
