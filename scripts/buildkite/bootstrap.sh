@@ -30,16 +30,32 @@ export PATH="${RAD_HOME}/bin:${PATH}"
 RADICLE_SEED="${RADICLE_SEED:-z6MknYm3iSpuY5hLCH93K5Ls5KG7cBK4fQwybqcHzxDsT2jU@nandi.radicle.garden:58019}"
 
 bk_soft_secret() {
-  local name=$1 value=""
+  local name=$1 value="" err="" errf rc=0
   if [[ -n "${!name:-}" ]]; then
     return 0
   fi
   if command -v buildkite-agent >/dev/null 2>&1; then
-    value="$(buildkite-agent secret get "$name" 2>/dev/null || true)"
-    if [[ -n "$value" ]]; then
+    errf="$(mktemp)"
+    set +e
+    # Trailing newline is stripped by $() — restore one for PEM materialization.
+    value="$(buildkite-agent secret get "$name" 2>"$errf")"
+    rc=$?
+    set -e
+    err="$(tr -d '\r' <"$errf" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    rm -f "$errf"
+    if [[ $rc -eq 0 && -n "$value" ]]; then
       # printf -v keeps multiline PEMs intact (unlike export name=$value).
-      printf -v "$name" '%s' "$value"
+      printf -v "$name" '%s\n' "$value"
       export "$name"
+      return 0
+    fi
+    # Common cause: cluster secret policy excludes this pipeline slug
+    # (e.g. scoped to `sleek` but agents run on `sleek-5u9xbr`).
+    if [[ -n "$err" ]]; then
+      echo "[bootstrap] warn: soft-load $name failed: $err" >&2
+      echo "[bootstrap] hint: Default cluster → Secrets → $name → allow pipeline ${BUILDKITE_PIPELINE_SLUG:-sleek-5u9xbr} (or all pipelines)" >&2
+    else
+      echo "[bootstrap] warn: soft-load $name returned empty (secret missing or policy excludes this pipeline)" >&2
     fi
   fi
 }
