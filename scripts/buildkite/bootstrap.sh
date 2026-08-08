@@ -56,8 +56,13 @@ build_radicle_mcp() {
 verify_auth() {
   local cmd
   cmd="$(cursor_agent_cmd)"
+  if [[ -z "${CURSOR_API_KEY:-}" ]] && command -v buildkite-agent >/dev/null 2>&1; then
+    if key="$(buildkite-agent secret get CURSOR_API_KEY 2>/dev/null || true)"; then
+      [[ -n "$key" ]] && export CURSOR_API_KEY="$key"
+    fi
+  fi
   if [[ -z "${CURSOR_API_KEY:-}" ]]; then
-    bk_die "CURSOR_API_KEY is not set — add it as a Buildkite secret"
+    bk_die "CURSOR_API_KEY is not set — add it as a Buildkite cluster secret"
   fi
   if ! "$cmd" status >/dev/null 2>&1; then
     bk_die "Cursor CLI auth failed — check CURSOR_API_KEY"

@@ -29,10 +29,12 @@
 # shell vars at pipeline-upload time.
 #
 # Radicle issue → cursor-agent → patch:
-#   Garden adapter skips issue COB commits (no pipeline.yml there). Trigger on
-#   main with RADICLE_ISSUE_ID / RADICLE_TRIGGER=issue instead:
-#     ./scripts/buildkite/trigger-issue-build.sh <issue-id>
-#   Optional schedule: .buildkite/pipeline.poll-issues.yml
+#   Garden adapter skips issue COB commits (no pipeline.yml there). Auto path:
+#     Buildkite schedule every 5m with RADICLE_TRIGGER=poll
+#     → scripts/buildkite/poll-issues.sh lists issue COBs via git ls-remote
+#     → dispatches run-issue-agent.sh (pipeline upload or API trigger)
+#   Manual: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
+#   Requires cluster secret CURSOR_API_KEY (and rad identity on the agent to push patches).
 
 agents:
   queue: auto
@@ -44,8 +46,8 @@ env:
 steps:
   - label: ":rust: Check"
     key: check
-    # Issue-triggered builds only need the agent step (see below).
-    if: build.env("RADICLE_TRIGGER") != "issue"
+    # Issue/poll builds only need the agent / poll steps.
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     timeout_in_minutes: 120
     command: |
       set -euo pipefail
@@ -109,7 +111,7 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
-    if: build.env("RADICLE_TRIGGER") != "issue"
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 120
@@ -150,7 +152,7 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
-    if: build.env("RADICLE_TRIGGER") != "issue"
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 180
@@ -193,6 +195,13 @@ steps:
       ln -f "$$bundle" uk.nandi.sleek.flatpak 2>/dev/null \
         || cp --reflink=auto "$$bundle" uk.nandi.sleek.flatpak
       buildkite-agent artifact upload uk.nandi.sleek.flatpak
+
+  # --- Radicle issue poll (Buildkite schedule: RADICLE_TRIGGER=poll) ---
+  - label: ":radicle: Poll issues → dispatch agent"
+    key: radicle-issue-poll
+    if: build.env("RADICLE_TRIGGER") == "poll"
+    command: bash scripts/buildkite/poll-issues.sh
+    timeout_in_minutes: 15
 
   # --- Radicle issue agent (triggered via RADICLE_ISSUE_ID on main) ---
   - label: ":radicle: Issue → :cursor: agent → patch"

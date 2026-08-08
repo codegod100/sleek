@@ -18,17 +18,21 @@ if [[ -z "$COMMIT" ]]; then
   exit 1
 fi
 
-bk_require_cmd rad
-bk_require_rad_repo
+# rad is optional when RADICLE_ISSUE_ID is provided (Garden HTTPS checkouts).
+if [[ -z "${RADICLE_ISSUE_ID:-}" ]]; then
+  bk_require_cmd rad
+  bk_require_rad_repo
+fi
 
 # Issue opens create a COB root commit that does not contain .buildkite/pipeline.yml,
 # so the Radicle Buildkite adapter skips them. Trigger builds on main instead and
-# pass the issue id explicitly (see scripts/buildkite/trigger-issue-build.sh).
+# pass the issue id explicitly (see scripts/buildkite/trigger-issue-build.sh / poll).
 if [[ -n "${RADICLE_ISSUE_ID:-}" ]]; then
   ISSUE_ID="$RADICLE_ISSUE_ID"
-  if ! rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
-    echo "RADICLE_ISSUE_ID=$ISSUE_ID is not a valid issue" >&2
-    exit 1
+  if command -v rad >/dev/null 2>&1 && rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
+    :
+  else
+    echo "warn: rad issue show unavailable — using RADICLE_ISSUE_ID only" >&2
   fi
 elif bk_commit_is_new_issue "$COMMIT"; then
   ISSUE_ID="$COMMIT"
@@ -36,12 +40,18 @@ else
   echo "commit $COMMIT is not a new issue COB root (set RADICLE_ISSUE_ID to trigger from main)" >&2
   exit 2
 fi
-mapfile -t _details < <(bk_issue_details "$ISSUE_ID")
-TITLE="${_details[0]:-}"
-BODY="${_details[1]:-}"
+
+TITLE=""
+BODY=""
+if command -v rad >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if mapfile -t _details < <(bk_issue_details "$ISSUE_ID" 2>/dev/null); then
+    TITLE="${_details[0]:-}"
+    BODY="${_details[1]:-}"
+  fi
+fi
 
 if [[ -z "$TITLE" ]]; then
-  TITLE="(no title)"
+  TITLE="Radicle issue $(bk_short_id "$ISSUE_ID")"
 fi
 
 SHORT="$(bk_short_id "$ISSUE_ID")"

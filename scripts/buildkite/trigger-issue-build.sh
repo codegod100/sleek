@@ -35,13 +35,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 bk_require_cmd git
-bk_require_cmd rad
 bk_require_cmd curl
 bk_require_cmd jq
-bk_require_rad_repo
 
-if ! rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
-  bk_die "not a valid issue: $ISSUE_ID"
+# Prefer validating via rad when available; otherwise accept the id (poll already
+# filtered to xyz.radicle.issue COB refs).
+if command -v rad >/dev/null 2>&1 && git remote get-url rad >/dev/null 2>&1; then
+  if ! rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
+    bk_die "not a valid issue: $ISSUE_ID"
+  fi
 fi
 
 COMMIT="$(git rev-parse "$BRANCH")"
