@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Materialize sibling path deps from flake.lock inputs (github:codegod100/*).
+# Materialize sibling path deps from flake.lock inputs.
 #
 # android/Cargo.toml expects:
-#   ../vidya
+#   ../vidya   (Radicle Garden pin)
 #   ../freeq/freeq-sdk
 # relative to the sleek repo root (i.e. $WORKSPACES/vidya, $WORKSPACES/freeq).
 #
@@ -47,7 +47,12 @@ sync_input() {
   cp -a "$src/." "$dest/"
   chmod -R u+w "$dest"
   if [[ "$input" == "vidya" && -f "$ROOT/patches/vidya-android-winit.patch" ]]; then
-  patch -p1 -d "$dest" < "$ROOT/patches/vidya-android-winit.patch"
+    # Best-effort: Radicle tip may not need / match this GitHub-era patch.
+    if ! patch -p1 -d "$dest" --forward --batch \
+      < "$ROOT/patches/vidya-android-winit.patch" >/dev/null; then
+      log "vidya-android-winit.patch did not apply (ok if tip has no video/winit gap)"
+      rm -f "$dest/Cargo.toml.rej" "$dest"/*.rej 2>/dev/null || true
+    fi
   fi
 }
 

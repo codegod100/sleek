@@ -11,7 +11,11 @@
 #   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
 #
-# Agents must reach github.com/codegod100/{sleek,freeq} and tangled.org/nandi.uk/vidya.
+# Pipeline repository (Buildkite): Radicle Garden clone URL
+#   https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git
+#   RID rad:z9mjPzpVK472QXaaP1picc5U9xBR (not GitHub — baogui-shaped).
+# Agents must reach nandi.radicle.garden (sleek + vidya RIDs),
+# github.com/codegod100/freeq, and Flathub when building Flatpak.
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
 
@@ -28,11 +32,18 @@ steps:
       set -euo pipefail
 
       # Path deps: vidya + freeq live next to this checkout.
+      # Prefer flake.lock pins (vidya from Radicle Garden) when nix is available.
       parent="$$(dirname "$$PWD")"
       vidya_dir="$$parent/vidya"
       freeq_dir="$$parent/freeq"
       if [[ ! -d "$$vidya_dir/.git" && ! -f "$$vidya_dir/Cargo.toml" ]]; then
-        git clone --depth 1 https://tangled.org/nandi.uk/vidya "$$vidya_dir"
+        if command -v nix >/dev/null 2>&1 && [[ -f flake.lock ]]; then
+          bash scripts/sync-flake-path-deps.sh vidya
+        else
+          git clone --depth 1 \
+            https://nandi.radicle.garden/z2UqGTRH21s3pHnJgSuMwRaPPNNcW.git \
+            "$$vidya_dir"
+        fi
       fi
       if [[ ! -d "$$freeq_dir/.git" && ! -f "$$freeq_dir/freeq-sdk/Cargo.toml" ]]; then
         git clone --depth 1 https://github.com/codegod100/freeq.git "$$freeq_dir"

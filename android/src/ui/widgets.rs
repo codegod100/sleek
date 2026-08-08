@@ -726,6 +726,162 @@ fn touch_long_press(ui: &mut egui::Ui, press_id: Id, rect: Rect) -> (bool, bool)
     (long_this_frame, suppress_click)
 }
 
+/// Cut / Copy / Paste for a `TextEdit`: right-click on desktop, press-and-hold on APK.
+///
+/// egui does not ship a built-in TextEdit clipboard menu. Stock
+/// [`Response::context_menu`] also closes on the next frame while the finger is
+/// still down after a long-press (`hovered && primary_down`), so we use the same
+/// touch-safe popup pattern as message bubbles (finger clearance + close on new
+/// press, not release). Selecting **Paste** sends [`ViewportCommand::RequestPaste`],
+/// which eframe turns into `Event::Paste` via the Android system clipboard hooks.
+pub fn text_edit_clipboard_menu(ui: &mut egui::Ui, th: &Theme, response: &egui::Response) {
+    if !response.enabled() {
+        return;
+    }
+
+    let menu_id = response.id.with("text_clipboard_menu");
+    let press_id = menu_id.with("press");
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    // egui maps press-and-hold → `secondary_clicked` / `long_touched`. Also run
+    // our own hold tracker so the menu still opens if TextEdit click-sense is
+    // contested (same approach as message bubbles).
+    let (long_press_anywhere, _) = touch_long_press(ui, press_id, response.rect);
+    let opening = response.secondary_clicked() || long_press_anywhere;
+
+    if opening {
+        response.request_focus();
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui || long_press_anywhere || response.long_touched() {
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else {
+            MenuAnchor {
+                pos: Pos2::new(response.rect.center().x, response.rect.top() - 8.0),
+                above_finger: true,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(menu_id));
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(menu_id)) {
+        return;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(menu_id))
+        .unwrap_or(MenuAnchor {
+            pos: response.rect.left_top(),
+            above_finger: touch_ui,
+        });
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let mut close = false;
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+
+    let popup = egui::Area::new(menu_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            message_action_bar_frame(th, sp.sm).shadow(ui.style().visuals.popup_shadow).show(
+                ui,
+                |ui| {
+                    ui.set_min_width(128.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (label, cmd) in [
+                        ("Cut", egui::ViewportCommand::RequestCut),
+                        ("Copy", egui::ViewportCommand::RequestCopy),
+                        ("Paste", egui::ViewportCommand::RequestPaste),
+                    ] {
+                        let clicked = ui
+                            .add_sized(
+                                Vec2::new(ui.available_width().max(120.0), sp.control_height.min(40.0)),
+                                egui::Button::new(
+                                    RichText::new(label)
+                                        .size(th.type_scale.body)
+                                        .color(p.text),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(sp.radius_sm),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked();
+                        if clicked {
+                            response.request_focus();
+                            ui.ctx().send_viewport_cmd(cmd);
+                            close = true;
+                        }
+                    }
+                },
+            );
+        });
+
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    menu_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    if close || escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| {
+            d.remove::<MenuAnchor>(menu_id);
+            d.remove::<PressHold>(press_id);
+        });
+    }
+}
+
 /// Long-press (APK) popup listing nicknames who used one reaction emoji.
 fn reaction_reactors_popup(
     ui: &mut egui::Ui,
@@ -1561,13 +1717,14 @@ pub fn react_picker_overlay(
                         close = true;
                     }
                     let search_w = (ui.available_width() - 8.0).clamp(100.0, 200.0);
-                    ui.add(
+                    let search_resp = ui.add(
                         egui::TextEdit::singleline(&mut state.react_picker_search)
                             .id_salt(("react_emoji_search", msgid.as_str()))
                             .desired_width(search_w)
                             .hint_text("Search emoji…")
                             .font(egui::TextStyle::Body),
                     );
+                    text_edit_clipboard_menu(ui, th, &search_resp);
                 });
             });
 
@@ -2085,6 +2242,8 @@ fn inline_image_preview(
 /// Inline video card via [`vidya::video_player`] (muted H.264-in-MP4).
 ///
 /// Unsupported formats (WebM, etc.) keep the play-card look and open externally.
+/// Without the `video-previews` feature (Radicle tip of vidya may lack `video`),
+/// falls back to the open-in-browser card.
 fn inline_video_preview(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -2093,73 +2252,84 @@ fn inline_video_preview(
     id_salt: &str,
     caption: Option<&str>,
 ) {
-    use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
+    #[cfg(not(feature = "video-previews"))]
+    {
+        let _ = media;
+        video_open_fallback(ui, th, url, id_salt);
+        media_embed_link_footer(ui, th, url, id_salt, caption);
+        return;
+    }
 
-    media.touch_video(url);
+    #[cfg(feature = "video-previews")]
+    {
+        use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
 
-    let sp = &th.spacing;
-    // Compact player — bubble is full-width; don't stretch the video surface.
-    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
-    let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+        media.touch_video(url);
 
-    match media.videos.get(url) {
-        Some(crate::state::VideoState::Loading) | None => {
-            egui::Frame::new()
-                .fill(th.palette.headerbar_bg)
-                .corner_radius(sp.radius_sm)
-                .inner_margin(egui::Margin::symmetric(12, 16))
-                .show(ui, |ui| {
-                    ui.set_width(max_w);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.add_space(sp.sm);
-                        dim_label(ui, th, "Loading video…");
+        let sp = &th.spacing;
+        // Compact player — bubble is full-width; don't stretch the video surface.
+        let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+        let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+
+        match media.videos.get(url) {
+            Some(crate::state::VideoState::Loading) | None => {
+                egui::Frame::new()
+                    .fill(th.palette.headerbar_bg)
+                    .corner_radius(sp.radius_sm)
+                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(max_w);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(sp.sm);
+                            dim_label(ui, th, "Loading video…");
+                        });
                     });
-                });
-            media_embed_link_footer(ui, th, url, id_salt, caption);
-            return;
+                media_embed_link_footer(ui, th, url, id_salt, caption);
+                return;
+            }
+            Some(crate::state::VideoState::Failed) => {
+                // Fall back to the open-in-browser card without bytes.
+                video_open_fallback(ui, th, url, id_salt);
+                return;
+            }
+            Some(crate::state::VideoState::Ready(_)) => {}
         }
-        Some(crate::state::VideoState::Failed) => {
-            // Fall back to the open-in-browser card without bytes.
-            video_open_fallback(ui, th, url, id_salt);
-            return;
+
+        // Clone Arc so we can mutably borrow the player map separately.
+        let bytes = match media.videos.get(url) {
+            Some(crate::state::VideoState::Ready(b)) => b.clone(),
+            _ => return,
+        };
+
+        // Per-bubble player state — same URL in two messages must not share playhead.
+        let player_key = format!("{url}\0{id_salt}");
+        let player = media
+            .video_players
+            .entry(player_key)
+            .or_insert_with(VideoPlayerState::new);
+        player.load_bytes(ui.ctx(), (url, id_salt), bytes);
+
+        let opts = VideoPlayerOpts {
+            max_width: max_w,
+            max_height: max_h,
+            title: caption
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            open_url_on_unsupported: Some(url.to_string()),
+        };
+        let playing = player.is_playing();
+        let (resp, action) = video_player(ui, th, player, &opts);
+        // High-contrast play affordance — theme accent blends into solid-blue
+        // first frames; paint a dark circle + white triangle on top.
+        if !playing {
+            paint_video_play_affordance(ui, resp.rect);
         }
-        Some(crate::state::VideoState::Ready(_)) => {}
+        if action == VideoPlayerAction::OpenExternally {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+        media_embed_link_footer(ui, th, url, id_salt, caption);
     }
-
-    // Clone Arc so we can mutably borrow the player map separately.
-    let bytes = match media.videos.get(url) {
-        Some(crate::state::VideoState::Ready(b)) => b.clone(),
-        _ => return,
-    };
-
-    // Per-bubble player state — same URL in two messages must not share playhead.
-    let player_key = format!("{url}\0{id_salt}");
-    let player = media
-        .video_players
-        .entry(player_key)
-        .or_insert_with(VideoPlayerState::new);
-    player.load_bytes(ui.ctx(), (url, id_salt), bytes);
-
-    let opts = VideoPlayerOpts {
-        max_width: max_w,
-        max_height: max_h,
-        title: caption
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        open_url_on_unsupported: Some(url.to_string()),
-    };
-    let playing = player.is_playing();
-    let (resp, action) = video_player(ui, th, player, &opts);
-    // High-contrast play affordance — theme accent blends into solid-blue
-    // first frames; paint a dark circle + white triangle on top.
-    if !playing {
-        paint_video_play_affordance(ui, resp.rect);
-    }
-    if action == VideoPlayerAction::OpenExternally {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-    }
-    media_embed_link_footer(ui, th, url, id_salt, caption);
 }
 
 /// Dark play circle that stays visible on blue / accent-tinted video frames.
@@ -2535,7 +2705,7 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
                 egui::pos2(
                     full.right() - img_pad,
-                    full.bottom() - img_pad - safe.bottom(),
+                    full.bottom() - img_pad - safe.bottom,
                 ),
             );
 
@@ -2721,5 +2891,31 @@ mod day_separator_tests {
         assert_eq!(label, "March 5, 2024");
         assert!(!label.contains("Today"));
         assert!(!label.contains("Yesterday"));
+    }
+}
+
+#[cfg(test)]
+mod text_edit_clipboard_menu_tests {
+    /// Hold-to-paste on APK needs these viewport commands so eframe emits
+    /// Cut/Copy/`Event::Paste` after the JNI clipboard hooks run.
+    #[test]
+    fn clipboard_menu_viewport_commands_match_eframe_actions() {
+        use eframe::egui::ViewportCommand;
+        let cmds = [
+            ViewportCommand::RequestCut,
+            ViewportCommand::RequestCopy,
+            ViewportCommand::RequestPaste,
+        ];
+        // Discriminants must stay distinct — a typo collapsing Paste→Copy would
+        // silently break APK hold-to-paste while still compiling.
+        assert_ne!(
+            std::mem::discriminant(&cmds[0]),
+            std::mem::discriminant(&cmds[2])
+        );
+        assert_ne!(
+            std::mem::discriminant(&cmds[1]),
+            std::mem::discriminant(&cmds[2])
+        );
+        assert!(matches!(cmds[2], ViewportCommand::RequestPaste));
     }
 }

@@ -29,9 +29,9 @@ support).
 ### Sibling path dependencies (required for working-tree builds)
 `android/Cargo.toml` uses path deps `../../vidya` and `../../freeq/freeq-sdk`.
 Because the repo root is `/workspace`, those resolve to **`/vidya`** and
-**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`** as
-`github:codegod100/vidya` and `github:codegod100/freeq`. Materialize siblings
-from the lock with:
+**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`**: vidya from
+Radicle Garden (`rad:z2UqGTRH21s3pHnJgSuMwRaPPNNcW`) and freeq from
+`github:codegod100/freeq`. Materialize siblings from the lock with:
 
 ```bash
 bash scripts/sync-flake-path-deps.sh
@@ -79,8 +79,18 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 [baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
 [sleek](https://buildkite.com/nandi/sleek) (created via API; steps in
-`.buildkite/pipeline.yml`). API token is `BUILDKITE_API_KEY` in OpenBao
-(same KV). Agent skill: `.cursor/skills/configure-buildkite/`.
+`.buildkite/pipeline.yml`).
+
+**Clone source is Radicle Garden** (not GitHub), same shape as baogui:
+
+- RID: [`rad:z9mjPzpVK472QXaaP1picc5U9xBR`](https://nandi.radicle.garden/rad:z9mjPzpVK472QXaaP1picc5U9xBR)
+- Git URL: `https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git`
+- Provider: private (no GitHub webhooks — trigger via Buildkite API / schedule /
+  Radicle CI adapter)
+
+API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
+`.cursor/skills/configure-buildkite/`. Radicle signing keys for publishing
+patches live under OpenBao `secret/data/radicle`.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
 and/or `OPENBAO_TOKEN`. Helper: `scripts/ci-nixbuild.sh`.
@@ -88,4 +98,10 @@ and/or `OPENBAO_TOKEN`. Helper: `scripts/ci-nixbuild.sh`.
 ```bash
 eval "$(./scripts/configure-buildkite-from-openbao.sh)"
 ./scripts/configure-buildkite-from-openbao.sh --check
+
+# Trigger a build of the Radicle tip (or a patch commit once synced):
+# curl -X POST -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#   -H "Content-Type: application/json" \
+#   -d '{"commit":"HEAD","branch":"main"}' \
+#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek/builds
 ```

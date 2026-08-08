@@ -927,6 +927,7 @@ pub struct MediaCache {
     pub images: HashMap<String, ImageState>,
     pub videos: HashMap<String, VideoState>,
     /// Per-bubble playback widget state (vidya), keyed by `url\\0msgid`.
+    #[cfg(feature = "video-previews")]
     pub video_players: HashMap<String, vidya::VideoPlayerState>,
     pub links: HashMap<String, LinkState>,
     pending: Vec<MediaFetch>,
