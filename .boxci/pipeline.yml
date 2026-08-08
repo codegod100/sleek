@@ -1,16 +1,11 @@
-# sleek CI — merge builds + Radicle issue → cursor-agent → patch.
+# sleek merge CI — check + APK + Flatpak after merge to main.
 #
-# Loaded from repo checkout by boxci (webhooks /api/webhooks/garden*, /api/poll).
-# Reuses scripts/ci-nixbuild.sh + nix .#android / .#flatpak (same as Buildkite/GHA).
-#
-# Server sets: BOXCI_REPO_ROOT, BOXCI_REPO_URL, GIT_SHA, GIT_BRANCH, BOXCI_TRIGGER
-# Issue/poll also set RADICLE_TRIGGER + RADICLE_ISSUE_ID (Buildkite script compat).
+# Issue→patch is builtin to boxci (POST /api/webhooks/garden/issue, /api/poll).
+# This file only defines merge builds (on: merge).
 
 name: sleek
 on:
   - merge
-  - issue
-  - poll
 
 env:
   RUST_BACKTRACE: "1"
@@ -161,44 +156,3 @@ steps:
       cp --reflink=auto "$bundle" "$artifacts/uk.nandi.sleek.flatpak"
       ls -lh "$artifacts/uk.nandi.sleek.flatpak"
       echo "artifact=$artifacts/uk.nandi.sleek.flatpak"
-
-  # --- Radicle issue poll (schedule / POST /api/poll) ---
-  - label: ":radicle: Poll issues → dispatch agent"
-    key: radicle-issue-poll
-    if: build.env("BOXCI_TRIGGER") == "poll"
-    command: bash scripts/boxci/poll-issues.sh
-
-  # --- Radicle issue agent (webhook or poll dispatch) ---
-  - label: ":radicle: Issue → :cursor: agent → patch"
-    key: radicle-issue-agent
-    if: build.env("BOXCI_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
-    command: bash scripts/buildkite/run-issue-agent.sh
-
-  - label: ":mag: Verify patch (optional)"
-    key: verify-patch
-    if: build.env("BOXCI_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
-    depends_on: radicle-issue-agent
-    allow_dependency_failure: true
-    command: |
-      set -euo pipefail
-      cd "${BOXCI_REPO_ROOT:?}"
-      BRANCH="${RADICLE_ISSUE_BRANCH:-}"
-      if [[ -z "$BRANCH" ]]; then
-        if [[ -n "${RADICLE_ISSUE_ID:-}" ]]; then
-          BRANCH="issue/${RADICLE_ISSUE_ID:0:7}"
-        fi
-      fi
-      if [[ -z "$BRANCH" ]]; then
-        echo "No issue branch — prior step likely skipped."
-        exit 0
-      fi
-      if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-        echo "Branch $BRANCH exists."
-        git log -1 --oneline "$BRANCH"
-      else
-        echo "Branch $BRANCH not found — agent may have declined or failed before branching."
-        exit 0
-      fi
-      echo ""
-      echo "Open patches:"
-      rad patch list --open 2>/dev/null | sed -n '1,15p' || rad patch 2>/dev/null | sed -n '1,15p' || true
