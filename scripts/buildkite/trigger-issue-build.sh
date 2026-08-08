@@ -43,12 +43,11 @@ bk_require_cmd git
 bk_require_cmd curl
 bk_require_cmd jq
 
-# Prefer validating via rad when available; otherwise accept the id (poll already
-# filtered to xyz.radicle.issue COB refs).
-if command -v rad >/dev/null 2>&1 && git remote get-url rad >/dev/null 2>&1; then
-  if ! rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
-    bk_die "not a valid issue: $ISSUE_ID"
-  fi
+# Validate via rad issue show and/or namespaced COB refs (Garden HTTPS). Poll
+# already filters to xyz.radicle.issue COBs; rad CLI alone often misses other
+# nodes' namespace refs even after sync.
+if ! bk_issue_cob_exists "$ISSUE_ID"; then
+  bk_die "not a valid issue: $ISSUE_ID"
 fi
 
 COMMIT="$(git rev-parse "$BRANCH")"

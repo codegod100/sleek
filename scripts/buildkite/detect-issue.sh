@@ -29,10 +29,8 @@ fi
 # pass the issue id explicitly (see scripts/buildkite/trigger-issue-build.sh / poll).
 if [[ -n "${RADICLE_ISSUE_ID:-}" ]]; then
   ISSUE_ID="$RADICLE_ISSUE_ID"
-  if command -v rad >/dev/null 2>&1 && rad issue show "$ISSUE_ID" --header >/dev/null 2>&1; then
-    :
-  else
-    echo "warn: rad issue show unavailable — using RADICLE_ISSUE_ID only" >&2
+  if ! bk_issue_cob_exists "$ISSUE_ID"; then
+    echo "warn: could not verify issue COB ${ISSUE_ID:0:7} via rad/git — continuing with RADICLE_ISSUE_ID" >&2
   fi
 elif bk_commit_is_new_issue "$COMMIT"; then
   ISSUE_ID="$COMMIT"
@@ -43,7 +41,7 @@ fi
 
 TITLE=""
 BODY=""
-if command -v rad >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
   if mapfile -t _details < <(bk_issue_details "$ISSUE_ID" 2>/dev/null); then
     TITLE="${_details[0]:-}"
     BODY="${_details[1]:-}"
