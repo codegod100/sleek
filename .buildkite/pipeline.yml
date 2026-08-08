@@ -2,6 +2,12 @@
 # Mirrors AGENTS.md check commands + GHA artifacts (nix .#android / .#flatpak)
 # via nixbuild.net when cluster secrets are present.
 #
+# Merge / default branch (main):
+#   - Check runs on every non-issue build (patch branches included).
+#   - APK + Flatpak artifact steps run only when build.branch == "main"
+#     (merged tip — Radicle Garden buildkite-adapter triggers push/patch
+#     events on main; patch/feature branches get check only).
+#
 # Artifacts:
 #   - APK: result-android/sleek.apk (streamed via nix store cat)
 #   - Flatpak: uk.nandi.sleek.flatpak (streamed; no full closure nix copy)
@@ -125,7 +131,7 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
-    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
+    if: build.branch == "main" && build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 120
@@ -166,7 +172,7 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
-    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
+    if: build.branch == "main" && build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 180
