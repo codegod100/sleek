@@ -63,19 +63,29 @@ pub fn drain_ime_events(ctx: &egui::Context) {
 }
 
 /// Wire egui-winit IME allow/deny to the Java bridge (replaces NativeActivity show/hide).
-pub fn set_ime_allowed(allowed: bool) {
+///
+/// Returns `true` when the Java bridge handled the request; `false` lets egui-winit
+/// fall back to winit `set_ime_allowed` (tap typing without swipe).
+pub fn set_ime_allowed(allowed: bool) -> bool {
     let mut last = LAST_ACTIVE.lock().expect("ime active");
     if *last == Some(allowed) {
-        return;
+        return true;
     }
-    *last = Some(allowed);
     if allowed {
         push_ime(QueuedIme::Enabled);
     } else {
         push_ime(QueuedIme::Disabled);
     }
-    if let Err(e) = call_set_active(allowed) {
-        log::warn!("android IME setActive({allowed}): {e}");
+    match call_set_active(allowed) {
+        Ok(()) => {
+            *last = Some(allowed);
+            log::info!("android IME setActive({allowed}) ok");
+            true
+        }
+        Err(e) => {
+            log::warn!("android IME setActive({allowed}): {e}; falling back to winit");
+            false
+        }
     }
 }
 
