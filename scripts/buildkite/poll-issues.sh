@@ -135,7 +135,6 @@ steps:
     env:
       RADICLE_ISSUE_ID: "${id}"
       RADICLE_TRIGGER: "issue"
-      CURSOR_API_KEY: "\${CURSOR_API_KEY}"
 EOF
 )"
   echo "poll: pipeline-upload agent step for $short"

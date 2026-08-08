@@ -231,7 +231,8 @@ steps:
       - RADICLE_SECRET_KEY
       - RADICLE_PUBLIC_KEY
     env:
-      CURSOR_API_KEY: ${CURSOR_API_KEY}
+      # Do not put CURSOR_API_KEY / RADICLE_* secrets in env — Buildkite rejects
+      # names that appear in both env and secrets. Cluster secrets inject via secrets:.
       RADICLE_ISSUE_ID: ${RADICLE_ISSUE_ID}
 
   - label: ":mag: Verify patch (optional)"
