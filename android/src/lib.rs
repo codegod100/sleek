@@ -21,6 +21,8 @@ mod v4l2cam;
 #[cfg(target_os = "android")]
 mod android_media;
 #[cfg(target_os = "android")]
+mod android_ime;
+#[cfg(target_os = "android")]
 mod android_camera;
 #[cfg(any(target_os = "android", test))]
 mod nv12_orient;
@@ -61,6 +63,7 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
         android_media::clipboard_get_text,
         android_media::clipboard_set_text,
     );
+    egui_winit::set_android_ime_hook(android_ime::set_ime_allowed);
     log::info!("sleek android_main start");
     match run_android(android_app) {
         Ok(()) => log::info!("sleek run_android returned Ok"),

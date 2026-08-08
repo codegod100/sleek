@@ -2407,6 +2407,8 @@ fn server_time_from_tags(
 
 impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        crate::android_ime::drain_ime_events(ctx);
         self.apply_fit_viewport(ctx);
         self.poll_auto_reconnect(ctx);
         self.state.poll_media_live_stability();

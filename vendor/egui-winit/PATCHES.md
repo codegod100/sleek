@@ -26,6 +26,10 @@ falls back to X11 — which still works for many image pastes when the composito
    `ViewportCommand::RequestPaste`; without that menu the hooks never run for hold-to-paste.
 4. **`lib.rs` Android back**: map `NamedKey::BrowserBack` (KEYCODE_BACK / gesture back) to
    `Key::Escape`. Upstream egui ≥0.32 adds `Key::BrowserBack` instead; drop this when upgrading.
+5. **`android_ime.rs` + `lib.rs` IME hook**: `set_android_ime_hook` so egui IME focus routes to
+   a hidden `EditText` bridge (`SleekIme.java`) instead of winit `set_ime_allowed`. NativeActivity
+   shows the keyboard but has no `InputConnection`, so Gboard swipe/glide typing never reaches
+   egui without this hook. Sleek registers `android_ime::set_ime_allowed` from `android_main`.
 
 Remove this vendor once upgrading to an egui that ships image paste events
 (https://github.com/emilk/egui/issues/2108) or equivalent, and `Key::BrowserBack`.

@@ -18,8 +18,10 @@ use egui::{Pos2, Rect, Theme, Vec2, ViewportBuilder, ViewportCommand, ViewportId
 pub use winit;
 
 pub mod clipboard;
+mod android_ime;
 mod window_settings;
 
+pub use android_ime::set_android_ime_hook;
 pub use clipboard::set_android_clipboard_hooks;
 
 pub use window_settings::WindowSettings;
@@ -880,7 +882,9 @@ impl State {
         if self.allow_ime != allow_ime {
             self.allow_ime = allow_ime;
             profiling::scope!("set_ime_allowed");
-            window.set_ime_allowed(allow_ime);
+            if !android_ime::set_allowed(allow_ime) {
+                window.set_ime_allowed(allow_ime);
+            }
         }
 
         if let Some(ime) = ime {
@@ -1498,7 +1502,11 @@ fn process_viewport_command(
                 ),
             );
         }
-        ViewportCommand::IMEAllowed(v) => window.set_ime_allowed(v),
+        ViewportCommand::IMEAllowed(v) => {
+            if !android_ime::set_allowed(v) {
+                window.set_ime_allowed(v);
+            }
+        }
         ViewportCommand::IMEPurpose(p) => window.set_ime_purpose(match p {
             egui::viewport::IMEPurpose::Password => winit::window::ImePurpose::Password,
             egui::viewport::IMEPurpose::Terminal => winit::window::ImePurpose::Terminal,
