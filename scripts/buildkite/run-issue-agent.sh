@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Buildkite entrypoint: Garden issue event → cursor-agent → Radicle patch.
 #
-# Required env (Buildkite secrets):
-#   CURSOR_API_KEY   — Cursor CLI / service account key
+# Required env (Buildkite cluster secrets / OpenBao secret/data/radicle):
+#   CURSOR_API_KEY       — Cursor CLI / service account key
+#   RADICLE_SECRET_KEY   — dedicated CI identity OpenSSH private key (PEM)
 #
 # Optional:
+#   RADICLE_PUBLIC_KEY / RAD_PASSPHRASE — derived / empty passphrase OK
 #   RADICLE_AGENT_MODEL   — passed to cursor-agent --model
 #   RADICLE_AGENT_TIMEOUT — seconds (default 3600)
 #   RADICLE_AGENT_DRY_RUN — set to 1 to print prompt without running agent

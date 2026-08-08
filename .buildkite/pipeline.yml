@@ -8,8 +8,10 @@
 #
 # Secrets (Buildkite cluster → Secrets, org nandi / Default cluster):
 #   - NIXBUILD_TOKEN (preferred) — soft-loaded; skip artifacts if missing
-#   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
+#   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN / radicle
 #   - CURSOR_API_KEY (issue agent) — Cursor CLI for Radicle issue → patch
+#   - RADICLE_SECRET_KEY (issue agent) — dedicated CI OpenSSH private key PEM
+#   - RADICLE_PUBLIC_KEY / RAD_PASSPHRASE (optional) — derived / empty OK
 #   - BUILDKITE_API_TOKEN (optional) — poll/trigger scripts for new issues
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
 # Pipeline: https://buildkite.com/nandi/sleek
@@ -38,7 +40,9 @@
 #     CLI: ./scripts/buildkite/dispatch-poll.sh
 #   Manual one issue: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
 #     (or: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>)
-#   Requires cluster secret CURSOR_API_KEY (and rad identity on the agent to push patches).
+#   Requires CURSOR_API_KEY + RADICLE_SECRET_KEY (bootstrap installs rad, writes
+#   $RAD_HOME/keys, starts node, rad init --existing so git push rad works from
+#   the Garden HTTPS checkout). Agents also need TCP to garden:58019 for announce.
 
 agents:
   queue: auto

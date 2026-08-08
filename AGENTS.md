@@ -94,11 +94,16 @@ Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
   Radicle CI adapter)
 
 API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
-`.cursor/skills/configure-buildkite/`. Radicle signing keys for publishing
-patches live under OpenBao `secret/data/radicle`.
+`.cursor/skills/configure-buildkite/`. Radicle **CI** signing keys for
+publishing patches live under OpenBao `secret/data/radicle` (fields
+`RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` / `RAD_PASSPHRASE`) and/or
+matching Buildkite cluster secrets — loaded by
+`scripts/buildkite/bootstrap.sh` for the issue→agent step. Use a dedicated CI
+identity (not a personal DID); never commit key material.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
-and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
+and/or `OPENBAO_TOKEN`. Issue agent also needs `CURSOR_API_KEY` +
+`RADICLE_SECRET_KEY`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
 `baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check materializes flake.lock–
 pinned `vidya`/`freeq` via `scripts/sync-flake-path-deps.sh` and runs `cargo`
 inside `nix develop` (mold + libs from the flake, not apt).
