@@ -95,16 +95,17 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ### Radicle identity (cloud agents — reuse per Cursor env)
 Do **not** run `rad auth` to mint a fresh DID on each agent run. Cloud agents
 must reuse one Radicle device identity per Cursor environment via the radicle
-MCP:
+MCP ([`rad:z4J6Hk21QrvWvQJKpH145GMAcACga`](https://nandi.radicle.garden/rad:z4J6Hk21QrvWvQJKpH145GMAcACga),
+hosted at `https://mcp.boxd.sh/radicle/mcp`):
 
 1. Call `cursor-cloud` → `environment-info` and read `environment.environmentPublicId`.
 2. Pass that value as `env_name` on every radicle MCP call (`issue_device_key`,
-   `create_patch`). The MCP stores keys under `.radicle/<env_name>` and returns
-   `created: false` when the DID already exists.
-3. Prefer `create_patch` (with `env_name`) over local `rad auth` / manual
-   `git push rad`. Only use a local `rad` identity when Buildkite/OpenBao has
-   already loaded `RADICLE_SECRET_KEY` (dedicated CI key under
-   `secret/data/radicle`).
+   `create_patch`). The MCP also accepts header `x-cursor-environment-id` /
+   env `CURSOR_ENVIRONMENT_ID`. Keys live under `.radicle/<env_id>`; reloads
+   return `created: false` with the same DID.
+3. Prefer `create_patch` over local `rad auth` / manual `git push rad`. Only use
+   a local `rad` identity when Buildkite/OpenBao has already loaded
+   `RADICLE_SECRET_KEY` (dedicated CI key under `secret/data/radicle`).
 
 Skill: `.cursor/skills/radicle-patch/`. Never commit key material; never pass
 `force: true` to `issue_device_key` unless deliberately rotating the env DID.

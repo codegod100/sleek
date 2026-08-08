@@ -110,9 +110,10 @@ cursor_agent_cmd() {
 }
 
 build_radicle_mcp() {
+  # Graduated to rad:z4J6Hk21QrvWvQJKpH145GMAcACga / github.com/codegod100/radicle-mcp
   local mcp_dir="$REPO_ROOT/mcp/radicle"
   if [[ ! -f "$mcp_dir/package.json" ]]; then
-    echo "[bootstrap] no mcp/radicle in repo — skipping MCP build"
+    echo "[bootstrap] no local mcp/radicle — using hosted https://mcp.boxd.sh/radicle/mcp"
     return 0
   fi
 

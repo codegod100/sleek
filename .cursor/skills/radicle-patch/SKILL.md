@@ -9,6 +9,10 @@ description: >
 
 # Radicle patches (stable DID per Cursor env)
 
+MCP source: [`rad:z4J6Hk21QrvWvQJKpH145GMAcACga`](https://nandi.radicle.garden/rad:z4J6Hk21QrvWvQJKpH145GMAcACga)
+(hosted `https://mcp.boxd.sh/radicle/mcp`). The server auto-scopes to
+`CURSOR_ENVIRONMENT_ID` / `x-cursor-environment-id` when `env_name` is omitted.
+
 ## Rule
 
 **One Cursor environment → one Radicle device DID.** Never mint a new identity
