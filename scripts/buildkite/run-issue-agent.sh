@@ -27,10 +27,16 @@ echo "branch: ${BUILDKITE_BRANCH:-unknown}"
 echo "repo:   $REPO_ROOT"
 
 # Detect before bootstrap so normal CI (no CURSOR_API_KEY) can soft-skip.
+# Keep stderr (warnings) out of eval — only assignment lines are sourced.
+detect_err="$(mktemp)"
 set +e
-detect_out="$(bash "$SCRIPT_DIR/detect-issue.sh" 2>&1)"
+detect_out="$(bash "$SCRIPT_DIR/detect-issue.sh" 2>"$detect_err")"
 detect_rc=$?
 set -e
+if [[ -s "$detect_err" ]]; then
+  cat "$detect_err" >&2
+fi
+rm -f "$detect_err"
 
 if [[ "$detect_rc" -eq 2 ]]; then
   echo "$detect_out"
@@ -42,7 +48,7 @@ if [[ "$detect_rc" -ne 0 ]]; then
   bk_die "issue detection failed (exit $detect_rc)"
 fi
 
-eval "$detect_out"
+eval "$(printf '%s\n' "$detect_out" | grep -E '^RADICLE_ISSUE_')"
 
 echo "issue:  $RADICLE_ISSUE_ID"
 echo "title:  $RADICLE_ISSUE_TITLE"
