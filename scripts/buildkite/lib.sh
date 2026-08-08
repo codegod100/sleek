@@ -8,6 +8,27 @@ bk_require_cmd() {
   command -v "$1" >/dev/null 2>&1 || bk_die "$1 not found on PATH"
 }
 
+# Cursor installer puts `agent` / `cursor-agent` under ~/.local/bin (and sometimes
+# ~/.cursor/bin). Bootstrap runs as a subprocess, so every issue-agent entrypoint
+# must re-export these dirs — otherwise delegate sees exit 127 after a successful
+# install.
+bk_export_cursor_path() {
+  export PATH="${HOME}/.cursor/bin:${HOME}/.local/bin:/usr/local/bin:${PATH:-}"
+}
+
+# Resolve cursor-agent CLI name after PATH is set. Prints binary name or returns 1.
+bk_cursor_agent_cmd() {
+  if command -v cursor-agent >/dev/null 2>&1; then
+    echo "cursor-agent"
+    return 0
+  fi
+  if command -v agent >/dev/null 2>&1; then
+    echo "agent"
+    return 0
+  fi
+  return 1
+}
+
 bk_repo_root() {
   git rev-parse --show-toplevel 2>/dev/null || bk_die "not inside a git repository"
 }

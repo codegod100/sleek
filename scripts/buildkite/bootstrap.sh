@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 REPO_ROOT="$(bk_repo_root)"
-export PATH="${HOME}/.local/bin:/usr/local/bin:${PATH:-}"
+bk_export_cursor_path
 
 # Sleek RID (Garden HTTPS checkouts lack a rad:// remote until we link them).
 RADICLE_RID="${RADICLE_RID:-rad:z9mjPzpVK472QXaaP1picc5U9xBR}"
@@ -78,25 +78,32 @@ bk_soft_secret() {
 }
 
 install_cursor_agent() {
-  if command -v cursor-agent >/dev/null 2>&1; then
-    return 0
-  fi
-  if command -v agent >/dev/null 2>&1; then
+  local cmd
+  bk_export_cursor_path
+  if cmd="$(bk_cursor_agent_cmd)"; then
+    echo "[bootstrap] Cursor CLI already on PATH: ${cmd} ($(command -v "$cmd"))"
     return 0
   fi
 
-  echo "[bootstrap] installing Cursor CLI..."
+  echo "[bootstrap] installing Cursor CLI (curl https://cursor.com/install)..."
   curl -fsSL https://cursor.com/install | bash
-  export PATH="${HOME}/.cursor/bin:${PATH:-}"
+  # Installer may land in ~/.local/bin and/or ~/.cursor/bin; re-export both.
+  bk_export_cursor_path
+
+  if ! cmd="$(bk_cursor_agent_cmd)"; then
+    echo "[bootstrap] warn: looking for agent binaries under common install dirs..." >&2
+    ls -la "${HOME}/.local/bin/agent" "${HOME}/.local/bin/cursor-agent" \
+      "${HOME}/.cursor/bin/agent" "${HOME}/.cursor/bin/cursor-agent" 2>&1 || true
+    bk_die "cursor-agent / agent not found after install (expected under ~/.local/bin or ~/.cursor/bin)"
+  fi
+  echo "[bootstrap] Cursor CLI installed: ${cmd} ($(command -v "$cmd"))"
 }
 
 cursor_agent_cmd() {
-  if command -v cursor-agent >/dev/null 2>&1; then
-    echo "cursor-agent"
-    return 0
-  fi
-  if command -v agent >/dev/null 2>&1; then
-    echo "agent"
+  bk_export_cursor_path
+  local cmd
+  if cmd="$(bk_cursor_agent_cmd)"; then
+    echo "$cmd"
     return 0
   fi
   bk_die "cursor-agent / agent not found after install"

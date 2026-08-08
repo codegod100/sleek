@@ -4,6 +4,11 @@
 #                      [--output-format json|text] [--timeout SECONDS] [--force]
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
+bk_export_cursor_path
+
 task=""
 workspace=""
 model=""
@@ -34,12 +39,12 @@ if [[ -z "${task:-}" ]]; then
 fi
 
 AGENT_BIN=""
-if command -v cursor-agent >/dev/null 2>&1; then
-  AGENT_BIN=cursor-agent
-elif command -v agent >/dev/null 2>&1; then
-  AGENT_BIN=agent
+if AGENT_BIN="$(bk_cursor_agent_cmd)"; then
+  :
+else
+  echo "error: cursor-agent / agent not found on PATH (tried ~/.cursor/bin ~/.local/bin)" >&2
+  exit 127
 fi
-[[ -n "$AGENT_BIN" ]] || { echo "error: cursor-agent / agent not found on PATH" >&2; exit 127; }
 "$AGENT_BIN" status >/dev/null 2>&1 || { echo "error: Cursor CLI not authenticated (set CURSOR_API_KEY or run: $AGENT_BIN login)" >&2; exit 1; }
 
 args=(--print --output-format "$output_format")

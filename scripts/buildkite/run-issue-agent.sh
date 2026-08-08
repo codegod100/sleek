@@ -18,6 +18,7 @@ cd "$REPO_ROOT"
 
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+bk_export_cursor_path
 
 TIMEOUT="${RADICLE_AGENT_TIMEOUT:-3600}"
 MODEL="${RADICLE_AGENT_MODEL:-}"
@@ -65,6 +66,12 @@ if git show-ref --verify --quiet "refs/heads/$RADICLE_ISSUE_BRANCH"; then
 fi
 
 bash "$SCRIPT_DIR/bootstrap.sh"
+# Bootstrap is a subprocess — re-apply Cursor + local bin PATH for delegate.
+bk_export_cursor_path
+if ! bk_cursor_agent_cmd >/dev/null; then
+  bk_die "cursor-agent / agent not found on PATH after bootstrap (PATH=$PATH)"
+fi
+echo "cursor-agent: $(command -v "$(bk_cursor_agent_cmd)")"
 
 if command -v buildkite-agent >/dev/null 2>&1; then
   buildkite-agent meta-data set "radicle_issue_id" "$RADICLE_ISSUE_ID" || true
