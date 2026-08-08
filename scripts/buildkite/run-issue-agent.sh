@@ -78,6 +78,31 @@ if command -v buildkite-agent >/dev/null 2>&1; then
   buildkite-agent meta-data set "radicle_issue_branch" "$RADICLE_ISSUE_BRANCH" || true
 fi
 
+RADICLE_RID="${RADICLE_RID:-rad:z9mjPzpVK472QXaaP1picc5U9xBR}"
+ISSUE_SHORT="$(bk_short_id "$RADICLE_ISSUE_ID")"
+ISSUE_LINK="https://nandi.radicle.garden/${RADICLE_RID}/issues/${RADICLE_ISSUE_ID}"
+PATCH_TITLE="Fix: ${RADICLE_ISSUE_TITLE}"
+# Description body for -o patch.message / rad patch edit -m (title is separate).
+# Empty issue body still gets id/title/link so the patch is not title-only.
+ISSUE_BODY_TEXT="${RADICLE_ISSUE_BODY:-*(no description)*}"
+PATCH_DESCRIPTION=$(cat <<EOF
+## Summary
+Fixes Radicle issue \`${ISSUE_SHORT}\`.
+
+## Issue
+- ID: \`${RADICLE_ISSUE_ID}\`
+- Title: ${RADICLE_ISSUE_TITLE}
+- Link: ${ISSUE_LINK}
+- Repo: ${RADICLE_RID}
+
+## Issue description
+${ISSUE_BODY_TEXT}
+
+## Context
+Opened by Buildkite issue→agent (pipeline sleek-5u9xbr) on branch \`${RADICLE_ISSUE_BRANCH}\`.
+EOF
+)
+
 PROMPT=$(cat <<EOF
 A new Radicle issue was opened in this repository. Implement a fix and open a Radicle patch.
 
@@ -91,11 +116,33 @@ Requirements:
 2. Run relevant verification from AGENTS.md when practical:
    - \`nix develop . --command cargo clippy --manifest-path host/Cargo.toml -- -D warnings\`
    - \`nix develop . --command cargo test --manifest-path android/Cargo.toml --lib\`
-3. Open a Radicle patch on the \`rad\` remote (prefer \`git push rad HEAD:refs/patches\` with
-   \`-o patch.message=...\`, or the radicle MCP \`create_patch\` if available):
+3. Open a Radicle patch on the \`rad\` remote. The patch MUST have both a title AND a full
+   description body (not title-only). Prefer \`git push rad HEAD:refs/patches\` with
+   **repeated** \`-o patch.message=...\` (first option = title; each later option = body
+   paragraph, joined with a blank line). Do not open a patch with only a title.
+
+   Required title:
+   ${PATCH_TITLE}
+
+   Required description (set as the second and further \`-o patch.message=\` values; you may
+   pass the whole block as one \`-o patch.message=...\` with embedded newlines, or split by
+   paragraph):
+   -----
+${PATCH_DESCRIPTION}
+   -----
+
+   Example:
+   git checkout -b "${RADICLE_ISSUE_BRANCH}"
+   # … commit the fix …
+   git push rad HEAD:refs/patches \\
+     -o patch.message="${PATCH_TITLE}" \\
+     -o patch.message="<Required description from above>"
+
+   If using radicle MCP \`create_patch\`, set the same title and the full description body
+   (issue id, title, issue body, and link) — never omit description.
    - branch: "${RADICLE_ISSUE_BRANCH}"
-   - title: "Fix: ${RADICLE_ISSUE_TITLE}"
-   - body: "Addresses Radicle issue ${RADICLE_ISSUE_ID}\\n\\n${RADICLE_ISSUE_BODY}"
+   - title: "${PATCH_TITLE}"
+   - description: the Required description block above (verbatim or equivalent)
    - commit: a clear commit message describing the fix
 4. Do not close the issue. Only open the patch.
 
@@ -131,16 +178,53 @@ if [[ "$agent_rc" -ne 0 ]]; then
   exit "$agent_rc"
 fi
 
-# Best-effort: surface patch id from agent output or recent patches.
-PATCH_NOTE=""
-if echo "$agent_out" | grep -qE 'patch_id|patches/[0-9a-f]{7,40}|Patch[[:space:]]+[0-9a-f]{7,40}'; then
+# Resolve patch id from agent output, then branch upstream (rad/patches/<id>).
+resolve_patch_id() {
+  local raw="" upstream=""
+  raw=$(echo "$agent_out" | grep -oE 'patches/[0-9a-f]{7,40}|Patch[[:space:]]+[0-9a-f]{7,40}|"patch_id"[[:space:]]*:[[:space:]]*"[0-9a-f]+"' | head -1 || true)
+  if [[ -n "$raw" ]]; then
+    echo "$raw" | grep -oE '[0-9a-f]{7,40}' | head -1
+    return 0
+  fi
+  if git show-ref --verify --quiet "refs/heads/$RADICLE_ISSUE_BRANCH"; then
+    upstream=$(git rev-parse --abbrev-ref "${RADICLE_ISSUE_BRANCH}@{upstream}" 2>/dev/null || true)
+    if [[ "$upstream" =~ patches/([0-9a-f]{7,40}) ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+PATCH_ID=""
+PATCH_ID=$(resolve_patch_id || true)
+
+# Fallback: ensure title + full description via rad patch edit when the agent
+# left a title-only / thin body. Prefer agent push options; skip if description
+# already includes the issue link from our template.
+if [[ -n "$PATCH_ID" ]] && command -v rad >/dev/null 2>&1; then
+  patch_show=$(rad patch show "$PATCH_ID" 2>/dev/null || true)
+  if echo "$patch_show" | grep -qF "$ISSUE_LINK"; then
+    echo "Patch ${PATCH_ID:0:7} already has structured description — skipping edit"
+  else
+    echo "=== Ensuring patch description (rad patch edit ${PATCH_ID:0:7}) ==="
+    if rad patch edit "$PATCH_ID" -m "$PATCH_TITLE" -m "$PATCH_DESCRIPTION" --no-announce 2>&1; then
+      echo "Patch description set for ${PATCH_ID:0:7}"
+    else
+      echo "warn: rad patch edit failed for ${PATCH_ID:0:7} (non-fatal)" >&2
+    fi
+  fi
+fi
+
+PATCH_NOTE="${PATCH_ID:-}"
+if [[ -z "$PATCH_NOTE" ]] && echo "$agent_out" | grep -qE 'patch_id|patches/[0-9a-f]{7,40}|Patch[[:space:]]+[0-9a-f]{7,40}'; then
   PATCH_NOTE=$(echo "$agent_out" | grep -oE 'patches/[0-9a-f]{7,40}|Patch[[:space:]]+[0-9a-f]{7,40}|"patch_id"[[:space:]]*:[[:space:]]*"[0-9a-f]+"' | head -1 || true)
 fi
 
 if [[ -n "$PATCH_NOTE" ]]; then
-  bk_annotate success "Agent finished for issue \`${RADICLE_ISSUE_ID:0:7}\`. Patch: ${PATCH_NOTE}"
+  bk_annotate success "Agent finished for issue \`${ISSUE_SHORT}\`. Patch: ${PATCH_NOTE}"
 else
-  bk_annotate success "Agent finished for issue \`${RADICLE_ISSUE_ID:0:7}\`. Check \`rad patch list\` for the new patch."
+  bk_annotate success "Agent finished for issue \`${ISSUE_SHORT}\`. Check \`rad patch list\` for the new patch."
 fi
 
 echo "=== Done ==="
