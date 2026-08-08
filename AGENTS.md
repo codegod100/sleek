@@ -83,7 +83,7 @@ printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 [baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
-[sleek](https://buildkite.com/nandi/sleek) (created via API; steps in
+[sleek-5u9xbr](https://buildkite.com/nandi/sleek-5u9xbr) (created via API; steps in
 `.buildkite/pipeline.yml`).
 
 **Clone source is Radicle Garden** (not GitHub), same shape as baogui:
@@ -93,12 +93,26 @@ Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
 - Provider: private (no GitHub webhooks — trigger via Buildkite API / schedule /
   Radicle CI adapter)
 
+**Radicle issue → Cursor agent → patch** (Garden adapter skips issue COB commits):
+- Schedule: `sleek-5u9xbr` every 10m with `RADICLE_TRIGGER=poll` →
+  `scripts/buildkite/poll-issues.sh`
+- Manual poll: `./scripts/buildkite/dispatch-poll.sh` or New Build with
+  `RADICLE_TRIGGER=poll`
+- One issue: `./scripts/buildkite/trigger-issue-build.sh <issue-id>`
+- Cluster secrets: `CURSOR_API_KEY`, `RADICLE_SECRET_KEY` (issue agent);
+  optional `BUILDKITE_API_TOKEN` (poll dispatches via API instead of pipeline-upload)
+- Bootstrap: `scripts/buildkite/bootstrap.sh` hydrates `$RAD_HOME/storage` from
+  Garden HTTPS (no `:58019` required); persists Cursor CLI path for subprocess runs
+
 API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
-`.cursor/skills/configure-buildkite/`. Radicle signing keys for publishing
-patches live under OpenBao `secret/data/radicle`.
+`.cursor/skills/configure-buildkite/`. Radicle **CI** signing keys live under
+OpenBao `secret/data/radicle` (`RADICLE_SECRET_KEY`, optional
+`RADICLE_PUBLIC_KEY` / `RAD_PASSPHRASE`) and/or matching Buildkite cluster
+secrets. Use a dedicated CI identity (not a personal DID); never commit key
+material.
 
 Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
-and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek` (and
+and/or `OPENBAO_TOKEN`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek-5u9xbr` (and
 `baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check materializes flake.lock–
 pinned `vidya`/`freeq` via `scripts/sync-flake-path-deps.sh` and runs `cargo`
 inside `nix develop` (mold + libs from the flake, not apt).
@@ -111,5 +125,5 @@ eval "$(./scripts/configure-buildkite-from-openbao.sh)"
 # curl -X POST -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
 #   -H "Content-Type: application/json" \
 #   -d '{"commit":"HEAD","branch":"main"}' \
-#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek/builds
+#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek-5u9xbr/builds
 ```

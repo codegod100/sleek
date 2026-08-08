@@ -8,9 +8,17 @@
 #
 # Secrets (Buildkite cluster → Secrets, org nandi / Default cluster):
 #   - NIXBUILD_TOKEN (preferred) — soft-loaded; skip artifacts if missing
-#   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN
+#   - OPENBAO_TOKEN (optional) — fetch-openbao-env.sh → NIXBUILD_TOKEN / radicle
+#   - CURSOR_API_KEY (issue agent) — Cursor CLI for Radicle issue → patch
+#   - RADICLE_SECRET_KEY (issue agent) — dedicated CI OpenSSH private key PEM
+#   - RADICLE_PUBLIC_KEY / RAD_PASSPHRASE (optional) — derived / empty OK
+#   - BUILDKITE_API_TOKEN (optional) — poll/trigger scripts for new issues
 # UI: https://buildkite.com/organizations/nandi/clusters → Default cluster → Secrets
-# Pipeline: https://buildkite.com/nandi/sleek
+# Pipeline: https://buildkite.com/nandi/sleek-5u9xbr
+#
+# Cluster secrets are inaccessible to `buildkite-agent secret get` unless the
+# step declares them under `secrets:` (Buildkite cluster secrets allow-list).
+# Soft-load in scripts/buildkite/bootstrap.sh still applies after declaration.
 #
 # Pipeline repository (Buildkite): Radicle Garden clone URL
 #   https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git
@@ -25,16 +33,38 @@
 # github.com/codegod100/freeq, and Flathub when building Flatpak.
 # Hosted queue: auto (LINUX_AMD64_2X4). Use $$ so Buildkite does not interpolate
 # shell vars at pipeline-upload time.
+#
+# Scheduled poll builds: prefer skip_queued_branch_builds on pipeline sleek-5u9xbr
+# so 10m schedules do not stack when agents are busy (see build #49+).
+#
+# Radicle issue → cursor-agent → patch:
+#   Garden adapter skips issue COB commits (no pipeline.yml there). Auto path:
+#     Buildkite schedule every 10m with RADICLE_TRIGGER=poll
+#     → scripts/buildkite/poll-issues.sh lists issue COBs via git ls-remote
+#     → dispatches run-issue-agent.sh (pipeline upload or API trigger)
+#   Manual poll (same as schedule — timer OR on-demand):
+#     UI: New Build → env RADICLE_TRIGGER=poll
+#     CLI: ./scripts/buildkite/dispatch-poll.sh
+#   Manual one issue: ./scripts/buildkite/trigger-issue-build.sh <issue-id>
+#     (or: ./scripts/buildkite/dispatch-poll.sh --issue <issue-id>)
+#   Requires CURSOR_API_KEY + RADICLE_SECRET_KEY (bootstrap installs rad, writes
+#   $RAD_HOME/keys, starts node, hydrates $RAD_HOME/storage from Garden HTTPS
+#   mirror — no Garden:58019 required — then rad init --existing so git push rad
+#   works). Public seeds rosa/iris :8776 are preferred for connect/announce;
+#   Garden p2p :58019 is optional. Hosted agents already reach Garden HTTPS :443.
 
 agents:
   queue: auto
 
 env:
   RUST_BACKTRACE: "1"
+  GIT_TERMINAL_PROMPT: "0"
 
 steps:
   - label: ":rust: Check"
     key: check
+    # Issue/poll builds only need the agent / poll steps.
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     timeout_in_minutes: 120
     command: |
       set -euo pipefail
@@ -98,6 +128,7 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 120
@@ -138,6 +169,7 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
+    if: build.env("RADICLE_TRIGGER") != "issue" && build.env("RADICLE_TRIGGER") != "poll"
     depends_on: check
     allow_dependency_failure: true
     timeout_in_minutes: 180
@@ -180,3 +212,54 @@ steps:
       ln -f "$$bundle" uk.nandi.sleek.flatpak 2>/dev/null \
         || cp --reflink=auto "$$bundle" uk.nandi.sleek.flatpak
       buildkite-agent artifact upload uk.nandi.sleek.flatpak
+
+  # --- Radicle issue poll (schedule every 10m OR manual: RADICLE_TRIGGER=poll) ---
+  # Manual: UI New Build + env, or ./scripts/buildkite/dispatch-poll.sh
+  - label: ":radicle: Poll issues → dispatch agent"
+    key: radicle-issue-poll
+    if: build.env("RADICLE_TRIGGER") == "poll"
+    concurrency:
+      group: "sleek-radicle-issue-poll"
+      limit: 1
+    command: bash scripts/buildkite/poll-issues.sh
+    timeout_in_minutes: 15
+    # Do not hard-require BUILDKITE_API_TOKEN — poll soft-loads it when present,
+    # otherwise falls back to pipeline-upload. A missing/denied secret under
+    # secrets: fails the job at "Preparing secrets" (see build #27).
+
+  # --- Radicle issue agent (triggered via RADICLE_ISSUE_ID on main) ---
+  - label: ":radicle: Issue → :cursor: agent → patch"
+    key: radicle-issue-agent
+    if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
+    command: bash scripts/buildkite/run-issue-agent.sh
+    timeout_in_minutes: 90
+    # Only required secrets here. Optional RADICLE_PUBLIC_KEY / RAD_PASSPHRASE /
+    # OPENBAO_TOKEN are soft-loaded in bootstrap (derived / empty OK).
+    # Cluster secret policy for these keys MUST allow pipeline sleek-5u9xbr.
+    secrets:
+      - CURSOR_API_KEY
+      - RADICLE_SECRET_KEY
+    # RADICLE_ISSUE_ID / RADICLE_TRIGGER come from build env (API trigger or poll upload).
+
+  - label: ":mag: Verify patch (optional)"
+    key: verify-patch
+    if: build.env("RADICLE_TRIGGER") == "issue" || build.env("RADICLE_ISSUE_ID") != null
+    depends_on: radicle-issue-agent
+    allow_dependency_failure: true
+    command: |
+      set -euo pipefail
+      BRANCH="$$(buildkite-agent meta-data get radicle_issue_branch 2>/dev/null || true)"
+      if [[ -z "$$BRANCH" ]]; then
+        echo "No issue branch metadata — prior step likely skipped (not an issue event)."
+        exit 0
+      fi
+      if git show-ref --verify --quiet "refs/heads/$$BRANCH"; then
+        echo "Branch $$BRANCH exists."
+        git log -1 --oneline "$$BRANCH"
+      else
+        echo "Branch $$BRANCH not found — agent may have declined or failed before branching."
+        exit 0
+      fi
+      echo ""
+      echo "Open patches:"
+      rad patch list --open 2>/dev/null | sed -n '1,15p' || rad patch 2>/dev/null | sed -n '1,15p' || true
