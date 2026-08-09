@@ -14,7 +14,7 @@ GitHub / Cursor checkouts only have `origin`. Opening Radicle patches requires a
 
 ```bash
 bash scripts/ensure-rad-remote.sh
-# equivalent: git remote add rad rad:z9mjPzpVK472QXaaP1picc5U9xBR
+# equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
 ```
 
 `scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud `install` /
