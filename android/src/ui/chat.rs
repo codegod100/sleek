@@ -114,6 +114,9 @@ fn apply_message_bubble_action(
         MessageBubbleAction::OpenProfile { nick } => {
             *action = ChatAction::OpenProfile(nick);
         }
+        MessageBubbleAction::NavigateTo { msgid } => {
+            state.navigate_to_message(channel, &msgid);
+        }
     }
 }
 
