@@ -18,8 +18,9 @@ use crate::state::{
     LinkMeta, MediaFetch, Route, Tab,
 };
 use crate::ui::{
-    self, image_lightbox_overlay, open_verification_url, policy_gate_overlay, ChatAction,
-    ChatsAction, ConnectAction, DiscoverAction, PolicyGateAction, SettingsAction,
+    self, image_lightbox_overlay, open_profile_url, open_verification_url, policy_gate_overlay,
+    profile_gate_overlay, ChatAction, ChatsAction, ConnectAction, DiscoverAction, PolicyGateAction,
+    ProfileGateAction, SettingsAction,
 };
 
 /// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
@@ -714,6 +715,29 @@ impl SleekApp {
                         .apply_results(request_id, query, actors);
                 }
             }
+            NetEvent::ProfileFetched {
+                request_id,
+                result,
+            } => {
+                if self.state.profile_gate.fetch_id != request_id {
+                    return;
+                }
+                self.state.profile_gate.profile_fetching = false;
+                self.state.profile_gate.loading = false;
+                match result {
+                    Ok(profile) => {
+                        if self.state.profile_gate.did.is_none() {
+                            self.state.profile_gate.did = Some(profile.did.clone());
+                        }
+                        self.state.profile_gate.error = None;
+                        self.state.profile_gate.profile = Some(profile);
+                    }
+                    Err(e) => {
+                        self.state.profile_gate.error = Some(e);
+                        self.state.profile_gate.profile = None;
+                    }
+                }
+            }
             NetEvent::PolicyFetched {
                 request_id,
                 check,
@@ -1027,6 +1051,46 @@ impl SleekApp {
                 // Fold nick-keyed DM into DID-keyed thread when peer identity
                 // is learned (join / whois / account tag on first message).
                 self.state.adopt_dm_binding(&nick, &did);
+                if self
+                    .state
+                    .profile_gate
+                    .nick
+                    .as_ref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&nick))
+                {
+                    self.state.profile_gate.did = Some(did.clone());
+                    self.maybe_fetch_profile_for_gate();
+                }
+            }
+            Event::WhoisReply { nick, info } => {
+                if self
+                    .state
+                    .profile_gate
+                    .nick
+                    .as_ref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&nick))
+                {
+                    if !self
+                        .state
+                        .profile_gate
+                        .whois_lines
+                        .iter()
+                        .any(|l| l == &info)
+                    {
+                        self.state.profile_gate.whois_lines.push(info);
+                    }
+                    // Offline / unknown nick: stop waiting on IRC identity. A
+                    // handle-shaped nick may still resolve via Bluesky AppView.
+                    if !self.state.profile_gate.profile_fetching
+                        && self.state.profile_gate.profile.is_none()
+                    {
+                        if self.state.profile_gate.bluesky_actor().is_some() {
+                            self.maybe_fetch_profile_for_gate();
+                        } else {
+                            self.state.profile_gate.loading = false;
+                        }
+                    }
+                }
             }
             Event::ChatHistoryTarget {
                 nick,
@@ -1951,6 +2015,79 @@ impl SleekApp {
         });
     }
 
+    /// Open peer profile dialog; WHOIS for DID if unknown, then Bluesky getProfile.
+    fn open_profile_gate(&mut self, nick: &str) {
+        let nick = nick.trim();
+        if nick.is_empty() {
+            return;
+        }
+        self.state.open_profile_gate(nick);
+        if let Some(n) = self.state.profile_gate.nick.clone() {
+            if !self.state.profile_gate.whois_sent {
+                self.state.profile_gate.whois_sent = true;
+                self.net.send(NetCmd::Raw(format!("WHOIS {n}")));
+            }
+        }
+        // Fetch immediately when we already have a DID or a handle-shaped nick.
+        self.maybe_fetch_profile_for_gate();
+    }
+
+    fn maybe_fetch_profile_for_gate(&mut self) {
+        if !self.state.profile_gate.is_open() || self.state.profile_gate.profile_fetching {
+            return;
+        }
+        if self.state.profile_gate.profile.is_some() {
+            self.state.profile_gate.loading = false;
+            return;
+        }
+        let Some(actor) = self
+            .state
+            .profile_gate
+            .bluesky_actor()
+            .map(|s| s.to_string())
+        else {
+            // No Bluesky actor yet — UI shows "Looking up…" until WHOIS settles.
+            return;
+        };
+        let request_id = self.state.profile_gate.fetch_id;
+        self.state.profile_gate.profile_fetching = true;
+        self.state.profile_gate.loading = true;
+        self.state.profile_gate.error = None;
+        self.net.send(NetCmd::FetchProfile {
+            request_id,
+            actor,
+        });
+    }
+
+    fn handle_profile_gate_action(&mut self, ctx: &egui::Context, act: ProfileGateAction) {
+        match act {
+            ProfileGateAction::None => {}
+            ProfileGateAction::Close => {
+                self.state.close_profile_gate();
+            }
+            ProfileGateAction::Message { nick } => {
+                self.state.close_profile_gate();
+                let key = self.state.dm_buffer_key(&nick);
+                let need_history = self
+                    .state
+                    .channels
+                    .get(&key)
+                    .map(|b| !b.has_chat_messages())
+                    .unwrap_or(true);
+                self.state.open_chat(&key);
+                if need_history {
+                    self.net.send(NetCmd::HistoryLatest {
+                        target: key,
+                        count: 100,
+                    });
+                }
+            }
+            ProfileGateAction::OpenBluesky { url } => {
+                open_profile_url(ctx, &url);
+            }
+        }
+    }
+
     fn refresh_policy_gate(&mut self) {
         let channel = match self.state.policy_gate.channel.clone() {
             Some(c) => c,
@@ -2776,6 +2913,9 @@ impl eframe::App for SleekApp {
                     ChatAction::OpenPolicyGate(channel) => {
                         self.open_policy_gate(&channel);
                     }
+                    ChatAction::OpenProfile(nick) => {
+                        self.open_profile_gate(&nick);
+                    }
                     ChatAction::AvStart(channel) => {
                         self.do_av_start(channel);
                     }
@@ -2931,6 +3071,9 @@ impl eframe::App for SleekApp {
         let gate_act = policy_gate_overlay(ctx, &th, &mut self.state);
         self.handle_policy_gate_action(ctx, gate_act);
 
+        let profile_act = profile_gate_overlay(ctx, &th, &mut self.state);
+        self.handle_profile_gate_action(ctx, profile_act);
+
         // Android back gesture → Escape (egui-winit). At the root shell with
         // nothing left to dismiss, finish the Activity (leave the app).
         #[cfg(target_os = "android")]
@@ -2939,7 +3082,8 @@ impl eframe::App for SleekApp {
                 || self.state.connection == ConnectionState::Disconnected;
             let overlay_open = self.state.image_lightbox.is_some()
                 || self.state.react_picker_msg.is_some()
-                || self.state.policy_gate.channel.is_some();
+                || self.state.policy_gate.channel.is_some()
+                || self.state.profile_gate.is_open();
             if at_root
                 && !overlay_open
                 && ctx.input_mut(|i| {

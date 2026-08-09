@@ -1037,6 +1037,79 @@ pub fn api_base_for_server(server: &str) -> String {
     }
 }
 
+/// Peer profile modal (nick tap → Bluesky / WHOIS info).
+#[derive(Debug, Default)]
+pub struct ProfileGate {
+    /// Nick the modal is open for (`None` = closed).
+    pub nick: Option<String>,
+    /// Peer DID when known (from nick map / WHOIS account).
+    pub did: Option<String>,
+    /// True while waiting on WHOIS and/or Bluesky `getProfile`.
+    pub loading: bool,
+    pub error: Option<String>,
+    pub profile: Option<crate::bsky::ActorProfile>,
+    /// Raw WHOIS reply lines for this nick (guest / extra detail).
+    pub whois_lines: Vec<String>,
+    /// Monotonic id so stale HTTP responses are ignored.
+    pub fetch_id: u64,
+    /// True after we dispatched WHOIS for this open.
+    pub whois_sent: bool,
+    /// True while a Bluesky profile HTTP fetch is in flight.
+    pub profile_fetching: bool,
+}
+
+impl ProfileGate {
+    pub fn is_open(&self) -> bool {
+        self.nick.is_some()
+    }
+
+    pub fn open(&mut self, nick: String, did: Option<String>) {
+        self.nick = Some(nick);
+        self.did = did;
+        // Only flipped true when a Bluesky HTTP fetch is actually started.
+        self.loading = false;
+        self.error = None;
+        self.profile = None;
+        self.whois_lines.clear();
+        self.whois_sent = false;
+        self.profile_fetching = false;
+        self.fetch_id = self.fetch_id.wrapping_add(1);
+    }
+
+    pub fn close(&mut self) {
+        *self = Self {
+            fetch_id: self.fetch_id,
+            ..Self::default()
+        };
+    }
+
+    /// Actor string to pass to Bluesky `getProfile`, if resolvable.
+    ///
+    /// Prefers an AT Proto DID; falls back to a domain-shaped nick (common
+    /// freeq pattern where the IRC nick *is* the Bluesky handle).
+    pub fn bluesky_actor(&self) -> Option<&str> {
+        if let Some(d) = self
+            .did
+            .as_deref()
+            .filter(|d| crate::bsky::is_atproto_did(d))
+        {
+            return Some(d);
+        }
+        self.nick
+            .as_deref()
+            .filter(|n| crate::bsky::looks_like_bsky_handle(n))
+            .map(|n| n.trim().trim_start_matches('@'))
+    }
+
+    /// WHOIS finished without an AT identity (or nick is offline).
+    pub fn whois_exhausted(&self) -> bool {
+        self.whois_lines.iter().any(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.contains("no such nick") || lower.contains("no such server")
+        })
+    }
+}
+
 /// Join-gate modal state (policy acceptance before JOIN).
 #[derive(Debug, Default)]
 pub struct PolicyGate {
@@ -1237,6 +1310,8 @@ pub struct AppState {
 
     /// Channel policy join-gate modal (authenticated users blocked by ACCEPT rules).
     pub policy_gate: PolicyGate,
+    /// Peer profile modal (tap nick in channel / member list).
+    pub profile_gate: ProfileGate,
     /// MoQ media-plane reconnect while `local_call` is still active.
     pub media_reconnect_attempts: u32,
     pub media_reconnect_at: Option<Instant>,
@@ -1362,6 +1437,7 @@ impl AppState {
             reconnect_attempts: 0,
             reconnect_at: None,
             policy_gate: PolicyGate::default(),
+            profile_gate: ProfileGate::default(),
             media_reconnect_attempts: 0,
             media_reconnect_at: None,
             media_live_since: None,
@@ -2085,6 +2161,9 @@ impl AppState {
         if self.image_lightbox.is_some() {
             self.close_image_lightbox();
             false
+        } else if self.profile_gate.is_open() {
+            self.close_profile_gate();
+            false
         } else if self.react_picker_msg.is_some() {
             self.close_react_picker();
             false
@@ -2219,6 +2298,22 @@ impl AppState {
         self.policy_gate.close();
     }
 
+    /// Open the peer profile modal for `nick` (resolves DID from nick map when known).
+    pub fn open_profile_gate(&mut self, nick: &str) -> u64 {
+        let nick = nick.trim();
+        if nick.is_empty() {
+            return self.profile_gate.fetch_id;
+        }
+        let did = self.nick_to_did.get(&nick.to_lowercase()).cloned();
+        self.close_react_picker();
+        self.profile_gate.open(nick.to_string(), did);
+        self.profile_gate.fetch_id
+    }
+
+    pub fn close_profile_gate(&mut self) {
+        self.profile_gate.close();
+    }
+
     /// Start editing an existing message in the compose bar.
     pub fn begin_edit(&mut self, msgid: String, text: String) {
         self.cancel_reply();
@@ -2295,6 +2390,7 @@ impl AppState {
         self.show_members = false;
         self.close_message_search();
         self.close_react_picker();
+        self.close_profile_gate();
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
@@ -2698,6 +2794,11 @@ mod tests {
         assert!(!state.chat_back_step());
         assert!(state.image_lightbox.is_none());
 
+        state.open_profile_gate("alice");
+        assert!(state.profile_gate.is_open());
+        assert!(!state.chat_back_step());
+        assert!(!state.profile_gate.is_open());
+
         state.open_react_picker("m1".into());
         assert!(!state.chat_back_step());
         assert!(state.react_picker_msg.is_none());
@@ -2736,6 +2837,26 @@ mod tests {
         assert!(state.editing_msgid.is_none());
 
         assert!(state.chat_back_step());
+    }
+
+    #[test]
+    fn profile_gate_handle_nick_is_bluesky_actor_without_did() {
+        let mut gate = ProfileGate::default();
+        gate.open("chadfowler.com".into(), None);
+        assert!(!gate.loading);
+        assert_eq!(gate.bluesky_actor(), Some("chadfowler.com"));
+        gate.whois_lines
+            .push("chadfowler.com: No such nick".into());
+        assert!(gate.whois_exhausted());
+    }
+
+    #[test]
+    fn profile_gate_plain_nick_needs_did_for_bluesky() {
+        let mut gate = ProfileGate::default();
+        gate.open("alice".into(), None);
+        assert!(gate.bluesky_actor().is_none());
+        gate.did = Some("did:plc:abc".into());
+        assert_eq!(gate.bluesky_actor(), Some("did:plc:abc"));
     }
 
     #[test]

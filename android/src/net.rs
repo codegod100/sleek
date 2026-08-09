@@ -11,7 +11,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 
 use crate::auth::{self, AuthTokens};
-use crate::bsky::{self, HandleSuggestion};
+use crate::bsky::{self, ActorProfile, HandleSuggestion};
 use crate::state::{prefer_websocket, websocket_url_for};
 
 use crate::av_media::{AvMediaConfig, AvMediaSession};
@@ -159,6 +159,12 @@ pub enum NetCmd {
         api_base: String,
         did: String,
     },
+    /// Fetch a public Bluesky profile for the peer profile modal.
+    FetchProfile {
+        request_id: u64,
+        /// Handle or DID (`did:plc:` / `did:web:`).
+        actor: String,
+    },
     Quit,
 }
 
@@ -242,6 +248,11 @@ pub enum NetEvent {
         request_id: u64,
         check: Result<crate::policy::PolicyCheck, String>,
         rules: Result<String, String>,
+    },
+    /// Bluesky profile for the peer profile modal.
+    ProfileFetched {
+        request_id: u64,
+        result: Result<ActorProfile, String>,
     },
 }
 
@@ -956,6 +967,25 @@ async fn apply_cmd(
                     request_id,
                     check,
                     rules,
+                });
+            });
+        }
+        NetCmd::FetchProfile {
+            request_id,
+            actor,
+        } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result = match bsky::fetch_actor_profile(&actor).await {
+                    Ok(p) => Ok(p),
+                    Err(e) => {
+                        log::debug!("fetch profile {actor}: {e}");
+                        Err(e.to_string())
+                    }
+                };
+                let _ = tx.send(NetEvent::ProfileFetched {
+                    request_id,
+                    result,
                 });
             });
         }
