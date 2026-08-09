@@ -68,6 +68,8 @@ urlencoding = "2"
 url = "2"
 base64 = "0.22"
 dirs = "5"
+# Local message index for durable unread counts (independent of the server).
+rusqlite = { version = "0.38", features = ["bundled"] }
 # Decode (file pick) + PNG encode (compose bar uploads).
 image = { version = "0.25", default-features = false, features = [
     "png",

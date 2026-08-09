@@ -199,7 +199,7 @@ pub fn conversation_row(
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if buf.unread > 0 {
-                                badge(ui, th, &format!("{}", buf.unread.min(99)));
+                                badge(ui, th, &crate::message_store::unread_label(buf.unread));
                             } else if buf.call.is_some() {
                                 ui.label(
                                     RichText::new("📞")

@@ -997,7 +997,7 @@ impl SleekApp {
                 }
 
                 let msg = ChatMessage {
-                    id: msgid,
+                    id: msgid.clone(),
                     from: from.clone(),
                     text: body,
                     is_system: false,
@@ -1015,9 +1015,13 @@ impl SleekApp {
 
                 let buf = self.state.ensure_buffer(&buffer_name);
                 buf.append(msg);
-                if !viewing && !is_own {
-                    buf.unread = buf.unread.saturating_add(1);
-                }
+                self.state.record_message_for_unread(
+                    &buffer_name,
+                    &msgid,
+                    timestamp.timestamp(),
+                    is_own,
+                    viewing,
+                );
             }
             Event::MemberDid { nick, did } => {
                 // Fold nick-keyed DM into DID-keyed thread when peer identity
@@ -1184,7 +1188,29 @@ impl SleekApp {
                 self.handle_delete_tags(&key, &from, &tags);
                 self.handle_av_tags(&key, &tags);
             }
-            // batches, history, etc. — not yet rendered
+            Event::BatchStart {
+                id,
+                batch_type,
+                target,
+            } => {
+                if batch_type == "chathistory" && !target.is_empty() {
+                    self.state.history_batches.insert(id, target);
+                }
+            }
+            Event::BatchEnd { id } => {
+                if let Some(channel) = self.state.history_batches.remove(&id) {
+                    let account = self.state.account_key();
+                    if let Err(e) = self
+                        .state
+                        .message_store
+                        .baseline_after_history(&account, &channel)
+                    {
+                        log::warn!("message_store history baseline {channel}: {e:#}");
+                    }
+                    self.state.refresh_unread(&channel);
+                }
+            }
+            // other batches / events — not yet rendered
             _ => {}
         }
     }
@@ -2564,7 +2590,10 @@ impl eframe::App for SleekApp {
                             };
                             let mut label = tab.short().to_string();
                             if tab == Tab::Chats && total_unread > 0 {
-                                label = format!("{label} ({})", total_unread.min(99));
+                                label = format!(
+                                    "{label} ({})",
+                                    crate::message_store::unread_label(total_unread)
+                                );
                             }
                             let text = RichText::new(label)
                                 .size(th.type_scale.caption)
