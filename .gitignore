@@ -2,6 +2,7 @@
 **/target/
 *.apk
 .direnv/
+.radicle/
 result
 result-*
 .buildkite/.issue-poll-state

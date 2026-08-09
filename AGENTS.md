@@ -8,6 +8,29 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
 
+### Radicle patches (cloud agents — use boxci)
+Cloud / GitHub checkouts should **not** open Radicle patches with local
+`rad auth` / `git push rad` or radicle MCP `create_patch`. Push the commit to
+GitHub, then use the **boxci-github-patch** skill:
+
+Skill: [`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/)
+→ `POST https://boxci.boxd.sh/api/patches/from-github` with sleek RID
+`rad:z9mjPzpVK472QXaaP1picc5U9xBR` and `github_repo_url`
+`https://github.com/codegod100/sleek.git`.
+
+boxci cherry-picks the GitHub SHA onto the Garden checkout and runs
+`git push rad HEAD:refs/patches` with the CI Radicle identity.
+
+Optional local `rad` remote (Codespaces / manual rad CLI only):
+
+```bash
+bash scripts/ensure-rad-remote.sh
+# equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
+```
+
+`scripts/codespace-bootstrap.sh` and `.cursor/environment.json` (`install` +
+`start`) still ensure that remote idempotently.
+
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
   the VM image. There is **no systemd**, so the `nix-daemon` is not started
@@ -79,6 +102,14 @@ export OPENBAO_TOKEN=…   # or use Cursor env
 ./scripts/configure-gh-from-openbao.sh
 printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ```
+
+### Radicle identity (CI only)
+Dedicated CI signing keys for boxci / Buildkite issue→agent live under OpenBao
+`secret/data/radicle` (`RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` /
+`RAD_PASSPHRASE`) and matching cluster secrets. Cloud agents do **not** mint
+or reuse personal Radicle DIDs — they publish patches via
+[`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/).
+Never commit key material.
 
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
