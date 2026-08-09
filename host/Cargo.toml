@@ -5,6 +5,7 @@ edition = "2021"
 description = "Sleek — desktop window host"
 license = "MIT"
 publish = false
+build = "build.rs"
 
 [workspace]
 
@@ -30,6 +31,11 @@ eframe = { version = "0.31", default-features = false, features = [
     "glow",
     "wayland",
     "x11",
+] }
+# Gleam slash guest (compose-box parser) via wasmtime.
+wasmtime = { version = "29", default-features = false, features = [
+    "cranelift",
+    "runtime",
 ] }
 
 # Same patches as android/ (host is its own workspace root).
