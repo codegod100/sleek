@@ -1,0 +1,12 @@
+---
+description: Prefer boxci Radicle patches over local rad push for review proposals
+alwaysApply: true
+---
+
+# Radicle review proposals
+
+For code-review proposals on this repo, follow `AGENTS.md` → **Cursor Cloud specific instructions**:
+
+- Use the **`boxci-github-patch`** skill to open/update Radicle patches from a GitHub commit.
+- Do **not** use `git push rad`, the `rad-patch` skill, or Radicle MCP `create_patch` unless the user explicitly requests a local `rad` push.
+- RID: `rad:z9mjPzpVK472QXaaP1picc5U9xBR`

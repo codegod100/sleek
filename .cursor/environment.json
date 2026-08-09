@@ -1,5 +1,0 @@
-{
-  "snapshot": "bld-20260805-abcb8552-a57a-438f-a10e-1f7408849ceb",
-  "install": "bash scripts/ensure-rad-remote.sh",
-  "start": "bash scripts/ensure-rad-remote.sh"
-}
