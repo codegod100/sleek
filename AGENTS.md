@@ -8,6 +8,18 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
 
+### Radicle git remote (`rad`)
+GitHub / Cursor checkouts only have `origin`. Opening Radicle patches requires a
+`rad` remote for RID [`rad:z9mjPzpVK472QXaaP1picc5U9xBR`](https://nandi.radicle.garden/rad:z9mjPzpVK472QXaaP1picc5U9xBR):
+
+```bash
+bash scripts/ensure-rad-remote.sh
+# equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
+```
+
+`scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud also runs it
+via `.cursor/environment.json` (`install` + `start`) so fresh clones keep `rad`.
+
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
   the VM image. There is **no systemd**, so the `nix-daemon` is not started
