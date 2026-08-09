@@ -31,7 +31,8 @@ fi
 
 SOCKET="/nix/var/nix/daemon-socket/socket"
 DAEMON_LOG="/tmp/nix-daemon.log"
-BASHRC_NIX_MARKER="# sleek-nix-env"
+BASHRC_NIX_BEGIN="# >>> sleek-nix-env >>>"
+BASHRC_NIX_END="# <<< sleek-nix-env <<<"
 
 have_sudo() {
   command -v sudo >/dev/null 2>&1 || return 1
@@ -269,10 +270,12 @@ ensure_nix_daemon_or_single_user() {
 
 # Persist env so plain `nix develop` (not only ./scripts/enter) works.
 install_bashrc_nix_env() {
+  local begin="$BASHRC_NIX_BEGIN"
+  local end="$BASHRC_NIX_END"
   local block
   block=$(
     cat <<EOF
-# sleek-nix-env
+$begin
 if [ -e /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
   . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 fi
@@ -289,24 +292,34 @@ if [ -f "$ROOT/scripts/ensure-nix-flakes.sh" ]; then
   . "$ROOT/scripts/ensure-nix-flakes.sh"
   ensure_nix_flakes 2>/dev/null || true
 fi
+$end
 EOF
   )
 
   touch "$HOME/.bashrc"
-  if grep -qF "$BASHRC_NIX_MARKER" "$HOME/.bashrc" 2>/dev/null; then
-    # Refresh block (remove old marker section roughly).
-    local tmp
-    tmp="$(mktemp)"
-    # Drop previous sleek-nix-env / sleek-nix-profile / sleek-nix-single-user lines
-    grep -vF 'sleek-nix-env' "$HOME/.bashrc" \
-      | grep -vF 'sleek-nix-profile' \
-      | grep -vF 'sleek-nix-single-user' \
-      | grep -vF 'NIX_REMOTE=daemon' \
-      | grep -vF 'unset NIX_REMOTE' \
-      | grep -vF 'nix-daemon.sh' \
-      | grep -vF '/nix/var/nix/profiles/default/bin' \
-      >"$tmp" || true
+  # Remove any previously-written block as a whole unit so re-runs stay
+  # idempotent. The old approach deleted individual body lines with grep -vF,
+  # which shredded the multi-line if/else/fi structure and left orphan
+  # `fi`/`else` tokens that broke every future interactive shell. Handle the
+  # current sentinel-delimited block and a single well-formed legacy
+  # `# sleek-nix-env` block (removed through its trailing ensure_nix_flakes fi).
+  local tmp
+  tmp="$(mktemp)"
+  if awk -v begin="$begin" -v end="$end" '
+    $0 == begin { drop = 1; next }
+    $0 == end   { drop = 0; next }
+    drop        { next }
+    $0 == "# sleek-nix-env" { legacy = 1; seen_flakes = 0; next }
+    legacy {
+      if ($0 ~ /ensure_nix_flakes/) { seen_flakes = 1 }
+      if (seen_flakes && $0 == "fi") { legacy = 0 }
+      next
+    }
+    { print }
+  ' "$HOME/.bashrc" >"$tmp"; then
     mv "$tmp" "$HOME/.bashrc"
+  else
+    rm -f "$tmp"
   fi
   {
     echo ""
