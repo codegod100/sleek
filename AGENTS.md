@@ -17,8 +17,8 @@ bash scripts/ensure-rad-remote.sh
 # equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
 ```
 
-`scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud `install` /
-`start` should too (fresh clones drop custom remotes).
+`scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud also runs it
+via `.cursor/environment.json` (`install` + `start`) so fresh clones keep `rad`.
 
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
