@@ -8,17 +8,28 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
 
-### Radicle git remote (`rad`)
-GitHub / Cursor checkouts only have `origin`. Opening Radicle patches requires a
-`rad` remote for RID [`rad:z9mjPzpVK472QXaaP1picc5U9xBR`](https://nandi.radicle.garden/rad:z9mjPzpVK472QXaaP1picc5U9xBR):
+### Radicle patches (cloud agents — use boxci)
+Cloud / GitHub checkouts should **not** open Radicle patches with local
+`rad auth` / `git push rad` or radicle MCP `create_patch`. Push the commit to
+GitHub, then use the **boxci-github-patch** skill:
+
+Skill: [`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/)
+→ `POST https://boxci.boxd.sh/api/patches/from-github` with sleek RID
+`rad:z9mjPzpVK472QXaaP1picc5U9xBR` and `github_repo_url`
+`https://github.com/codegod100/sleek.git`.
+
+boxci cherry-picks the GitHub SHA onto the Garden checkout and runs
+`git push rad HEAD:refs/patches` with the CI Radicle identity.
+
+Optional local `rad` remote (Codespaces / manual rad CLI only):
 
 ```bash
 bash scripts/ensure-rad-remote.sh
 # equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
 ```
 
-`scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud also runs it
-via `.cursor/environment.json` (`install` + `start`) so fresh clones keep `rad`.
+`scripts/codespace-bootstrap.sh` and `.cursor/environment.json` (`install` +
+`start`) still ensure that remote idempotently.
 
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
@@ -92,23 +103,13 @@ export OPENBAO_TOKEN=…   # or use Cursor env
 printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ```
 
-### Radicle identity (cloud agents — reuse per Cursor env)
-Do **not** run `rad auth` to mint a fresh DID on each agent run. Cloud agents
-must reuse one Radicle device identity per Cursor environment via the radicle
-MCP ([`rad:z4J6Hk21QrvWvQJKpH145GMAcACga`](https://nandi.radicle.garden/rad:z4J6Hk21QrvWvQJKpH145GMAcACga),
-hosted at `https://mcp.boxd.sh/radicle/mcp`):
-
-1. Call `cursor-cloud` → `environment-info` and read `environment.environmentPublicId`.
-2. Pass that value as `env_name` on every radicle MCP call (`issue_device_key`,
-   `create_patch`). The MCP also accepts header `x-cursor-environment-id` /
-   env `CURSOR_ENVIRONMENT_ID`. Keys live under `.radicle/<env_id>`; reloads
-   return `created: false` with the same DID.
-3. Prefer `create_patch` over local `rad auth` / manual `git push rad`. Only use
-   a local `rad` identity when Buildkite/OpenBao has already loaded
-   `RADICLE_SECRET_KEY` (dedicated CI key under `secret/data/radicle`).
-
-Skill: `.cursor/skills/radicle-patch/`. Never commit key material; never pass
-`force: true` to `issue_device_key` unless deliberately rotating the env DID.
+### Radicle identity (CI only)
+Dedicated CI signing keys for boxci / Buildkite issue→agent live under OpenBao
+`secret/data/radicle` (`RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` /
+`RAD_PASSPHRASE`) and matching cluster secrets. Cloud agents do **not** mint
+or reuse personal Radicle DIDs — they publish patches via
+[`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/).
+Never commit key material.
 
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
