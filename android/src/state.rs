@@ -1220,9 +1220,9 @@ pub struct AppState {
     pub message_search: String,
     /// One-shot: focus the message search field next frame.
     pub focus_message_search: bool,
-    /// Scroll the chat list to this msgid once (from a search result).
+    /// Scroll the chat list to this msgid once (from search or a reply preview).
     pub scroll_to_msgid: Option<String>,
-    /// Briefly highlight this msgid after navigating from search.
+    /// Briefly highlight this msgid after navigating from search or a reply.
     pub highlight_msgid: Option<String>,
     /// When `highlight_msgid` should clear.
     pub highlight_until: Option<Instant>,
