@@ -1,7 +1,7 @@
 //! Chats tab — conversation list (freeq-android ChatsTab inspired).
 
-use eframe::egui::{self, Align, Layout};
-use vidya::{button, dim_label, primary_button, title, title_2, Theme};
+use eframe::egui;
+use vidya::{button, primary_button, title_2, Theme};
 
 use crate::state::AppState;
 use crate::ui::widgets::{card, conversation_row, empty_state, text_edit_clipboard_menu};
@@ -16,25 +16,6 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     let mut action = ChatsAction::None;
     let sp = &th.spacing;
     let p = &th.palette;
-
-    // Header row
-    ui.horizontal(|ui| {
-        title(ui, th, "search chats");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            dim_label(ui, th, state.connection.label());
-        });
-    });
-    ui.add_space(sp.md);
-
-    // Search
-    let resp = ui.add(
-        egui::TextEdit::singleline(&mut state.search)
-            .margin(th.text_edit_margin())
-            .desired_width(ui.available_width())
-            .min_size(egui::vec2(0.0, th.spacing.control_height)),
-    );
-    text_edit_clipboard_menu(ui, th, &resp);
-    ui.add_space(sp.md);
 
     // Quick join
     card(ui, th, |ui| {
