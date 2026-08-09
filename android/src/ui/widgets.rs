@@ -382,24 +382,33 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) ->
     let p = &th.palette;
     let sp = &th.spacing;
     let row_id = Id::new(("reply_preview", parent.id.as_str()));
+    // Fill the bubble width so empty space beside short previews is still a hit target.
+    let row_w = ui.available_width().max(1.0);
     let inner = ui.horizontal(|ui| {
+        ui.set_min_width(row_w);
+        ui.set_max_width(row_w);
         ui.add_space(sp.md);
         let bar_h = (th.type_scale.caption * 1.2).max(14.0);
         let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
         // `ChatMessage::preview()` already prefixes the sender nick.
+        // `selectable(false)` so text selection does not steal the row click
+        // (otherwise only the accent bar / empty padding stayed clickable).
         ui.add(
             egui::Label::new(
                 RichText::new(parent.preview())
                     .size(th.type_scale.caption)
                     .color(p.text_secondary),
             )
-            .wrap(),
+            .wrap()
+            .selectable(false),
         );
     });
+    let mut rect = inner.response.rect;
+    rect.set_width(row_w.max(rect.width()));
     let resp = ui
-        .interact(inner.response.rect, row_id, Sense::click())
+        .interact(rect, row_id, Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text("Go to message");
     ui.add_space(sp.xs);
