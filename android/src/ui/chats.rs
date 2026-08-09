@@ -1,7 +1,7 @@
 //! Chats tab — conversation list (freeq-android ChatsTab inspired).
 
 use eframe::egui::{self, Align, Layout};
-use vidya::{button, dim_label, primary_button, text_field_singleline, title, title_2, Theme};
+use vidya::{button, dim_label, primary_button, title, title_2, Theme};
 
 use crate::state::AppState;
 use crate::ui::widgets::{card, conversation_row, empty_state, text_edit_clipboard_menu};
@@ -27,16 +27,14 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     ui.add_space(sp.md);
 
     // Search
-    ui.horizontal(|ui| {
-        ui.set_width(ui.available_width());
-        let _ = text_field_singleline(ui, th, &mut state.search);
-    });
-    if state.search.is_empty() {
-        // Hint sits above; field itself has no placeholder API on helper —
-        // show dim hint when empty via overlaid caption.
-    }
-    ui.add_space(sp.xs);
-    dim_label(ui, th, "Search chats");
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut state.search)
+            .margin(th.text_edit_margin())
+            .desired_width(ui.available_width())
+            .min_size(egui::vec2(0.0, th.spacing.control_height))
+            .hint_text("Search chats"),
+    );
+    text_edit_clipboard_menu(ui, th, &resp);
     ui.add_space(sp.md);
 
     // Quick join
