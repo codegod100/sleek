@@ -36,6 +36,8 @@ pub enum MessageBubbleAction {
     Delete { msgid: String },
     /// Open / join an IRC channel mentioned in the message body.
     OpenChannel { channel: String },
+    /// Scroll/highlight the message this reply references.
+    NavigateTo { msgid: String },
 }
 
 /// Card frame filling parent width.
@@ -373,26 +375,48 @@ fn touch_swipe_reply(
     (st.offset, just_triggered)
 }
 
-fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
+/// Reply original preview above a bubble. Clicking jumps to that message.
+fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
-    ui.horizontal(|ui| {
+    let row_id = Id::new(("reply_preview", parent.id.as_str()));
+    // Fill the bubble width so empty space beside short previews is still a hit target.
+    let row_w = ui.available_width().max(1.0);
+    let mut label_clicked = false;
+    let inner = ui.horizontal(|ui| {
+        ui.set_min_width(row_w);
+        ui.set_max_width(row_w);
         ui.add_space(sp.md);
         let bar_h = (th.type_scale.caption * 1.2).max(14.0);
         let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
         // `ChatMessage::preview()` already prefixes the sender nick.
-        ui.add(
-            egui::Label::new(
-                RichText::new(parent.preview())
-                    .size(th.type_scale.caption)
-                    .color(p.text_secondary),
+        // Click sense + pointing hand on the label itself — a later row
+        // `interact` sits under the text and does not win hover cursor.
+        let label_resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(parent.preview())
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
+                )
+                .wrap()
+                .selectable(false)
+                .sense(Sense::click()),
             )
-            .wrap(),
-        );
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Go to message");
+        label_clicked = label_resp.clicked();
     });
+    let mut rect = inner.response.rect;
+    rect.set_width(row_w.max(rect.width()));
+    let resp = ui
+        .interact(rect, row_id, Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Go to message");
     ui.add_space(sp.xs);
+    label_clicked || resp.clicked()
 }
 
 /// Width / height for the shared hover + context icon bar.
@@ -1291,7 +1315,11 @@ pub fn message_bubble(
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
     if let Some(parent) = reply_parent {
-        reply_context_preview(ui, th, parent);
+        if reply_context_preview(ui, th, parent) && matches!(action, MessageBubbleAction::None) {
+            action = MessageBubbleAction::NavigateTo {
+                msgid: parent.id.clone(),
+            };
+        }
     }
 
     let mut bubble_rect = Rect::NOTHING;
