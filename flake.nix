@@ -184,15 +184,8 @@
           buildLibs = eguiBuildLibs pkgs;
           # Lean toolchain for store packages (no clippy/rustfmt — not needed to compile).
           rustBuild = pkgs.rust-bin.stable.latest.default;
-          # Full toolchain for iterative `nix run .#host` / cargo workflows.
-          rust = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [
-              "rust-src"
-              "rustfmt"
-              "clippy"
-            ];
-          };
           # aarch64 for phone APK; x86_64 for Waydroid (host container).
+          # Iterative `nix run` / `.#host` uses `devShells.default` (via scripts/enter).
           rustAndroid = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
@@ -804,80 +797,55 @@ PY
             release = true;
           };
 
-          # Desktop host app entry: flake toolchain + in-tree `cargo run --release`.
-          # Used by apps.default / apps.host (`nix run`, `nix run .#host`).
+          # Desktop host app entry: enter flake `devShells.default`, then
+          # `just host --release`. Used by apps.default / apps.host
+          # (`nix run`, `nix run .#host`). Reuses the same buildInputs /
+          # bindgen / SLEEK_LD_LIBRARY_PATH setup as `nix develop` so
+          # link/runtime native deps are not missing outside the shell.
           # Hermetic store binary remains packages.sleek / apps.sleek.
           # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
-          run-host =
-            let
-              sleekLibPath = pkgs.lib.makeLibraryPath libs;
-              # pkg-config needs .dev outputs for headers + .pc files (runtime libs only).
-              pkgConfigPath = pkgs.lib.makeSearchPath "lib/pkgconfig" (
-                map (p: p.dev or p) (
-                  libs
-                  ++ [
-                    pkgs.openssl
-                  ]
-                )
-              );
-              bindgen = v4l2BindgenEnv pkgs;
-            in
-            pkgs.writeShellApplication {
-              name = "run-host";
-              runtimeInputs = [
-                rust
-                pkgs.pkg-config
-                pkgs.llvmPackages.libclang
-                # .cargo/config.toml requests -fuse-ld=mold (default `cc` driver).
-                pkgs.mold
-              ];
-              text = ''
-                set -euo pipefail
+          run-host = pkgs.writeShellApplication {
+            name = "run-host";
+            runtimeInputs = [
+              pkgs.coreutils
+              pkgs.bash
+            ];
+            text = ''
+              set -euo pipefail
 
-                export OPENSSL_NO_VENDOR=1
-                export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-                export LD_LIBRARY_PATH="${sleekLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                export LIBCLANG_PATH="${bindgen.LIBCLANG_PATH}"
-                export SLEEK_LIBCLANG_PATH="${bindgen.SLEEK_LIBCLANG_PATH}"
-                export BINDGEN_EXTRA_CLANG_ARGS="${bindgen.BINDGEN_EXTRA_CLANG_ARGS}"
-                export V4L2R_VIDEODEV2_H_PATH="${bindgen.V4L2R_VIDEODEV2_H_PATH}"
-
-                # Codespace / desktop-lite: GUI opens on the VNC X display.
-                if [[ -n "''${SLEEK_CODESPACE:-}" ]]; then
-                  export DISPLAY="''${DISPLAY:-:1}"
-                  export LIBGL_ALWAYS_SOFTWARE="''${LIBGL_ALWAYS_SOFTWARE:-1}"
-                elif [[ -z "''${DISPLAY:-}" && -z "''${WAYLAND_DISPLAY:-}" ]]; then
-                  if [[ -S /tmp/.X11-unix/X1 ]]; then
-                    export DISPLAY=:1
-                  elif [[ -S /tmp/.X11-unix/X0 ]]; then
-                    export DISPLAY=:0
+              # Find sleek repo root (host/Cargo.toml + android path dep).
+              root=""
+              if [[ -f ./host/Cargo.toml && -f ./android/Cargo.toml ]]; then
+                root="$PWD"
+              else
+                d="$PWD"
+                for _ in 1 2 3 4 5; do
+                  if [[ -f "$d/host/Cargo.toml" && -f "$d/android/Cargo.toml" ]]; then
+                    root="$d"
+                    break
                   fi
-                fi
+                  d="$(dirname "$d")"
+                done
+              fi
+              if [[ -z "''${root:-}" ]]; then
+                echo "error: run from the sleek repo root (need host/Cargo.toml + path deps)" >&2
+                echo "  cd /path/to/sleek && nix run .#host" >&2
+                exit 1
+              fi
+              cd "$root"
 
-                # Find sleek repo root (host/Cargo.toml + android path dep).
-                root=""
-                if [[ -f ./host/Cargo.toml && -f ./android/Cargo.toml ]]; then
-                  root="$PWD"
-                else
-                  d="$PWD"
-                  for _ in 1 2 3 4 5; do
-                    if [[ -f "$d/host/Cargo.toml" && -f "$d/android/Cargo.toml" ]]; then
-                      root="$d"
-                      break
-                    fi
-                    d="$(dirname "$d")"
-                  done
-                fi
-                if [[ -z "''${root:-}" ]]; then
-                  echo "error: run from the sleek repo root (need host/Cargo.toml + path deps)" >&2
-                  echo "  cd /path/to/sleek && nix run .#host" >&2
-                  exit 1
-                fi
-                cd "$root"
-
-                exec cargo run --release --manifest-path host/Cargo.toml "$@"
-              '';
-            };
+              # Prefer scripts/enter (daemon repair + SLEEK_NIX_SHELL guard);
+              # fall back to a direct `nix develop` when the shim is absent.
+              if [[ -x ./scripts/enter ]]; then
+                exec ./scripts/enter just host --release "$@"
+              fi
+              if ! command -v nix >/dev/null 2>&1; then
+                echo "error: nix not found (need scripts/enter or nix on PATH)" >&2
+                exit 1
+              fi
+              exec nix develop "$root" --command just host --release "$@"
+            '';
+          };
         in
         {
           default = sleek-host;
