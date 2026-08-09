@@ -6,11 +6,12 @@ mod av;
 mod av_media;
 mod bsky;
 mod clipboard;
+mod message_store;
 mod net;
 mod policy;
 mod preview;
 mod reconnect;
-mod slash;
+pub mod slash;
 mod state;
 mod ui;
 

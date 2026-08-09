@@ -1104,6 +1104,10 @@ pub struct AppState {
     pub nick_to_did: HashMap<String, String>,
     /// Peer DID → display nick (for rendering DID-keyed buffers).
     pub did_to_nick: HashMap<String, String>,
+    /// Durable unread index (SQLite). Client-owned; independent of the server.
+    pub message_store: crate::message_store::MessageStore,
+    /// Open `chathistory` BATCH id → channel (suppress unread until baseline).
+    pub history_batches: HashMap<String, String>,
     pub active_channel: Option<String>,
     pub route: Route,
     pub tab: Tab,
@@ -1288,6 +1292,8 @@ impl AppState {
             channel_order: Vec::new(),
             nick_to_did: HashMap::new(),
             did_to_nick: HashMap::new(),
+            message_store: crate::message_store::MessageStore::open_default(),
+            history_batches: HashMap::new(),
             active_channel: None,
             route: Route::Tabs,
             tab: Tab::Chats,
@@ -1794,13 +1800,88 @@ impl AppState {
         self.channels.values().map(|b| b.unread).sum()
     }
 
+    /// Stable account namespace for the local message index.
+    pub fn account_key(&self) -> String {
+        self.did
+            .clone()
+            .unwrap_or_else(|| format!("guest:{}", self.nick.to_lowercase()))
+    }
+
+    /// Whether `channel` currently has an in-flight CHATHISTORY batch.
+    pub fn channel_in_history_batch(&self, channel: &str) -> bool {
+        self.history_batches
+            .values()
+            .any(|c| c.eq_ignore_ascii_case(channel))
+    }
+
+    /// Record a chat message in SQLite and refresh the buffer unread badge.
+    pub fn record_message_for_unread(
+        &mut self,
+        channel: &str,
+        msgid: &str,
+        ts: i64,
+        from_me: bool,
+        viewing: bool,
+    ) {
+        if channel == "*status" || msgid.is_empty() {
+            return;
+        }
+        let account = self.account_key();
+        let in_history = self.channel_in_history_batch(channel);
+        if let Err(e) =
+            self.message_store
+                .insert_message(&account, channel, msgid, ts, from_me)
+        {
+            log::warn!("message_store insert: {e:#}");
+            return;
+        }
+        if viewing {
+            if let Err(e) = self.message_store.mark_read(&account, channel, ts) {
+                log::warn!("message_store mark_read: {e:#}");
+            }
+        } else if !from_me && !in_history {
+            if let Err(e) = self
+                .message_store
+                .ensure_live_baseline(&account, channel, msgid)
+            {
+                log::warn!("message_store baseline: {e:#}");
+            }
+        }
+        self.refresh_unread(channel);
+    }
+
+    /// Recompute `Buffer.unread` from SQLite for one channel.
+    pub fn refresh_unread(&mut self, channel: &str) {
+        let account = self.account_key();
+        let n = match self.message_store.unread_count(&account, channel) {
+            Ok(n) => n,
+            Err(e) => {
+                log::warn!("message_store unread: {e:#}");
+                return;
+            }
+        };
+        if let Some(buf) = self
+            .find_buffer_key(channel)
+            .and_then(|k| self.channels.get_mut(&k))
+        {
+            buf.unread = n;
+        }
+    }
+
     pub fn ensure_buffer(&mut self, name: &str) -> &mut Buffer {
         // Prefer an existing case-insensitive match so "Alice" / "alice" share one row.
         if let Some(existing) = self.find_buffer_key(name) {
             return self.channels.get_mut(&existing).expect("key from find");
         }
         let key = name.to_string();
-        self.channels.insert(key.clone(), Buffer::new(&key));
+        let account = self.account_key();
+        let unread = self
+            .message_store
+            .unread_count(&account, &key)
+            .unwrap_or(0);
+        let mut buf = Buffer::new(&key);
+        buf.unread = unread;
+        self.channels.insert(key.clone(), buf);
         self.channel_order.push(key.clone());
         self.channels.get_mut(&key).expect("just inserted")
     }
@@ -1964,8 +2045,17 @@ impl AppState {
         // re-sets these immediately after `open_chat`).
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
+        let account = self.account_key();
+        let at = chrono::Utc::now().timestamp();
+        if let Err(e) = self.message_store.mark_read(&account, &key, at) {
+            log::warn!("message_store mark_read {key}: {e:#}");
+        }
+        let unread = self
+            .message_store
+            .unread_count(&account, &key)
+            .unwrap_or(0);
         if let Some(buf) = self.channels.get_mut(&key) {
-            buf.mark_read();
+            buf.unread = unread;
         }
     }
 
