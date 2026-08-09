@@ -19,7 +19,7 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
 
     // Header row
     ui.horizontal(|ui| {
-        title(ui, th, "Chats");
+        title(ui, th, "search chats");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             dim_label(ui, th, state.connection.label());
         });
@@ -31,8 +31,7 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
         egui::TextEdit::singleline(&mut state.search)
             .margin(th.text_edit_margin())
             .desired_width(ui.available_width())
-            .min_size(egui::vec2(0.0, th.spacing.control_height))
-            .hint_text("Search chats"),
+            .min_size(egui::vec2(0.0, th.spacing.control_height)),
     );
     text_edit_clipboard_menu(ui, th, &resp);
     ui.add_space(sp.md);
