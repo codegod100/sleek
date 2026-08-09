@@ -19,7 +19,8 @@ pub enum ChatAction {
     Back,
     Send { target: String, text: String },
     Part(String),
-    /// Open a direct message with this nick (from the user list).
+    /// Open a direct message with this nick (profile dialog / callers).
+    #[allow(dead_code)]
     OpenDm(String),
     /// Start a freeq AV call in this channel.
     AvStart(String),
@@ -59,6 +60,8 @@ pub enum ChatAction {
     OpenChannel(String),
     /// Open the channel policy join-gate modal.
     OpenPolicyGate(String),
+    /// Open the peer profile modal for this nick.
+    OpenProfile(String),
 }
 
 fn apply_message_bubble_action(
@@ -108,6 +111,9 @@ fn apply_message_bubble_action(
         MessageBubbleAction::OpenChannel { channel } => {
             *action = ChatAction::OpenChannel(channel);
         }
+        MessageBubbleAction::OpenProfile { nick } => {
+            *action = ChatAction::OpenProfile(nick);
+        }
     }
 }
 
@@ -123,7 +129,8 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // Lightbox / react-picker / policy-gate Esc are handled in their overlays.
     let overlay_open = state.image_lightbox.is_some()
         || state.react_picker_msg.is_some()
-        || state.policy_gate.channel.is_some();
+        || state.policy_gate.channel.is_some()
+        || state.profile_gate.is_open();
     if !overlay_open && consume_command(ui, Key::F) {
         if state.show_message_search {
             state.focus_message_search = true;
@@ -452,21 +459,17 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                                             if is_self {
                                                 dim_label(ui, th, "you");
                                             } else {
-                                                dim_label(ui, th, "tap to message");
+                                                dim_label(ui, th, "tap for profile");
                                             }
                                         });
                                     });
                                 });
                             let resp = ui
                                 .interact(inner.response.rect, row_id, Sense::click())
-                                .on_hover_cursor(if is_self {
-                                    CursorIcon::Default
-                                } else {
-                                    CursorIcon::PointingHand
-                                });
-                            if resp.clicked() && !is_self {
+                                .on_hover_cursor(CursorIcon::PointingHand);
+                            if resp.clicked() {
                                 state.show_members = false;
-                                action = ChatAction::OpenDm(nick.clone());
+                                action = ChatAction::OpenProfile(nick.clone());
                             }
                             if i + 1 < n {
                                 ui.add_space(sp.xs);
