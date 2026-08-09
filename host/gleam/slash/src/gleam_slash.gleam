@@ -7,6 +7,7 @@
 //// - no `case` on tuples (`RuntimeCheck::Tuple` todo)
 //// - no `case` on string values (lowers to indirect call)
 //// - no first-class / indirect function calls
+//// - nested custom-type patterns can crash wasm codegen (avoid Arg wrappers)
 
 pub type Slash {
   Empty
@@ -17,15 +18,6 @@ pub type Slash {
   Topic(String)
   Raw(String)
   Msg(String, String)
-}
-
-type Arg {
-  NoArg
-  Arg(String)
-}
-
-type Split {
-  Split(String, Arg)
 }
 
 @external(wasm, "sleek", "length")
@@ -43,20 +35,18 @@ fn lowercase(s: String) -> String
 /// Parse a compose-box string that starts with `/` (slash optional).
 pub fn parse(input: String) -> Slash {
   let stripped = drop_slash(input)
-  case split_once(stripped) {
-    Split(cmd_raw, arg) -> {
-      let cmd = lowercase(cmd_raw)
-      case length(cmd) {
-        0 -> Empty
-        _ -> dispatch(cmd, arg, stripped)
-      }
-    }
+  let cmd_raw = split_cmd(stripped)
+  let arg_text = split_arg(stripped)
+  let cmd = lowercase(cmd_raw)
+  case length(cmd) {
+    0 -> Empty
+    _ -> dispatch(cmd, arg_text, stripped)
   }
 }
 
-fn dispatch(cmd: String, arg: Arg, stripped: String) -> Slash {
+fn dispatch(cmd: String, arg_text: String, stripped: String) -> Slash {
   case cmd == "join" {
-    True -> one_arg(arg, 0)
+    True -> join_text(arg_text)
     False ->
       case cmd == "part" {
         True -> PartActive
@@ -65,16 +55,16 @@ fn dispatch(cmd: String, arg: Arg, stripped: String) -> Slash {
             True -> PartActive
             False ->
               case cmd == "nick" {
-                True -> one_arg(arg, 1)
+                True -> nick_text(arg_text)
                 False ->
                   case cmd == "me" {
-                    True -> one_arg(arg, 2)
+                    True -> me_text(arg_text)
                     False ->
                       case cmd == "topic" {
-                        True -> one_arg(arg, 3)
+                        True -> topic_text(arg_text)
                         False ->
                           case cmd == "msg" {
-                            True -> parse_msg(arg)
+                            True -> parse_msg(arg_text)
                             False -> Raw(stripped)
                           }
                       }
@@ -85,36 +75,49 @@ fn dispatch(cmd: String, arg: Arg, stripped: String) -> Slash {
   }
 }
 
-/// `which`: 0=Join, 1=Nick, 2=Me, 3=Topic — avoids passing constructors as fns.
-fn one_arg(arg: Arg, which: Int) -> Slash {
-  case arg {
-    NoArg -> Empty
-    Arg(a) ->
-      case which {
-        0 -> Join(a)
-        1 -> Nick(a)
-        2 -> Me(a)
-        _ -> Topic(a)
-      }
+fn join_text(text: String) -> Slash {
+  case length(text) {
+    0 -> Empty
+    _ -> Join(text)
   }
 }
 
-fn parse_msg(arg: Arg) -> Slash {
-  case arg {
-    NoArg -> Empty
-    Arg(a) ->
-      case split_once(a) {
-        Split(_, NoArg) -> Empty
-        Split(target, Arg(text)) ->
-          case length(target) > 0 {
+fn nick_text(text: String) -> Slash {
+  case length(text) {
+    0 -> Empty
+    _ -> Nick(text)
+  }
+}
+
+fn me_text(text: String) -> Slash {
+  case length(text) {
+    0 -> Empty
+    _ -> Me(text)
+  }
+}
+
+fn topic_text(text: String) -> Slash {
+  case length(text) {
+    0 -> Empty
+    _ -> Topic(text)
+  }
+}
+
+fn parse_msg(text: String) -> Slash {
+  case length(text) {
+    0 -> Empty
+    _ -> {
+      let target = split_cmd(text)
+      let body = split_arg(text)
+      case length(target) > 0 {
+        False -> Empty
+        True ->
+          case length(body) > 0 {
+            True -> Msg(target, body)
             False -> Empty
-            True ->
-              case length(text) > 0 {
-                True -> Msg(target, text)
-                False -> Empty
-              }
           }
       }
+    }
   }
 }
 
@@ -130,17 +133,19 @@ fn drop_slash(s: String) -> String {
   }
 }
 
-fn split_once(s: String) -> Split {
+fn split_cmd(s: String) -> String {
   let n = length(s)
   case find_space(s, 0, n) {
-    -1 -> Split(s, NoArg)
-    i -> {
-      let rest = slice(s, i + 1, n)
-      case length(rest) {
-        0 -> Split(slice(s, 0, i), NoArg)
-        _ -> Split(slice(s, 0, i), Arg(rest))
-      }
-    }
+    -1 -> s
+    i -> slice(s, 0, i)
+  }
+}
+
+fn split_arg(s: String) -> String {
+  let n = length(s)
+  case find_space(s, 0, n) {
+    -1 -> ""
+    i -> slice(s, i + 1, n)
   }
 }
 
