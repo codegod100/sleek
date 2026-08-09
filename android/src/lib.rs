@@ -6,6 +6,7 @@ mod av;
 mod av_media;
 mod bsky;
 mod clipboard;
+mod message_store;
 mod net;
 mod policy;
 mod preview;
