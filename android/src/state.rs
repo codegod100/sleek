@@ -2227,7 +2227,7 @@ impl AppState {
         }
     }
 
-    /// Open a buffer and scroll/highlight a specific message (from search).
+    /// Open a buffer and scroll/highlight a specific message (search hit or reply original).
     pub fn navigate_to_message(&mut self, channel: &str, msgid: &str) {
         // `open_chat` clears scroll/highlight (list opens); re-apply after.
         self.close_message_search();

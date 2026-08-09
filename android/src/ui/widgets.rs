@@ -38,6 +38,8 @@ pub enum MessageBubbleAction {
     OpenChannel { channel: String },
     /// Open the peer profile modal for this nick.
     OpenProfile { nick: String },
+    /// Scroll/highlight the message this reply references.
+    NavigateTo { msgid: String },
 }
 
 /// Card frame filling parent width.
@@ -375,10 +377,12 @@ fn touch_swipe_reply(
     (st.offset, just_triggered)
 }
 
-fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
+/// Reply original preview above a bubble. Clicking jumps to that message.
+fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
-    ui.horizontal(|ui| {
+    let row_id = Id::new(("reply_preview", parent.id.as_str()));
+    let inner = ui.horizontal(|ui| {
         ui.add_space(sp.md);
         let bar_h = (th.type_scale.caption * 1.2).max(14.0);
         let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
@@ -394,7 +398,12 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) {
             .wrap(),
         );
     });
+    let resp = ui
+        .interact(inner.response.rect, row_id, Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Go to message");
     ui.add_space(sp.xs);
+    resp.clicked()
 }
 
 /// Width / height for the shared hover + context icon bar.
@@ -1293,7 +1302,11 @@ pub fn message_bubble(
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
     if let Some(parent) = reply_parent {
-        reply_context_preview(ui, th, parent);
+        if reply_context_preview(ui, th, parent) && matches!(action, MessageBubbleAction::None) {
+            action = MessageBubbleAction::NavigateTo {
+                msgid: parent.id.clone(),
+            };
+        }
     }
 
     let mut bubble_rect = Rect::NOTHING;
