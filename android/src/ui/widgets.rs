@@ -384,6 +384,7 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) ->
     let row_id = Id::new(("reply_preview", parent.id.as_str()));
     // Fill the bubble width so empty space beside short previews is still a hit target.
     let row_w = ui.available_width().max(1.0);
+    let mut label_clicked = false;
     let inner = ui.horizontal(|ui| {
         ui.set_min_width(row_w);
         ui.set_max_width(row_w);
@@ -393,17 +394,22 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) ->
         ui.painter().rect_filled(bar_rect, 1.0, p.accent);
         ui.add_space(4.0);
         // `ChatMessage::preview()` already prefixes the sender nick.
-        // `selectable(false)` so text selection does not steal the row click
-        // (otherwise only the accent bar / empty padding stayed clickable).
-        ui.add(
-            egui::Label::new(
-                RichText::new(parent.preview())
-                    .size(th.type_scale.caption)
-                    .color(p.text_secondary),
+        // Click sense + pointing hand on the label itself — a later row
+        // `interact` sits under the text and does not win hover cursor.
+        let label_resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(parent.preview())
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
+                )
+                .wrap()
+                .selectable(false)
+                .sense(Sense::click()),
             )
-            .wrap()
-            .selectable(false),
-        );
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Go to message");
+        label_clicked = label_resp.clicked();
     });
     let mut rect = inner.response.rect;
     rect.set_width(row_w.max(rect.width()));
@@ -412,7 +418,7 @@ fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) ->
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text("Go to message");
     ui.add_space(sp.xs);
-    resp.clicked()
+    label_clicked || resp.clicked()
 }
 
 /// Width / height for the shared hover + context icon bar.
