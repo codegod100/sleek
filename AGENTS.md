@@ -67,8 +67,8 @@ Do not `git pull` sibling checkouts blindly — use `nix flake update vidya` (or
     Desktop pane). There is **no GPU**, so software GL is required. Setting
     `SLEEK_CODESPACE=1` makes the `justfile` export `DISPLAY=:1` and
     `LIBGL_ALWAYS_SOFTWARE=1` and apply `SLEEK_LD_LIBRARY_PATH` to
-    `LD_LIBRARY_PATH` automatically. `nix run .#host` also works (it sets the
-    same env itself).
+    `LD_LIBRARY_PATH` automatically. `nix run` / `nix run .#host` enters the
+    flake devShell (via `scripts/enter`) then runs `just host --release`.
 - The `sleek` binary is large (~800 MB debug) and the `host/target` cache
   persists in the image, so incremental rebuilds are fast.
 

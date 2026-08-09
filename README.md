@@ -38,7 +38,7 @@ just lib           # build android package as rlib (desktop target)
 just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
 
 # Or via the flake:
-nix run            # in-tree cargo run --release (default app; needs sibling vidya/freeq)
+nix run            # flake devShell + just host --release (needs sibling vidya/freeq)
 nix run .#host     # same as nix run
 nix run .#sleek    # pure Nix store binary (hermetic)
 nix build .#sleek  # → ./result/bin/sleek
