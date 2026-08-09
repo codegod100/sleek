@@ -19,15 +19,20 @@ if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-if url="$(git -C "$ROOT" remote get-url rad 2>/dev/null || true)"; then
-  if [[ "$url" == "$RADICLE_REMOTE_URL" || "$url" == "rad:${rid_naked}" || "$url" == "$RADICLE_RID" ]]; then
-    # Normalize to rad:// so git-remote-rad and radicle MCP agree.
-    if [[ "$url" != "$RADICLE_REMOTE_URL" ]]; then
-      git -C "$ROOT" remote set-url rad "$RADICLE_REMOTE_URL"
-      echo "ensure-rad-remote: normalized rad → $RADICLE_REMOTE_URL"
-    else
-      echo "ensure-rad-remote: rad → $url"
-    fi
+url=""
+if git -C "$ROOT" remote get-url rad >/dev/null 2>&1; then
+  url="$(git -C "$ROOT" remote get-url rad)"
+fi
+
+if [[ -n "$url" ]]; then
+  if [[ "$url" == "$RADICLE_REMOTE_URL" ]]; then
+    echo "ensure-rad-remote: rad → $url"
+    exit 0
+  fi
+  # Accept rad:<id> as already correct RID, but normalize to rad://.
+  if [[ "$url" == "rad:${rid_naked}" || "$url" == "$RADICLE_RID" ]]; then
+    git -C "$ROOT" remote set-url rad "$RADICLE_REMOTE_URL"
+    echo "ensure-rad-remote: normalized rad → $RADICLE_REMOTE_URL"
     exit 0
   fi
   echo "ensure-rad-remote: updating rad ($url → $RADICLE_REMOTE_URL)" >&2
