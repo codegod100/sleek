@@ -325,7 +325,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // ── AV call banner (start / join only; active call chrome is global) ─
     // The MoQ section for an open call lives in the app-level top panel so it
     // stays visible on every route — only idle/join controls stay here.
-    // Idle is a single compact row; join is a short accent strip. When already
+    // Idle is a single compact row; join is a short card strip. When already
     // in a call, skip entirely: the global panel has mute/camera/leave/open.
     if is_channel && joined && state.local_call.is_none() {
         let prev_muted = state.av_pref_muted;
@@ -1506,8 +1506,8 @@ fn active_call_panel_body(
     let (headline, status_line, on_call_channel) = av_call_chrome_meta(state, lc);
 
     let frame = egui::Frame::new()
-        .fill(p.accent.gamma_multiply(0.14))
-        .stroke(egui::Stroke::new(1.0_f32, p.accent.gamma_multiply(0.45)))
+        .fill(p.card_bg)
+        .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8));
 
@@ -2158,7 +2158,7 @@ fn av_device_combo_row_selected(
 /// Active-call chrome is global (`active_call_panel`); do not duplicate it here.
 ///
 /// Idle stays a single compact row so chat keeps vertical space; join gets a
-/// short accent strip (title + Join + prefs) without stacking empty chrome.
+/// short card strip (title + Join + prefs) without stacking empty chrome.
 fn av_call_banner(
     ui: &mut egui::Ui,
     th: &Theme,
@@ -2202,8 +2202,8 @@ fn av_call_banner(
         .unwrap_or("Voice & video");
 
     let frame = egui::Frame::new()
-        .fill(p.accent.gamma_multiply(0.14))
-        .stroke(egui::Stroke::new(1.0_f32, p.accent.gamma_multiply(0.45)))
+        .fill(p.card_bg)
+        .stroke(egui::Stroke::new(1.0_f32, p.border_soft))
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.xs as i8));
 
