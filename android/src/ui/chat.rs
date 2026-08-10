@@ -2211,21 +2211,51 @@ fn av_call_banner(
         let panel_w = ui.available_width();
         ui.set_width(panel_w);
 
-        // Title · count on one line, then Join + prefs on the next.
+        // Reserve width for the count, then truncate the title into what's left.
+        // A greedy truncate title + wrapping dim_label squeezed "N in call"
+        // into a 1-char column on narrow panels.
+        let count = format!("{n} in call");
+        let count_galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                count.clone(),
+                egui::FontId::proportional(th.type_scale.caption),
+                p.text_secondary,
+            )
+        });
+        let count_w = count_galley.size().x;
+        let gap = sp.sm;
+        let title_w = (panel_w - count_w - gap).max(48.0);
+        let row_h = th.type_scale.body * 1.35;
+
         ui.horizontal(|ui| {
-            ui.set_min_width(panel_w);
-            ui.set_max_width(panel_w);
+            ui.set_width(panel_w);
+            ui.allocate_ui_with_layout(
+                Vec2::new(title_w, row_h),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_max_width(title_w);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("📞 {title}"))
+                                .size(th.type_scale.body)
+                                .color(p.text)
+                                .strong(),
+                        )
+                        .truncate()
+                        .sense(Sense::hover()),
+                    )
+                    .on_hover_text(title);
+                },
+            );
+            ui.add_space(gap);
             ui.add(
                 egui::Label::new(
-                    RichText::new(format!("📞 {title}"))
-                        .size(th.type_scale.body)
-                        .color(p.text)
-                        .strong(),
+                    RichText::new(&count)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
                 )
                 .truncate(),
             );
-            ui.add_space(sp.sm);
-            dim_label(ui, th, &format!("{n} in call"));
         });
 
         ui.add_space(sp.xs);
