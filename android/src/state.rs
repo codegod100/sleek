@@ -2116,6 +2116,9 @@ impl AppState {
         self.ensure_buffer(&key);
         self.active_channel = Some(key.clone());
         self.route = Route::Chat(key.clone());
+        // Wide master–detail and phone both land on the Chats tab after open
+        // (Discover → channel should not leave the Chats list hidden).
+        self.tab = Tab::Chats;
         self.show_members = false;
         self.close_message_search();
         self.close_react_picker();
@@ -2776,6 +2779,16 @@ mod tests {
         let nick_hits = state.search_messages("bob");
         assert_eq!(nick_hits.len(), 1);
         assert_eq!(nick_hits[0].message.id, "2");
+    }
+
+    #[test]
+    fn open_chat_switches_to_chats_tab() {
+        let mut state = AppState::new();
+        state.tab = Tab::Discover;
+        state.open_chat("#room");
+        assert_eq!(state.tab, Tab::Chats);
+        assert!(matches!(state.route, Route::Chat(ref c) if c == "#room"));
+        assert_eq!(state.active_channel.as_deref(), Some("#room"));
     }
 
     #[test]
