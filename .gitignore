@@ -7,3 +7,4 @@ result-*
 .buildkite/.issue-poll-state
 /host/gleam/slash/build/
 /host/target/
+.radicle/
