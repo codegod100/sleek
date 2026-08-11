@@ -16,3 +16,16 @@ nix develop --command just gleam-slash
 ```
 
 Compares Gleam output to `sleek::slash::parse_native` for the same cases.
+
+## Prebuilt Wasm
+
+`host/build.rs` falls back to `prebuilt/gleam_slash.wasm` when a wasm-capable
+`gleam` binary is not available (hermetic `nix build .#sleek` / Flatpak CI).
+Regenerate after editing `src/gleam_slash.gleam`:
+
+```bash
+export GLEAM=/path/to/nandi.uk/gleam/target/release/gleam  # branch wasm
+(cd host/gleam/slash && "$GLEAM" build)
+cp host/gleam/slash/build/dev/wasm/gleam_slash/gleam_slash.wasm \
+  host/gleam/slash/prebuilt/gleam_slash.wasm
+```

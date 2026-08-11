@@ -7,4 +7,6 @@ result
 result-*
 .buildkite/.issue-poll-state
 /host/gleam/slash/build/
+# Staging tree used by scripts/sync-flake-path-deps.sh
+/.deps-sync/
 /host/target/
