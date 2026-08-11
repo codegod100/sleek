@@ -9,6 +9,10 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 support).
 
 ### Radicle patches (cloud agents — use boxci)
+**Every issue that produces commits must open a Radicle patch** (see
+`.cursor/rules/issues-require-radicle-patch.mdc`). A GitHub PR alone is not
+enough.
+
 Cloud / GitHub checkouts should **not** open Radicle patches with local
 `rad auth` / `git push rad` or radicle MCP `create_patch`. Push the commit to
 GitHub, then use the **boxci-github-patch** skill:
