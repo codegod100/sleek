@@ -124,7 +124,8 @@ pub fn profile_gate_overlay(
                 });
             });
 
-            let body_h = (ctx.screen_rect().height() * 0.5).clamp(180.0, 420.0);
+            // Room for multi-line Bluesky bios / block ASCII art (nandi.uk, etc.).
+            let body_h = (ctx.screen_rect().height() * 0.62).clamp(240.0, 560.0);
             ScrollArea::vertical()
                 .id_salt("profile_gate_body")
                 .max_height(body_h)
@@ -152,11 +153,20 @@ pub fn profile_gate_overlay(
                     if let Some(pr) = profile.as_ref() {
                         if let Some(desc) = pr.description.as_ref() {
                             ui.add_space(sp.sm);
-                            ui.label(
-                                RichText::new(truncate_bio(desc, 280))
-                                    .size(th.type_scale.caption)
-                                    .color(p.text_secondary),
-                            );
+                            let bio = truncate_bio(desc, 600);
+                            let block_art = bio_looks_like_block_art(&bio);
+                            let mut text = RichText::new(bio)
+                                .size(if block_art {
+                                    th.type_scale.body
+                                } else {
+                                    th.type_scale.caption
+                                })
+                                .color(p.text_secondary);
+                            if block_art {
+                                // Align columns in █▄▀░ / box-drawing ASCII art.
+                                text = text.monospace();
+                            }
+                            ui.add(egui::Label::new(text).wrap());
                         }
                         if pr.followers_count.is_some()
                             || pr.follows_count.is_some()
@@ -273,15 +283,19 @@ pub fn profile_gate_overlay(
     action
 }
 
+/// Keep newlines so multi-line bios / ASCII art keep their height.
 fn truncate_bio(s: &str, max: usize) -> String {
     let trimmed = s.trim();
-    let first = trimmed.lines().next().unwrap_or(trimmed);
-    if first.chars().count() <= max {
-        first.to_string()
+    if trimmed.chars().count() <= max {
+        trimmed.to_string()
     } else {
-        let cut: String = first.chars().take(max.saturating_sub(1)).collect();
+        let cut: String = trimmed.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
     }
+}
+
+fn bio_looks_like_block_art(s: &str) -> bool {
+    s.chars().any(|c| matches!(c, '\u{2500}'..='\u{259F}'))
 }
 
 fn format_stats(pr: &ActorProfile) -> String {
@@ -329,5 +343,13 @@ mod tests {
         let out = truncate_bio(&s, 10);
         assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_bio_keeps_newlines() {
+        let bio = "█▄░█ █ █░█\n█░▀█ █ ▄▀▄\n▀░░▀ ▀ ▀░▀";
+        let out = truncate_bio(bio, 600);
+        assert_eq!(out.lines().count(), 3);
+        assert!(bio_looks_like_block_art(&out));
     }
 }
