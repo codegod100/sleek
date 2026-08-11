@@ -81,6 +81,10 @@ if [[ -z "$DESCRIPTION" ]] && command -v git >/dev/null 2>&1; then
   DESCRIPTION="$(git log -1 --format=%b "$SHA" 2>/dev/null || true)"
 fi
 
+# git push -o patch.message=… rejects embedded newlines; flatten to one line.
+TITLE="$(printf '%s' "$TITLE" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+DESCRIPTION="$(printf '%s' "$DESCRIPTION" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+
 payload="$(jq -n \
   --arg repo "$REPO_ID" \
   --arg github_repo_url "$GITHUB_REPO_URL" \
