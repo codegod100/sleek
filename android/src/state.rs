@@ -899,6 +899,8 @@ pub enum LinkState {
 #[derive(Debug, Clone)]
 pub enum MediaFetch {
     Image(String),
+    /// Full-resolution image for the lightbox (chat thumbs are downscaled).
+    ImageFull(String),
     Video(String),
     LinkPreview(String),
 }
@@ -925,6 +927,8 @@ impl std::fmt::Debug for VideoState {
 #[derive(Debug, Default)]
 pub struct MediaCache {
     pub images: HashMap<String, ImageState>,
+    /// Full-resolution images for the lightbox, keyed by the same URL.
+    pub full_images: HashMap<String, ImageState>,
     pub videos: HashMap<String, VideoState>,
     /// Per-bubble playback widget state (vidya), keyed by `url\\0msgid`.
     #[cfg(feature = "video-previews")]
@@ -944,6 +948,19 @@ impl MediaCache {
             self.pending.push(MediaFetch::Image(url.to_string()));
         }
         self.images.get(url)
+    }
+
+    /// Ensure a full-resolution image fetch is in flight for the lightbox.
+    pub fn touch_image_full(&mut self, url: &str) -> Option<&ImageState> {
+        if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return None;
+        }
+        if !self.full_images.contains_key(url) {
+            self.full_images
+                .insert(url.to_string(), ImageState::Loading);
+            self.pending.push(MediaFetch::ImageFull(url.to_string()));
+        }
+        self.full_images.get(url)
     }
 
     /// Ensure a video fetch is in flight for muted inline playback.
@@ -996,6 +1013,14 @@ impl MediaCache {
         self.images.insert(url, ImageState::Failed);
     }
 
+    pub fn set_full_image_ready(&mut self, url: String, pixels: CachedPixels) {
+        self.full_images.insert(url, ImageState::Ready(pixels));
+    }
+
+    pub fn set_full_image_failed(&mut self, url: String) {
+        self.full_images.insert(url, ImageState::Failed);
+    }
+
     pub fn set_video_ready(&mut self, url: String, bytes: std::sync::Arc<[u8]>) {
         self.videos.insert(url, VideoState::Ready(bytes));
     }
@@ -1022,6 +1047,10 @@ impl MediaCache {
 
     pub fn has_loading(&self) -> bool {
         self.images.values().any(|s| matches!(s, ImageState::Loading))
+            || self
+                .full_images
+                .values()
+                .any(|s| matches!(s, ImageState::Loading))
             || self.videos.values().any(|s| matches!(s, VideoState::Loading))
             || self.links.values().any(|s| matches!(s, LinkState::Loading))
     }
@@ -2195,6 +2224,9 @@ impl AppState {
         if url.is_empty() {
             return;
         }
+        // Kick off the full-res fetch; the lightbox shows the (downscaled)
+        // inline thumb until this lands.
+        self.media.touch_image_full(&url);
         self.image_lightbox = Some(url);
     }
 

@@ -76,6 +76,8 @@ pub enum NetCmd {
     },
     /// Download an image for inline chat preview.
     FetchImage { url: String },
+    /// Download an image at (near) full resolution for the lightbox.
+    FetchFullImage { url: String },
     /// Download a video for muted inline playback (vidya player).
     FetchVideo { url: String },
     /// Fetch Open Graph metadata for a link card.
@@ -200,6 +202,16 @@ pub enum NetEvent {
         rgba: std::sync::Arc<[u8]>,
     },
     ImageFetchFailed {
+        url: String,
+    },
+    /// Remote image decoded at (near) full resolution for the lightbox.
+    FullImageFetched {
+        url: String,
+        width: usize,
+        height: usize,
+        rgba: std::sync::Arc<[u8]>,
+    },
+    FullImageFetchFailed {
         url: String,
     },
     /// Remote video bytes for muted inline playback (vidya player).
@@ -713,7 +725,7 @@ async fn apply_cmd(
             // Fire-and-forget so IRC event loop stays responsive.
             let tx = event_tx.clone();
             tokio::spawn(async move {
-                match fetch_image_bytes(&url).await {
+                match fetch_image_bytes(&url, crate::preview::MAX_IMAGE_DIM).await {
                     Ok((width, height, rgba)) => {
                         let _ = tx.send(NetEvent::ImageFetched {
                             url,
@@ -725,6 +737,25 @@ async fn apply_cmd(
                     Err(e) => {
                         log::debug!("image fetch {url}: {e}");
                         let _ = tx.send(NetEvent::ImageFetchFailed { url });
+                    }
+                }
+            });
+        }
+        NetCmd::FetchFullImage { url } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_image_bytes(&url, crate::preview::MAX_FULL_IMAGE_DIM).await {
+                    Ok((width, height, rgba)) => {
+                        let _ = tx.send(NetEvent::FullImageFetched {
+                            url,
+                            width,
+                            height,
+                            rgba,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("full image fetch {url}: {e}");
+                        let _ = tx.send(NetEvent::FullImageFetchFailed { url });
                     }
                 }
             });
@@ -1204,9 +1235,14 @@ async fn upload_media(
         .ok_or_else(|| "Upload response missing url".into())
 }
 
-/// Fetch and decode a remote image for chat inline preview (SSRF-safe).
-async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u8]>), String> {
-    use crate::preview::{MAX_IMAGE_BYTES, MAX_IMAGE_DIM};
+/// Fetch and decode a remote image (SSRF-safe). `max_dim` downscales the long
+/// edge: chat thumbs pass [`crate::preview::MAX_IMAGE_DIM`], the lightbox passes
+/// [`crate::preview::MAX_FULL_IMAGE_DIM`] so the full-screen view stays sharp.
+async fn fetch_image_bytes(
+    url: &str,
+    max_dim: u32,
+) -> Result<(usize, usize, std::sync::Arc<[u8]>), String> {
+    use crate::preview::MAX_IMAGE_BYTES;
 
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Only http(s) image URLs".into());
@@ -1263,8 +1299,8 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     }
 
     let dyn_img = image::load_from_memory(&bytes).map_err(|e| format!("Decode: {e}"))?;
-    let dyn_img = if dyn_img.width() > MAX_IMAGE_DIM || dyn_img.height() > MAX_IMAGE_DIM {
-        dyn_img.thumbnail(MAX_IMAGE_DIM, MAX_IMAGE_DIM)
+    let dyn_img = if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
+        dyn_img.thumbnail(max_dim, max_dim)
     } else {
         dyn_img
     };
