@@ -2758,7 +2758,8 @@ fn link_fallback_row(ui: &mut egui::Ui, th: &Theme, url: &str, note: &str) {
 /// Full-screen image lightbox: large preview + link to open the original on the web.
 ///
 /// Call once per frame while `state.image_lightbox` is set. Handles Esc, backdrop
-/// tap, and Close. "View original" opens the URL in the system browser.
+/// tap, and Close. Clicking the large image (or "View original") opens the URL in
+/// the system browser.
 pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppState) {
     let Some(url) = state.image_lightbox.clone() else {
         return;
@@ -2914,13 +2915,24 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 }
             }
 
-            // Backdrop tap (outside chrome / image) dismisses.
-            if backdrop.clicked() && !hit_chrome {
-                let on_image = backdrop
-                    .interact_pointer_pos()
+            // Image tap opens the original in the browser; tap outside chrome /
+            // image dismisses the lightbox.
+            if !hit_chrome {
+                let on_image = ui
+                    .input(|i| i.pointer.hover_pos())
                     .is_some_and(|pos| img_rect.contains(pos));
-                if !on_image {
-                    close = true;
+                if on_image {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                if backdrop.clicked() {
+                    let clicked_image = backdrop
+                        .interact_pointer_pos()
+                        .is_some_and(|pos| img_rect.contains(pos));
+                    if clicked_image {
+                        open_web = true;
+                    } else {
+                        close = true;
+                    }
                 }
             }
         });
