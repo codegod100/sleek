@@ -1,5 +1,6 @@
 # Enable GitHub auto-merge on same-repo PRs once opened/updated.
-# Merge happens only after required status checks (CI) pass — see repo ruleset.
+# Merge happens only after required status checks pass — see repo ruleset.
+# (APK/Flatpak CI runs on boxci, not GitHub Actions.)
 #
 # Fork PRs and drafts are ignored.
 
