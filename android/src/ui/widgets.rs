@@ -381,7 +381,10 @@ fn touch_swipe_reply(
 fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
-    let row_id = Id::new(("reply_preview", parent.id.as_str()));
+    // Scope under the child bubble's `push_id` — never key only on the parent
+    // msgid. Absolute `Id::new(("reply_preview", parent))` collides when two
+    // visible messages reply to the same original (egui: "Second use of widget ID").
+    let row_id = ui.id().with("reply_preview");
     // Fill the bubble width so empty space beside short previews is still a hit target.
     let row_w = ui.available_width().max(1.0);
     let mut label_clicked = false;
