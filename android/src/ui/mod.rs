@@ -5,6 +5,7 @@ mod chats;
 mod connect;
 mod discover;
 mod policy_gate;
+mod profile;
 mod search;
 mod settings;
 mod widgets;
@@ -14,6 +15,7 @@ pub use chats::{chats_tab, ChatsAction};
 pub use connect::{connect_screen, ConnectAction};
 pub use discover::{discover_tab, DiscoverAction};
 pub use policy_gate::{open_verification_url, policy_gate_overlay, PolicyGateAction};
+pub use profile::{open_profile_url, profile_gate_overlay, ProfileGateAction};
 pub use search::{message_search_panel, SearchAction};
 pub use settings::{settings_tab, SettingsAction};
 // Widget helpers are used from screens via `widgets::` or direct calls as needed.

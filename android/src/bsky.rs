@@ -52,6 +52,81 @@ pub fn should_typeahead(raw: &str) -> bool {
     normalize_handle_query(raw).chars().count() >= TYPEAHEAD_MIN_CHARS
 }
 
+/// Public Bluesky profile fields (from `app.bsky.actor.getProfile`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorProfile {
+    pub did: String,
+    pub handle: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub avatar: Option<String>,
+    pub followers_count: Option<u64>,
+    pub follows_count: Option<u64>,
+    pub posts_count: Option<u64>,
+}
+
+/// Web URL for a Bluesky profile (`handle` or DID).
+pub fn bluesky_profile_url(actor: &str) -> String {
+    format!("https://bsky.app/profile/{}", actor.trim().trim_start_matches('@'))
+}
+
+/// Whether `did` is a Bluesky-resolvable AT Proto identity (not a guest `did:key`).
+pub fn is_atproto_did(did: &str) -> bool {
+    let d = did.trim();
+    (d.starts_with("did:plc:") || d.starts_with("did:web:")) && !d.is_empty()
+}
+
+/// Whether `nick` looks like a Bluesky handle we can pass to `getProfile`
+/// (e.g. `alice.bsky.social`, `chadfowler.com`) when WHOIS/DID is unavailable.
+pub fn looks_like_bsky_handle(nick: &str) -> bool {
+    let n = nick.trim().trim_start_matches('@');
+    if n.is_empty() || n.len() > 253 {
+        return false;
+    }
+    if n.starts_with("did:") || n.starts_with('#') || n.contains([' ', '/', '\\']) {
+        return false;
+    }
+    // Domain-shaped: at least one dot, no leading/trailing dots, ASCII-ish labels.
+    let Some((left, right)) = n.rsplit_once('.') else {
+        return false;
+    };
+    !left.is_empty()
+        && !right.is_empty()
+        && right.chars().all(|c| c.is_ascii_alphanumeric())
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// Fetch a public Bluesky profile by handle or DID (no auth).
+pub async fn fetch_actor_profile(actor: &str) -> Result<ActorProfile> {
+    let actor = actor.trim().trim_start_matches('@');
+    if actor.is_empty() {
+        bail!("empty actor");
+    }
+    let profile = freeq_sdk::pds::fetch_profile(actor)
+        .await
+        .with_context(|| format!("fetch profile {actor}"))?;
+    Ok(ActorProfile {
+        did: profile.did,
+        handle: profile.handle,
+        display_name: profile
+            .display_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        description: profile
+            .description
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        avatar: profile
+            .avatar
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        followers_count: profile.followers_count,
+        follows_count: profile.follows_count,
+        posts_count: profile.posts_count,
+    })
+}
+
 /// Prefix search for Bluesky handles / display names. Does not require auth.
 pub async fn search_actors_typeahead(
     query: &str,
@@ -286,6 +361,38 @@ mod tests {
         assert_eq!(normalize_handle_query("  @Alice.bsky.social "), "Alice.bsky.social");
         assert_eq!(normalize_handle_query("bob"), "bob");
         assert_eq!(normalize_handle_query(""), "");
+    }
+
+    #[test]
+    fn bluesky_profile_url_strips_at() {
+        assert_eq!(
+            bluesky_profile_url("@alice.bsky.social"),
+            "https://bsky.app/profile/alice.bsky.social"
+        );
+        assert_eq!(
+            bluesky_profile_url("did:plc:abc"),
+            "https://bsky.app/profile/did:plc:abc"
+        );
+    }
+
+    #[test]
+    fn is_atproto_did_rejects_did_key() {
+        assert!(is_atproto_did("did:plc:abcdef"));
+        assert!(is_atproto_did("did:web:example.com"));
+        assert!(!is_atproto_did("did:key:z6Mk"));
+        assert!(!is_atproto_did(""));
+        assert!(!is_atproto_did("alice"));
+    }
+
+    #[test]
+    fn looks_like_bsky_handle_accepts_domains() {
+        assert!(looks_like_bsky_handle("chadfowler.com"));
+        assert!(looks_like_bsky_handle("@alice.bsky.social"));
+        assert!(looks_like_bsky_handle("a.b"));
+        assert!(!looks_like_bsky_handle("alice"));
+        assert!(!looks_like_bsky_handle("#general"));
+        assert!(!looks_like_bsky_handle("did:plc:x"));
+        assert!(!looks_like_bsky_handle("foo bar.com"));
     }
 
     #[test]

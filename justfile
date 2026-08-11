@@ -52,6 +52,18 @@ host *args:
     fi
     cargo run --manifest-path host/Cargo.toml {{args}}
 
+# Gleam Wasm slash parser smoke (matches native Rust oracle; no GUI)
+gleam-slash:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "${SLEEK_LD_LIBRARY_PATH:-}" ]]; then
+      export LD_LIBRARY_PATH="${SLEEK_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+    if [[ -z "${GLEAM:-}" && -x "${HOME}/code/gleam/target/debug/gleam" ]]; then
+      export GLEAM="${HOME}/code/gleam/target/debug/gleam"
+    fi
+    cargo run --manifest-path host/Cargo.toml -- --gleam-slash-only
+
 # Check / build the Android package as a library (desktop target)
 lib:
     cargo build --manifest-path android/Cargo.toml --lib

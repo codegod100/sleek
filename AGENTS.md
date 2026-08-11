@@ -8,6 +8,18 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
 
+### Radicle git remote (`rad`)
+GitHub / Cursor checkouts only have `origin`. Opening Radicle patches requires a
+`rad` remote for RID [`rad:z9mjPzpVK472QXaaP1picc5U9xBR`](https://nandi.radicle.garden/rad:z9mjPzpVK472QXaaP1picc5U9xBR):
+
+```bash
+bash scripts/ensure-rad-remote.sh
+# equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
+```
+
+`scripts/codespace-bootstrap.sh` runs this idempotently. Cursor Cloud also runs it
+via `.cursor/environment.json` (`install` + `start`) so fresh clones keep `rad`.
+
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
   the VM image. There is **no systemd**, so the `nix-daemon` is not started
@@ -79,6 +91,37 @@ export OPENBAO_TOKEN=…   # or use Cursor env
 ./scripts/configure-gh-from-openbao.sh
 printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
 ```
+
+### Radicle patches (cloud agents → boxci, not MCP)
+Cloud / GitHub checkouts should **not** use the radicle MCP
+(`create_patch` / `issue_device_key` on `mcp.boxd.sh`) and must **not** run
+`rad auth` to mint a device DID. Publish patches via **boxci**:
+
+Skill: `.cursor/skills/boxci-github-patch/` (upstream:
+[`codegod100/cursor`](https://github.com/codegod100/cursor) →
+`.cursor/skills/boxci-github-patch`).
+
+```bash
+# After pushing the commit to GitHub:
+curl -sS -X POST https://boxci.boxd.sh/api/patches/from-github \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"repo\": \"rad:z9mjPzpVK472QXaaP1picc5U9xBR\",
+    \"github_repo_url\": \"https://github.com/codegod100/sleek.git\",
+    \"github_commit\": \"$(git rev-parse HEAD)\",
+    \"title\": \"…\",
+    \"description\": \"…\"
+  }"
+# Poll: GET https://boxci.boxd.sh/api/runs/<run_id>
+# Lead with https://boxci.boxd.sh/runs/<run_id> ; read patch_id= from output_tail
+```
+
+Helper: `./scripts/boxci/dispatch-github-patch.sh`. Pointer skill for exceptions:
+`.cursor/skills/radicle-patch/`. Never commit `.radicle/` key material.
+
+CI (Buildkite issue→agent) may still `git push rad` after
+`scripts/buildkite/bootstrap.sh` loads `RADICLE_SECRET_KEY` from OpenBao
+`secret/data/radicle`.
 
 ### Buildkite (baogui reference)
 Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:

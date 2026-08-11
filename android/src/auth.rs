@@ -114,7 +114,7 @@ impl Default for SavedPrefs {
 }
 
 /// Writable app config directory (`~/.config/sleek` on desktop; app files on Android).
-fn storage_dir() -> PathBuf {
+pub(crate) fn storage_dir() -> PathBuf {
     #[cfg(target_os = "android")]
     {
         if let Some(dir) = crate::android_media::app_storage_dir() {

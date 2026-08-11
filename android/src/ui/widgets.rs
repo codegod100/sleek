@@ -36,6 +36,8 @@ pub enum MessageBubbleAction {
     Delete { msgid: String },
     /// Open / join an IRC channel mentioned in the message body.
     OpenChannel { channel: String },
+    /// Open the peer profile modal for this nick.
+    OpenProfile { nick: String },
 }
 
 /// Card frame filling parent width.
@@ -199,7 +201,7 @@ pub fn conversation_row(
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if buf.unread > 0 {
-                                badge(ui, th, &format!("{}", buf.unread.min(99)));
+                                badge(ui, th, &crate::message_store::unread_label(buf.unread));
                             } else if buf.call.is_some() {
                                 ui.label(
                                     RichText::new("📞")
@@ -1310,12 +1312,28 @@ pub fn message_bubble(
             ui.set_max_width(inner_w);
             ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&msg.from)
-                        .size(th.type_scale.caption)
-                        .color(p.accent)
-                        .strong(),
-                );
+                // Button (not Label) so the hit target is reliable on software
+                // GL / remote desktop where Label click sense is easy to miss.
+                let nick_resp = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(&msg.from)
+                                .size(th.type_scale.caption)
+                                .color(p.accent)
+                                .strong(),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::NONE)
+                        .frame(false)
+                        .min_size(Vec2::new(0.0, th.type_scale.caption + 10.0)),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("View profile");
+                if nick_resp.clicked() {
+                    action = MessageBubbleAction::OpenProfile {
+                        nick: msg.from.clone(),
+                    };
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Meta first in RTL → far right; action chip sits to its left.
                     let mut meta = msg.time_label();

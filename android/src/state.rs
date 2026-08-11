@@ -1037,6 +1037,79 @@ pub fn api_base_for_server(server: &str) -> String {
     }
 }
 
+/// Peer profile modal (nick tap → Bluesky / WHOIS info).
+#[derive(Debug, Default)]
+pub struct ProfileGate {
+    /// Nick the modal is open for (`None` = closed).
+    pub nick: Option<String>,
+    /// Peer DID when known (from nick map / WHOIS account).
+    pub did: Option<String>,
+    /// True while waiting on WHOIS and/or Bluesky `getProfile`.
+    pub loading: bool,
+    pub error: Option<String>,
+    pub profile: Option<crate::bsky::ActorProfile>,
+    /// Raw WHOIS reply lines for this nick (guest / extra detail).
+    pub whois_lines: Vec<String>,
+    /// Monotonic id so stale HTTP responses are ignored.
+    pub fetch_id: u64,
+    /// True after we dispatched WHOIS for this open.
+    pub whois_sent: bool,
+    /// True while a Bluesky profile HTTP fetch is in flight.
+    pub profile_fetching: bool,
+}
+
+impl ProfileGate {
+    pub fn is_open(&self) -> bool {
+        self.nick.is_some()
+    }
+
+    pub fn open(&mut self, nick: String, did: Option<String>) {
+        self.nick = Some(nick);
+        self.did = did;
+        // Only flipped true when a Bluesky HTTP fetch is actually started.
+        self.loading = false;
+        self.error = None;
+        self.profile = None;
+        self.whois_lines.clear();
+        self.whois_sent = false;
+        self.profile_fetching = false;
+        self.fetch_id = self.fetch_id.wrapping_add(1);
+    }
+
+    pub fn close(&mut self) {
+        *self = Self {
+            fetch_id: self.fetch_id,
+            ..Self::default()
+        };
+    }
+
+    /// Actor string to pass to Bluesky `getProfile`, if resolvable.
+    ///
+    /// Prefers an AT Proto DID; falls back to a domain-shaped nick (common
+    /// freeq pattern where the IRC nick *is* the Bluesky handle).
+    pub fn bluesky_actor(&self) -> Option<&str> {
+        if let Some(d) = self
+            .did
+            .as_deref()
+            .filter(|d| crate::bsky::is_atproto_did(d))
+        {
+            return Some(d);
+        }
+        self.nick
+            .as_deref()
+            .filter(|n| crate::bsky::looks_like_bsky_handle(n))
+            .map(|n| n.trim().trim_start_matches('@'))
+    }
+
+    /// WHOIS finished without an AT identity (or nick is offline).
+    pub fn whois_exhausted(&self) -> bool {
+        self.whois_lines.iter().any(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.contains("no such nick") || lower.contains("no such server")
+        })
+    }
+}
+
 /// Join-gate modal state (policy acceptance before JOIN).
 #[derive(Debug, Default)]
 pub struct PolicyGate {
@@ -1104,6 +1177,10 @@ pub struct AppState {
     pub nick_to_did: HashMap<String, String>,
     /// Peer DID → display nick (for rendering DID-keyed buffers).
     pub did_to_nick: HashMap<String, String>,
+    /// Durable unread index (SQLite). Client-owned; independent of the server.
+    pub message_store: crate::message_store::MessageStore,
+    /// Open `chathistory` BATCH id → channel (suppress unread until baseline).
+    pub history_batches: HashMap<String, String>,
     pub active_channel: Option<String>,
     pub route: Route,
     pub tab: Tab,
@@ -1233,6 +1310,8 @@ pub struct AppState {
 
     /// Channel policy join-gate modal (authenticated users blocked by ACCEPT rules).
     pub policy_gate: PolicyGate,
+    /// Peer profile modal (tap nick in channel / member list).
+    pub profile_gate: ProfileGate,
     /// MoQ media-plane reconnect while `local_call` is still active.
     pub media_reconnect_attempts: u32,
     pub media_reconnect_at: Option<Instant>,
@@ -1288,6 +1367,8 @@ impl AppState {
             channel_order: Vec::new(),
             nick_to_did: HashMap::new(),
             did_to_nick: HashMap::new(),
+            message_store: crate::message_store::MessageStore::open_default(),
+            history_batches: HashMap::new(),
             active_channel: None,
             route: Route::Tabs,
             tab: Tab::Chats,
@@ -1356,6 +1437,7 @@ impl AppState {
             reconnect_attempts: 0,
             reconnect_at: None,
             policy_gate: PolicyGate::default(),
+            profile_gate: ProfileGate::default(),
             media_reconnect_attempts: 0,
             media_reconnect_at: None,
             media_live_since: None,
@@ -1794,13 +1876,88 @@ impl AppState {
         self.channels.values().map(|b| b.unread).sum()
     }
 
+    /// Stable account namespace for the local message index.
+    pub fn account_key(&self) -> String {
+        self.did
+            .clone()
+            .unwrap_or_else(|| format!("guest:{}", self.nick.to_lowercase()))
+    }
+
+    /// Whether `channel` currently has an in-flight CHATHISTORY batch.
+    pub fn channel_in_history_batch(&self, channel: &str) -> bool {
+        self.history_batches
+            .values()
+            .any(|c| c.eq_ignore_ascii_case(channel))
+    }
+
+    /// Record a chat message in SQLite and refresh the buffer unread badge.
+    pub fn record_message_for_unread(
+        &mut self,
+        channel: &str,
+        msgid: &str,
+        ts: i64,
+        from_me: bool,
+        viewing: bool,
+    ) {
+        if channel == "*status" || msgid.is_empty() {
+            return;
+        }
+        let account = self.account_key();
+        let in_history = self.channel_in_history_batch(channel);
+        if let Err(e) =
+            self.message_store
+                .insert_message(&account, channel, msgid, ts, from_me)
+        {
+            log::warn!("message_store insert: {e:#}");
+            return;
+        }
+        if viewing {
+            if let Err(e) = self.message_store.mark_read(&account, channel, ts) {
+                log::warn!("message_store mark_read: {e:#}");
+            }
+        } else if !from_me && !in_history {
+            if let Err(e) = self
+                .message_store
+                .ensure_live_baseline(&account, channel, msgid)
+            {
+                log::warn!("message_store baseline: {e:#}");
+            }
+        }
+        self.refresh_unread(channel);
+    }
+
+    /// Recompute `Buffer.unread` from SQLite for one channel.
+    pub fn refresh_unread(&mut self, channel: &str) {
+        let account = self.account_key();
+        let n = match self.message_store.unread_count(&account, channel) {
+            Ok(n) => n,
+            Err(e) => {
+                log::warn!("message_store unread: {e:#}");
+                return;
+            }
+        };
+        if let Some(buf) = self
+            .find_buffer_key(channel)
+            .and_then(|k| self.channels.get_mut(&k))
+        {
+            buf.unread = n;
+        }
+    }
+
     pub fn ensure_buffer(&mut self, name: &str) -> &mut Buffer {
         // Prefer an existing case-insensitive match so "Alice" / "alice" share one row.
         if let Some(existing) = self.find_buffer_key(name) {
             return self.channels.get_mut(&existing).expect("key from find");
         }
         let key = name.to_string();
-        self.channels.insert(key.clone(), Buffer::new(&key));
+        let account = self.account_key();
+        let unread = self
+            .message_store
+            .unread_count(&account, &key)
+            .unwrap_or(0);
+        let mut buf = Buffer::new(&key);
+        buf.unread = unread;
+        self.channels.insert(key.clone(), buf);
         self.channel_order.push(key.clone());
         self.channels.get_mut(&key).expect("just inserted")
     }
@@ -1964,8 +2121,17 @@ impl AppState {
         // re-sets these immediately after `open_chat`).
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
+        let account = self.account_key();
+        let at = chrono::Utc::now().timestamp();
+        if let Err(e) = self.message_store.mark_read(&account, &key, at) {
+            log::warn!("message_store mark_read {key}: {e:#}");
+        }
+        let unread = self
+            .message_store
+            .unread_count(&account, &key)
+            .unwrap_or(0);
         if let Some(buf) = self.channels.get_mut(&key) {
-            buf.mark_read();
+            buf.unread = unread;
         }
     }
 
@@ -1994,6 +2160,9 @@ impl AppState {
     pub fn chat_back_step(&mut self) -> bool {
         if self.image_lightbox.is_some() {
             self.close_image_lightbox();
+            false
+        } else if self.profile_gate.is_open() {
+            self.close_profile_gate();
             false
         } else if self.react_picker_msg.is_some() {
             self.close_react_picker();
@@ -2129,6 +2298,22 @@ impl AppState {
         self.policy_gate.close();
     }
 
+    /// Open the peer profile modal for `nick` (resolves DID from nick map when known).
+    pub fn open_profile_gate(&mut self, nick: &str) -> u64 {
+        let nick = nick.trim();
+        if nick.is_empty() {
+            return self.profile_gate.fetch_id;
+        }
+        let did = self.nick_to_did.get(&nick.to_lowercase()).cloned();
+        self.close_react_picker();
+        self.profile_gate.open(nick.to_string(), did);
+        self.profile_gate.fetch_id
+    }
+
+    pub fn close_profile_gate(&mut self) {
+        self.profile_gate.close();
+    }
+
     /// Start editing an existing message in the compose bar.
     pub fn begin_edit(&mut self, msgid: String, text: String) {
         self.cancel_reply();
@@ -2205,6 +2390,7 @@ impl AppState {
         self.show_members = false;
         self.close_message_search();
         self.close_react_picker();
+        self.close_profile_gate();
         self.scroll_to_msgid = None;
         self.clear_search_highlight();
         self.compose.clear();
@@ -2608,6 +2794,11 @@ mod tests {
         assert!(!state.chat_back_step());
         assert!(state.image_lightbox.is_none());
 
+        state.open_profile_gate("alice");
+        assert!(state.profile_gate.is_open());
+        assert!(!state.chat_back_step());
+        assert!(!state.profile_gate.is_open());
+
         state.open_react_picker("m1".into());
         assert!(!state.chat_back_step());
         assert!(state.react_picker_msg.is_none());
@@ -2646,6 +2837,26 @@ mod tests {
         assert!(state.editing_msgid.is_none());
 
         assert!(state.chat_back_step());
+    }
+
+    #[test]
+    fn profile_gate_handle_nick_is_bluesky_actor_without_did() {
+        let mut gate = ProfileGate::default();
+        gate.open("chadfowler.com".into(), None);
+        assert!(!gate.loading);
+        assert_eq!(gate.bluesky_actor(), Some("chadfowler.com"));
+        gate.whois_lines
+            .push("chadfowler.com: No such nick".into());
+        assert!(gate.whois_exhausted());
+    }
+
+    #[test]
+    fn profile_gate_plain_nick_needs_did_for_bluesky() {
+        let mut gate = ProfileGate::default();
+        gate.open("alice".into(), None);
+        assert!(gate.bluesky_actor().is_none());
+        gate.did = Some("did:plc:abc".into());
+        assert_eq!(gate.bluesky_actor(), Some("did:plc:abc"));
     }
 
     #[test]

@@ -2,6 +2,9 @@
 #
 # Issue→patch is builtin to boxci (POST /api/webhooks/garden/issue, /api/poll).
 # This file only defines merge builds (on: merge).
+#
+# boxci publishes a Radicle Job COB (xyz.radworks.job) for each merge run so
+# Desktop/Explorer show CI status + a log link back to https://boxci.boxd.sh.
 
 name: sleek
 on:
@@ -12,9 +15,20 @@ env:
   GIT_TERMINAL_PROMPT: "0"
 
 steps:
+  # Fast heartbeat so Job COB start is visible before the heavy check/APK steps.
+  - label: ":radar: Job COB probe"
+    key: job-probe
+    if: build.env("BOXCI_TRIGGER") == "merge"
+    command: |
+      set -euo pipefail
+      echo "boxci merge run ${BOXCI_RUN_ID:-?} for ${GIT_SHA:-unknown}"
+      echo "Job COB log URL base: ${BOXCI_PUBLIC_URL:-https://boxci.boxd.sh}"
+      echo "repo ${BOXCI_REPO_ID:-${RADICLE_RID:-?}} slug=${BOXCI_REPO_SLUG:-?}"
+
   - label: ":rust: Check"
     key: check
     if: build.env("BOXCI_TRIGGER") == "merge"
+    depends_on: job-probe
     command: |
       set -euo pipefail
       cd "${BOXCI_REPO_ROOT:?}"

@@ -24,6 +24,11 @@ log() {
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Cloud / Codespace clones only get `origin`. Patch publish needs `rad`.
+if [[ -x "$ROOT/scripts/ensure-rad-remote.sh" ]]; then
+  bash "$ROOT/scripts/ensure-rad-remote.sh" || log "ensure-rad-remote failed (non-fatal)"
+fi
+
 SOCKET="/nix/var/nix/daemon-socket/socket"
 DAEMON_LOG="/tmp/nix-daemon.log"
 BASHRC_NIX_MARKER="# sleek-nix-env"
