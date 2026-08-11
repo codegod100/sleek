@@ -116,6 +116,11 @@ pub fn date_separator(ui: &mut egui::Ui, th: &Theme, label: &str) {
 
 /// Colored initial circle (freeq-style avatar stand-in).
 pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_avatar_initial(ui, th, name, size, rect);
+}
+
+fn paint_avatar_initial(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32, rect: Rect) {
     let letter = name
         .trim_start_matches(['#', '&', '@', '+', '%'])
         .chars()
@@ -130,7 +135,6 @@ pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
         ((200.0 - hue * 0.3) as u8).max(80),
     );
 
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     ui.painter()
         .circle_filled(rect.center(), size * 0.5, fill);
     ui.painter().text(
@@ -140,6 +144,38 @@ pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
         egui::FontId::proportional((size * 0.42).max(10.0)),
         th.palette.accent_fg,
     );
+}
+
+/// Circular user avatar: Bluesky image when `avatar_url` is ready, else initial circle.
+///
+/// Clickable (opens profile when the caller handles the response). Touches
+/// [`MediaCache`] so the image fetch is queued for the net layer.
+pub fn user_avatar(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    nick: &str,
+    avatar_url: Option<&str>,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if let Some(url) = avatar_url {
+        media.touch_image(url);
+        if let Some(ImageState::Ready(pixels)) = media.images.get_mut(url) {
+            let tex = pixels.texture(ui.ctx(), url).clone();
+            egui::Image::new((tex.id(), Vec2::splat(size)))
+                .fit_to_exact_size(Vec2::splat(size))
+                .corner_radius(size * 0.5)
+                .paint_at(ui, rect);
+            return response
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("View profile");
+        }
+    }
+    paint_avatar_initial(ui, th, nick, size, rect);
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("View profile")
 }
 
 fn hash_hue(s: &str) -> f32 {
@@ -381,10 +417,7 @@ fn touch_swipe_reply(
 fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
-    // Scope under the child bubble's `push_id` — never key only on the parent
-    // msgid. Absolute `Id::new(("reply_preview", parent))` collides when two
-    // visible messages reply to the same original (egui: "Second use of widget ID").
-    let row_id = ui.id().with("reply_preview");
+    let row_id = Id::new(("reply_preview", parent.id.as_str()));
     // Fill the bubble width so empty space beside short previews is still a hit target.
     let row_w = ui.available_width().max(1.0);
     let mut label_clicked = false;
@@ -1232,6 +1265,7 @@ pub fn message_bubble(
     reply_parent: Option<&ChatMessage>,
     own_nick: &str,
     media: &mut MediaCache,
+    avatar_url: Option<&str>,
     react_picker_open: bool,
     highlighted: bool,
 ) -> MessageBubbleAction {
@@ -1252,6 +1286,8 @@ pub fn message_bubble(
         dim_label(ui, th, "Message deleted");
         return action;
     }
+
+    const AVATAR_SIZE: f32 = 36.0;
 
     let body_text = if msg.is_action {
         format!("* {} {}", msg.from, msg.text)
@@ -1317,26 +1353,47 @@ pub fn message_bubble(
         0.0
     };
 
-    // Body frame only — reaction chips live *below* so bubble gestures can't
-    // steal their clicks (later full-rect interacts would otherwise win).
-    if let Some(parent) = reply_parent {
-        if reply_context_preview(ui, th, parent) && matches!(action, MessageBubbleAction::None) {
-            action = MessageBubbleAction::NavigateTo {
-                msgid: parent.id.clone(),
-            };
-        }
-    }
-
     let mut bubble_rect = Rect::NOTHING;
-    if swipe_offset > 0.0 {
-        ui.add_space(swipe_offset);
-    }
-    let frame_resp = egui::Frame::new()
-        .fill(bg)
-        .stroke(stroke)
-        .corner_radius(sp.radius_md)
-        .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
-        .show(ui, |ui| {
+    let mut row_resp_rect = Rect::NOTHING;
+
+    // Avatar left of bubble (freeq MessageList parity).
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = sp.sm;
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            let av = user_avatar(ui, th, media, &msg.from, avatar_url, AVATAR_SIZE);
+            if av.clicked() {
+                action = MessageBubbleAction::OpenProfile {
+                    nick: msg.from.clone(),
+                };
+            }
+        });
+
+        ui.vertical(|ui| {
+            let col_w = ui.available_width().max(1.0);
+            ui.set_max_width(col_w);
+            ui.set_min_width(col_w);
+
+            // Body frame only — reaction chips live *below* so bubble gestures can't
+            // steal their clicks (later full-rect interacts would otherwise win).
+            if let Some(parent) = reply_parent {
+                if reply_context_preview(ui, th, parent)
+                    && matches!(action, MessageBubbleAction::None)
+                {
+                    action = MessageBubbleAction::NavigateTo {
+                        msgid: parent.id.clone(),
+                    };
+                }
+            }
+
+            if swipe_offset > 0.0 {
+                ui.add_space(swipe_offset);
+            }
+            let frame_resp = egui::Frame::new()
+                .fill(bg)
+                .stroke(stroke)
+                .corner_radius(sp.radius_md)
+                .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
+                .show(ui, |ui| {
             // Use the frame's inner width only — outer width overflows margins and
             // clips wrapped text on narrow APK screens (same as compose bar).
             let inner_w = ui.available_width().max(1.0);
@@ -1537,53 +1594,25 @@ pub fn message_bubble(
                     }
                 }
             }
-        });
-    bubble_rect = frame_resp.response.rect;
-    let row_resp = frame_resp.response;
+                });
+            bubble_rect = frame_resp.response.rect;
+            row_resp_rect = frame_resp.response.rect;
 
-    if swipe_offset > 0.0 {
-        let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
-        ui.painter().text(
-            Pos2::new(row_resp.rect.left() + 12.0, row_resp.rect.center().y),
-            Align2::LEFT_CENTER,
-            "↩",
-            FontId::proportional(18.0),
-            p.accent.gamma_multiply(alpha),
-        );
-    }
+            if swipe_offset > 0.0 {
+                let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
+                ui.painter().text(
+                    Pos2::new(row_resp_rect.left() + 12.0, row_resp_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    "↩",
+                    FontId::proportional(18.0),
+                    p.accent.gamma_multiply(alpha),
+                );
+            }
 
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp.rect));
-
-    // Store bubble rect for next-frame hover hit-testing (inline chip fade).
-    if action_metrics.is_some() {
-        ui.ctx().data_mut(|d| {
-            d.insert_temp(message_hover_rect_id(hover_id), bubble_rect);
-        });
-    }
-
-    // Right-click / long-press icon menu (React / Reply / Edit / Delete). Uses raw
-    // secondary clicks so selectable body text doesn't eat the right-click.
-    if let Some(menu_action) = message_context_menu(
-        ui,
-        th,
-        bubble_rect,
-        menu_id,
-        body_long_touched,
-        can_react,
-        can_reply,
-        can_edit,
-        can_delete,
-        react_picker_open,
-        msg,
-    ) {
-        action = menu_action;
-    }
-
-    // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
-    if !msg.reactions.is_empty() {
-        ui.add_space(sp.xs);
-        ui.horizontal_wrapped(|ui| {
+            // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
+            if !msg.reactions.is_empty() {
+                ui.add_space(sp.xs);
+                ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let mut entries: Vec<_> = msg.reactions.iter().collect();
             entries.sort_by(|(a, na), (b, nb)| nb.len().cmp(&na.len()).then_with(|| a.cmp(b)));
@@ -1684,7 +1713,37 @@ pub fn message_bubble(
                     };
                 }
             }
+                });
+            }
         });
+    });
+
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp_rect));
+
+    // Store bubble rect for next-frame hover hit-testing (inline chip fade).
+    if action_metrics.is_some() {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(message_hover_rect_id(hover_id), bubble_rect);
+        });
+    }
+
+    // Right-click / long-press icon menu (React / Reply / Edit / Delete). Uses raw
+    // secondary clicks so selectable body text doesn't eat the right-click.
+    if let Some(menu_action) = message_context_menu(
+        ui,
+        th,
+        bubble_rect,
+        menu_id,
+        body_long_touched,
+        can_react,
+        can_reply,
+        can_edit,
+        can_delete,
+        react_picker_open,
+        msg,
+    ) {
+        action = menu_action;
     }
 
     action

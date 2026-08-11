@@ -395,6 +395,13 @@ impl SleekApp {
                 MediaFetch::LinkPreview(url) => self.net.send(NetCmd::FetchLinkPreview { url }),
             }
         }
+        for req in self.state.avatars.drain_pending() {
+            log::debug!("avatar: queue getProfile nick={} actor={}", req.nick, req.actor);
+            self.net.send(NetCmd::FetchAvatar {
+                nick: req.nick,
+                actor: req.actor,
+            });
+        }
     }
 
     /// Drain finished OS file-dialog results; keep repainting while the dialog is open.
@@ -729,6 +736,12 @@ impl SleekApp {
                         if self.state.profile_gate.did.is_none() {
                             self.state.profile_gate.did = Some(profile.did.clone());
                         }
+                        if let (Some(nick), Some(url)) = (
+                            self.state.profile_gate.nick.clone(),
+                            profile.avatar.as_deref(),
+                        ) {
+                            self.state.avatars.seed(&nick, url);
+                        }
                         self.state.profile_gate.error = None;
                         self.state.profile_gate.profile = Some(profile);
                     }
@@ -737,6 +750,34 @@ impl SleekApp {
                         self.state.profile_gate.profile = None;
                     }
                 }
+            }
+            NetEvent::AvatarFetched { nick, result } => {
+                match &result {
+                    Ok(profile) => {
+                        if let Some(url) = profile.avatar.as_deref() {
+                            log::debug!(
+                                "avatar: {} → {} ({})",
+                                nick,
+                                profile.handle,
+                                url
+                            );
+                            // Warm the image cache as soon as the URL is known.
+                            self.state.media.touch_image(url);
+                        } else {
+                            log::debug!(
+                                "avatar: {} → {} (no photo)",
+                                nick,
+                                profile.handle
+                            );
+                        }
+                        // Handle→DID learn when we resolved by nick-as-handle.
+                        if crate::bsky::is_atproto_did(&profile.did) {
+                            self.state.adopt_dm_binding(&nick, &profile.did);
+                        }
+                    }
+                    Err(e) => log::debug!("avatar: {nick} fetch failed: {e}"),
+                }
+                self.state.avatars.apply_result(&nick, result);
             }
             NetEvent::PolicyFetched {
                 request_id,
@@ -837,6 +878,9 @@ impl SleekApp {
                 self.state.persist_session();
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(format!("DID {did}")));
+                // Own avatar for chat rows (DID-only resolve).
+                let nick = self.state.nick.clone();
+                self.state.avatars.prefetch(&nick, Some(did.as_str()));
             }
             Event::AuthFailed { reason } => {
                 self.state.error = Some(format!("Auth failed: {reason}"));
@@ -845,8 +889,15 @@ impl SleekApp {
             Event::Joined {
                 channel,
                 nick,
-                account: _,
+                account,
             } => {
+                // Extended-join account → Bluesky avatar prefetch (DID or
+                // handle-shaped nick). MemberDid usually races this; both paths
+                // are idempotent in AvatarCache.
+                if let Some(ref did) = account {
+                    self.state.adopt_dm_binding(&nick, did);
+                }
+                self.state.avatars.prefetch(&nick, account.as_deref());
                 let own = nick.eq_ignore_ascii_case(&self.state.nick);
                 let show_join_part = self.state.show_join_part;
                 let buf = self.state.ensure_buffer(&channel);
@@ -935,6 +986,12 @@ impl SleekApp {
                     .or_else(|| tags.get("reply"))
                     .cloned();
                 let timestamp = server_time_from_tags(&tags).unwrap_or_else(chrono::Local::now);
+
+                // Bluesky avatar: account-tag DID (or handle-shaped nick).
+                let account = tags.get("account").cloned();
+                self.state
+                    .avatars
+                    .prefetch(&from, account.as_deref());
 
                 let is_own = from.eq_ignore_ascii_case(&self.state.nick);
                 // Own echoed DM: target = recipient nick, dm_key = their DID.
@@ -1051,6 +1108,7 @@ impl SleekApp {
                 // Fold nick-keyed DM into DID-keyed thread when peer identity
                 // is learned (join / whois / account tag on first message).
                 self.state.adopt_dm_binding(&nick, &did);
+                self.state.avatars.prefetch(&nick, Some(did.as_str()));
                 if self
                     .state
                     .profile_gate
