@@ -120,10 +120,14 @@ steps:
         bash scripts/sync-flake-path-deps.sh
         parent="$(dirname "${BOXCI_REPO_ROOT:?}")"
         [[ -f "$parent/vidya/Cargo.toml" ]] || { echo "vidya Cargo.toml missing at $parent/vidya" >&2; exit 1; }
-        [[ -f "$parent/freeq/freeq-sdk/Cargo.toml" ]] || {
-          echo "freeq-sdk Cargo.toml missing at $parent/freeq/freeq-sdk" >&2
-          exit 1
-        }
+        # freeq-sdk path-depends on freeq-oauth + freeq-ssrf; sdk alone is not enough.
+        for crate in freeq-sdk freeq-oauth freeq-ssrf; do
+          [[ -f "$parent/freeq/${crate}/Cargo.toml" ]] || {
+            echo "${crate} Cargo.toml missing under $parent/freeq" >&2
+            ls -la "$parent/freeq" >&2 || true
+            exit 1
+          }
+        done
 
         echo "--- :nix: develop (mold + rustc from flake)"
         nix develop --option accept-flake-config true --command bash -lc "
