@@ -23,5 +23,5 @@ pub use settings::{settings_tab, SettingsAction};
 pub use widgets::{
     avatar_circle, card, conversation_row, date_separator, format_day_separator,
     image_lightbox_overlay, message_bubble, react_picker_overlay, section_label,
-    text_edit_clipboard_menu, MessageBubbleAction,
+    text_edit_clipboard_menu, user_avatar, MessageBubbleAction,
 };

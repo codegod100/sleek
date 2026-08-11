@@ -696,6 +696,23 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                         .as_deref()
                         .and_then(|id| msg_by_id.get(id).copied());
                     let outer = ui.push_id(("chat_msg", msg.id.as_str()), |ui| {
+                        // Bluesky avatar: AT Proto DID when known, else handle-shaped nick.
+                        let did = state
+                            .nick_to_did
+                            .get(&msg.from.to_lowercase())
+                            .cloned()
+                            .or_else(|| {
+                                if msg.from.eq_ignore_ascii_case(&own_nick) {
+                                    state.did.clone()
+                                } else {
+                                    None
+                                }
+                            });
+                        state.avatars.prefetch(&msg.from, did.as_deref());
+                        let avatar_url = state
+                            .avatars
+                            .avatar_url(&msg.from)
+                            .map(|s| s.to_string());
                         apply_message_bubble_action(
                             message_bubble(
                                 ui,
@@ -704,6 +721,7 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
                                 reply_parent,
                                 &own_nick,
                                 &mut state.media,
+                                avatar_url.as_deref(),
                                 picker_open,
                                 highlighted,
                             ),

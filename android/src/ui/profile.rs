@@ -1,10 +1,11 @@
 //! Peer profile modal (freeq `UserPopover` parity — nick tap → Bluesky).
 
-use eframe::egui::{self, Align, Color32, CursorIcon, Layout, RichText, ScrollArea, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align, Color32, CursorIcon, Layout, RichText, ScrollArea, Sense, Stroke};
 use vidya::{button, dim_label, primary_button, Theme};
 
 use crate::bsky::{self, ActorProfile};
-use crate::state::{AppState, ImageState};
+use crate::state::AppState;
+use crate::ui::widgets::user_avatar;
 
 pub enum ProfileGateAction {
     None,
@@ -88,7 +89,14 @@ pub fn profile_gate_overlay(
 
             // Sticky identity header (avatar + name/handle); scroll the rest.
             ui.horizontal(|ui| {
-                profile_avatar(ui, th, state, &nick, avatar_url.as_deref(), 56.0);
+                user_avatar(
+                    ui,
+                    th,
+                    &mut state.media,
+                    &nick,
+                    avatar_url.as_deref(),
+                    56.0,
+                );
                 ui.add_space(sp.md);
                 ui.vertical(|ui| {
                     let display = profile
@@ -263,29 +271,6 @@ pub fn profile_gate_overlay(
     }
 
     action
-}
-
-fn profile_avatar(
-    ui: &mut egui::Ui,
-    th: &Theme,
-    state: &mut AppState,
-    nick: &str,
-    avatar_url: Option<&str>,
-    size: f32,
-) {
-    if let Some(url) = avatar_url {
-        state.media.touch_image(url);
-        if let Some(ImageState::Ready(pixels)) = state.media.images.get_mut(url) {
-            let tex = pixels.texture(ui.ctx(), url).clone();
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            egui::Image::new((tex.id(), Vec2::splat(size)))
-                .fit_to_exact_size(Vec2::splat(size))
-                .corner_radius(size * 0.5)
-                .paint_at(ui, rect);
-            return;
-        }
-    }
-    crate::ui::widgets::avatar_circle(ui, th, nick, size);
 }
 
 fn truncate_bio(s: &str, max: usize) -> String {
