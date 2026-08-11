@@ -1356,50 +1356,41 @@ pub fn message_bubble(
     let mut bubble_rect = Rect::NOTHING;
     let mut row_resp_rect = Rect::NOTHING;
 
-    // Avatar left of bubble (freeq MessageList parity).
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = sp.sm;
-        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            let av = user_avatar(ui, th, media, &msg.from, avatar_url, AVATAR_SIZE);
-            if av.clicked() {
-                action = MessageBubbleAction::OpenProfile {
-                    nick: msg.from.clone(),
-                };
-            }
-        });
+    // Body frame only — reaction chips live *below* so bubble gestures can't
+    // steal their clicks (later full-rect interacts would otherwise win).
+    if let Some(parent) = reply_parent {
+        if reply_context_preview(ui, th, parent)
+            && matches!(action, MessageBubbleAction::None)
+        {
+            action = MessageBubbleAction::NavigateTo {
+                msgid: parent.id.clone(),
+            };
+        }
+    }
 
-        ui.vertical(|ui| {
-            let col_w = ui.available_width().max(1.0);
-            ui.set_max_width(col_w);
-            ui.set_min_width(col_w);
-
-            // Body frame only — reaction chips live *below* so bubble gestures can't
-            // steal their clicks (later full-rect interacts would otherwise win).
-            if let Some(parent) = reply_parent {
-                if reply_context_preview(ui, th, parent)
-                    && matches!(action, MessageBubbleAction::None)
-                {
-                    action = MessageBubbleAction::NavigateTo {
-                        msgid: parent.id.clone(),
-                    };
-                }
-            }
-
-            if swipe_offset > 0.0 {
-                ui.add_space(swipe_offset);
-            }
-            let frame_resp = egui::Frame::new()
-                .fill(bg)
-                .stroke(stroke)
-                .corner_radius(sp.radius_md)
-                .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
-                .show(ui, |ui| {
+    if swipe_offset > 0.0 {
+        ui.add_space(swipe_offset);
+    }
+    let frame_resp = egui::Frame::new()
+        .fill(bg)
+        .stroke(stroke)
+        .corner_radius(sp.radius_md)
+        .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
+        .show(ui, |ui| {
             // Use the frame's inner width only — outer width overflows margins and
             // clips wrapped text on narrow APK screens (same as compose bar).
             let inner_w = ui.available_width().max(1.0);
             ui.set_max_width(inner_w);
             ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = sp.sm;
+                // Avatar lives inside the bubble header (next to nick).
+                let av = user_avatar(ui, th, media, &msg.from, avatar_url, AVATAR_SIZE);
+                if av.clicked() {
+                    action = MessageBubbleAction::OpenProfile {
+                        nick: msg.from.clone(),
+                    };
+                }
                 // Button (not Label) so the hit target is reliable on software
                 // GL / remote desktop where Label click sense is easy to miss.
                 let nick_resp = ui
@@ -1595,24 +1586,24 @@ pub fn message_bubble(
                 }
             }
                 });
-            bubble_rect = frame_resp.response.rect;
-            row_resp_rect = frame_resp.response.rect;
+    bubble_rect = frame_resp.response.rect;
+    row_resp_rect = frame_resp.response.rect;
 
-            if swipe_offset > 0.0 {
-                let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
-                ui.painter().text(
-                    Pos2::new(row_resp_rect.left() + 12.0, row_resp_rect.center().y),
-                    Align2::LEFT_CENTER,
-                    "↩",
-                    FontId::proportional(18.0),
-                    p.accent.gamma_multiply(alpha),
-                );
-            }
+    if swipe_offset > 0.0 {
+        let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
+        ui.painter().text(
+            Pos2::new(row_resp_rect.left() + 12.0, row_resp_rect.center().y),
+            Align2::LEFT_CENTER,
+            "↩",
+            FontId::proportional(18.0),
+            p.accent.gamma_multiply(alpha),
+        );
+    }
 
-            // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
-            if !msg.reactions.is_empty() {
-                ui.add_space(sp.xs);
-                ui.horizontal_wrapped(|ui| {
+    // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
+    if !msg.reactions.is_empty() {
+        ui.add_space(sp.xs);
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let mut entries: Vec<_> = msg.reactions.iter().collect();
             entries.sort_by(|(a, na), (b, nb)| nb.len().cmp(&na.len()).then_with(|| a.cmp(b)));
@@ -1713,10 +1704,8 @@ pub fn message_bubble(
                     };
                 }
             }
-                });
-            }
         });
-    });
+    }
 
     ui.ctx()
         .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp_rect));
