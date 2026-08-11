@@ -2768,15 +2768,24 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
         close = true;
     }
 
-    // Keep the decoded image warm while the lightbox is open.
+    // Keep the decoded images warm while the lightbox is open.
     state.media.touch_image(&url);
+    state.media.touch_image_full(&url);
 
-    let ready = match state.media.images.get_mut(url.as_str()) {
+    // Prefer the full-resolution fetch; fall back to the (downscaled) inline
+    // thumb while it is still loading or if it failed.
+    let ready = match state.media.full_images.get_mut(url.as_str()) {
         Some(ImageState::Ready(pixels)) => {
             let tex = pixels.texture(ctx, &url).clone();
             Some((tex, pixels.width, pixels.height))
         }
-        _ => None,
+        _ => match state.media.images.get_mut(url.as_str()) {
+            Some(ImageState::Ready(pixels)) => {
+                let tex = pixels.texture(ctx, &url).clone();
+                Some((tex, pixels.width, pixels.height))
+            }
+            _ => None,
+        },
     };
 
     // Area paints over the full screen (including under system bars). Pad
