@@ -1209,6 +1209,8 @@ pub struct AppState {
     pub file_pick_started: Option<Instant>,
     /// Remote image + Open Graph link-preview cache for chat embeds.
     pub media: MediaCache,
+    /// Nick → Bluesky avatar URL cache (DID-resolved).
+    pub avatars: crate::avatar_cache::AvatarCache,
     pub search: String,
     pub join_input: String,
     pub discover_input: String,
@@ -1384,6 +1386,7 @@ impl AppState {
             file_pick_rx: None,
             file_pick_started: None,
             media: MediaCache::default(),
+            avatars: crate::avatar_cache::AvatarCache::default(),
             search: String::new(),
             join_input: String::new(),
             discover_input: String::new(),
@@ -2384,6 +2387,7 @@ impl AppState {
         self.channel_order.clear();
         self.nick_to_did.clear();
         self.did_to_nick.clear();
+        self.avatars.clear();
         self.active_channel = None;
         self.route = Route::Tabs;
         self.tab = Tab::Chats;

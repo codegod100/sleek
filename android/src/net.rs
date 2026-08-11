@@ -165,6 +165,12 @@ pub enum NetCmd {
         /// Handle or DID (`did:plc:` / `did:web:`).
         actor: String,
     },
+    /// Fetch a public Bluesky profile to populate the chat avatar cache.
+    /// `actor` is an AT Proto DID or a handle-shaped IRC nick.
+    FetchAvatar {
+        nick: String,
+        actor: String,
+    },
     Quit,
 }
 
@@ -252,6 +258,11 @@ pub enum NetEvent {
     /// Bluesky profile for the peer profile modal.
     ProfileFetched {
         request_id: u64,
+        result: Result<ActorProfile, String>,
+    },
+    /// Bluesky profile fetch finished for a chat avatar (`nick` key).
+    AvatarFetched {
+        nick: String,
         result: Result<ActorProfile, String>,
     },
 }
@@ -989,6 +1000,19 @@ async fn apply_cmd(
                 });
             });
         }
+        NetCmd::FetchAvatar { nick, actor } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result = match bsky::fetch_actor_profile(&actor).await {
+                    Ok(p) => Ok(p),
+                    Err(e) => {
+                        log::debug!("fetch avatar {nick} ({actor}): {e}");
+                        Err(e.to_string())
+                    }
+                };
+                let _ = tx.send(NetEvent::AvatarFetched { nick, result });
+            });
+        }
         NetCmd::Quit => {
             media.stop().await;
             if let Some(h) = handle.take() {
@@ -1200,6 +1224,10 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
         .await
         .map_err(|e| format!("SSRF check: {e}"))?;
+    // Prefer IPv4 for DNS pin. Hosts like cdn.bsky.app return A+AAAA; on
+    // IPv6-less VMs reqwest tries the pinned AAAA first and fails the request
+    // even when A records would work (Bluesky avatars were stuck as initials).
+    let addrs = prefer_ipv4_addrs(addrs);
 
     // DNS-pin + limited redirects (CDN image hosts often 302).
     let mut builder = reqwest::Client::builder()
@@ -1246,6 +1274,16 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     Ok((width, height, std::sync::Arc::from(rgba.into_raw())))
 }
 
+/// Keep SSRF-checked addrs, but drop AAAA when any A is present.
+fn prefer_ipv4_addrs(addrs: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let v4: Vec<_> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
+    if v4.is_empty() {
+        addrs
+    } else {
+        v4
+    }
+}
+
 /// Fetch remote video bytes for chat inline playback (SSRF-safe).
 async fn fetch_video_bytes(url: &str) -> Result<std::sync::Arc<[u8]>, String> {
     use crate::preview::MAX_VIDEO_BYTES;
@@ -1266,6 +1304,7 @@ async fn fetch_video_bytes(url: &str) -> Result<std::sync::Arc<[u8]>, String> {
     let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
         .await
         .map_err(|e| format!("SSRF check: {e}"))?;
+    let addrs = prefer_ipv4_addrs(addrs);
 
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1300,4 +1339,23 @@ async fn fetch_video_bytes(url: &str) -> Result<std::sync::Arc<[u8]>, String> {
     }
 
     Ok(std::sync::Arc::from(bytes.as_ref()))
+}
+
+#[cfg(test)]
+mod prefer_ipv4_tests {
+    use super::prefer_ipv4_addrs;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    #[test]
+    fn drops_aaaa_when_a_present() {
+        let v4 = SocketAddr::new(Ipv4Addr::new(1, 2, 3, 4).into(), 443);
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 443);
+        assert_eq!(prefer_ipv4_addrs(vec![v6, v4]), vec![v4]);
+    }
+
+    #[test]
+    fn keeps_aaaa_when_no_a() {
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 443);
+        assert_eq!(prefer_ipv4_addrs(vec![v6]), vec![v6]);
+    }
 }
