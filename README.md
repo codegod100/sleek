@@ -73,14 +73,12 @@ nix build .#flatpak
 
 ### CI artifacts
 
-On every push/PR, [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds on [nixbuild.net](https://nixbuild.net) (remote Nix builders — no GitHub runner compile):
+Merge / patch CI (check + APK + Flatpak) runs on **boxci** — see [`.boxci/pipeline.yml`](.boxci/pipeline.yml) and https://boxci.boxd.sh. GitHub Actions no longer builds PR artifacts; [`.github/workflows/boxci-merge.yml`](.github/workflows/boxci-merge.yml) only triggers the boxci merge pipeline on push to `main`.
 
 | Job | Flake attr | Artifact |
 |-----|------------|----------|
-| APK | `.#android` | `sleek-apk` (`sleek.apk`) |
-| Flatpak | `.#flatpak` | `sleek-flatpak` (`uk.nandi.sleek.flatpak`) |
-
-`NIXBUILD_TOKEN` is fetched from **OpenBao** (`secret/data/ai-api-keys`) via `OPENBAO_TOKEN`, or from the `nixbuild_token` repository secret as a fallback.
+| APK | `.#android` | `sleek.apk` |
+| Flatpak | `.#flatpak` | `uk.nandi.sleek.flatpak` |
 
 CI APKs are signed with the committed `android/ci.keystore` (password `android`, alias `androiddebugkey`) so successive installs upgrade cleanly. If you previously installed a build signed with a different key (e.g. an older CI artifact or a local `deploy-android` keystore), uninstall Sleek first — Android shows that as “Something went wrong / App not installed”.
 
