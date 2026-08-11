@@ -86,40 +86,41 @@ pub fn profile_gate_overlay(
             ui.separator();
             ui.add_space(sp.sm);
 
+            // Sticky identity header (avatar + name/handle); scroll the rest.
+            ui.horizontal(|ui| {
+                profile_avatar(ui, th, state, &nick, avatar_url.as_deref(), 56.0);
+                ui.add_space(sp.md);
+                ui.vertical(|ui| {
+                    let display = profile
+                        .as_ref()
+                        .and_then(|pr| pr.display_name.as_deref())
+                        .unwrap_or(nick.as_str());
+                    ui.label(
+                        RichText::new(display)
+                            .size(th.type_scale.body)
+                            .color(p.text)
+                            .strong(),
+                    );
+                    if display != nick {
+                        dim_label(ui, th, &nick);
+                    }
+                    if let Some(pr) = profile.as_ref() {
+                        if !pr.handle.is_empty() {
+                            ui.label(
+                                RichText::new(format!("@{}", pr.handle))
+                                    .size(th.type_scale.caption)
+                                    .color(p.accent),
+                            );
+                        }
+                    }
+                });
+            });
+
             let body_h = (ctx.screen_rect().height() * 0.5).clamp(180.0, 420.0);
             ScrollArea::vertical()
                 .id_salt("profile_gate_body")
                 .max_height(body_h)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        profile_avatar(ui, th, state, &nick, avatar_url.as_deref(), 56.0);
-                        ui.add_space(sp.md);
-                        ui.vertical(|ui| {
-                            let display = profile
-                                .as_ref()
-                                .and_then(|pr| pr.display_name.as_deref())
-                                .unwrap_or(nick.as_str());
-                            ui.label(
-                                RichText::new(display)
-                                    .size(th.type_scale.body)
-                                    .color(p.text)
-                                    .strong(),
-                            );
-                            if display != nick {
-                                dim_label(ui, th, &nick);
-                            }
-                            if let Some(pr) = profile.as_ref() {
-                                if !pr.handle.is_empty() {
-                                    ui.label(
-                                        RichText::new(format!("@{}", pr.handle))
-                                            .size(th.type_scale.caption)
-                                            .color(p.accent),
-                                    );
-                                }
-                            }
-                        });
-                    });
-
                     if let Some(did) = did.as_ref() {
                         ui.add_space(sp.sm);
                         let did_resp = ui

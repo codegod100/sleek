@@ -116,38 +116,38 @@ Requirements:
 2. Run relevant verification from AGENTS.md when practical:
    - \`nix develop . --command cargo clippy --manifest-path host/Cargo.toml -- -D warnings\`
    - \`nix develop . --command cargo test --manifest-path android/Cargo.toml --lib\`
-3. Open a Radicle patch on the \`rad\` remote. The patch MUST have both a title AND a full
-   description body (not title-only). Prefer \`git push rad HEAD:refs/patches\` with
-   **repeated** \`-o patch.message=...\` (first option = title; each later option = body
-   paragraph, joined with a blank line). Do not open a patch with only a title.
+3. Open a Radicle patch. The patch MUST have both a title AND a full description body
+   (not title-only). Do **not** use the radicle MCP (\`create_patch\` / \`issue_device_key\`)
+   and do **not** run \`rad auth\` to mint a cloud DID.
+
+   Preferred (GitHub → boxci): push the fix commit to GitHub, then follow skill
+   \`.cursor/skills/boxci-github-patch/\` (\`POST https://boxci.boxd.sh/api/patches/from-github\`
+   or \`./scripts/boxci/dispatch-github-patch.sh\`) with:
+   - repo: rad:z9mjPzpVK472QXaaP1picc5U9xBR
+   - github_repo_url: https://github.com/codegod100/sleek.git
+   - github_commit: the pushed SHA
+   - title: ${PATCH_TITLE}
+   - description: the Required description block below
+
+   On Buildkite agents that already ran \`scripts/buildkite/bootstrap.sh\` (CI
+   \`RADICLE_SECRET_KEY\` loaded), you may instead \`git push rad HEAD:refs/patches\` with
+   **repeated** \`-o patch.message=...\` (first = title; later = body paragraphs).
 
    Required title:
    ${PATCH_TITLE}
 
-   Required description (set as the second and further \`-o patch.message=\` values; you may
-   pass the whole block as one \`-o patch.message=...\` with embedded newlines, or split by
-   paragraph):
+   Required description:
    -----
 ${PATCH_DESCRIPTION}
    -----
 
-   Example:
+   Example (boxci):
    git checkout -b "${RADICLE_ISSUE_BRANCH}"
    # … commit the fix …
-   git push rad HEAD:refs/patches \\
-     -o patch.message="${PATCH_TITLE}" \\
-     -o patch.message="<Required description from above>"
-
-   If using radicle MCP \`create_patch\`, set the same title and the full description body
-   (issue id, title, issue body, and link) — never omit description.
-   Resolve Cursor \`environmentPublicId\` via cursor-cloud \`environment-info\` and pass it
-   as \`env_name\` on \`create_patch\` / \`issue_device_key\` so this environment reuses one
-   Radicle DID (do not run \`rad auth\` to mint a fresh identity).
-   - env_name: <environment.environmentPublicId>
-   - branch: "${RADICLE_ISSUE_BRANCH}"
-   - title: "${PATCH_TITLE}"
-   - description: the Required description block above (verbatim or equivalent)
-   - commit: a clear commit message describing the fix
+   git push -u origin "${RADICLE_ISSUE_BRANCH}"
+   ./scripts/boxci/dispatch-github-patch.sh --sha "\$(git rev-parse HEAD)" \\
+     --title "${PATCH_TITLE}" \\
+     --description "<Required description from above>"
 4. Do not close the issue. Only open the patch.
 
 If the issue is not actionable (needs clarification, is a duplicate, etc.), explain why in your response and do not open a patch.
