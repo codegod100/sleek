@@ -116,3 +116,13 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
 
     action
 }
+
+/// Empty detail pane for the wide master–detail shell (no chat selected).
+pub fn chat_detail_placeholder(ui: &mut egui::Ui, th: &Theme) {
+    empty_state(
+        ui,
+        th,
+        "Select a chat",
+        "Pick a conversation from the list, or join a channel above.",
+    );
+}

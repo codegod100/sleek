@@ -23,6 +23,15 @@ use crate::ui::{
     ProfileGateAction, SettingsAction,
 };
 
+/// Minimum window width (points) for the desktop master–detail shell:
+/// chats list + chat pane side by side.
+const WIDE_SHELL_MIN_WIDTH: f32 = 900.0;
+
+/// Master list width for the wide shell (resizable within a narrow range).
+const MASTER_LIST_DEFAULT_WIDTH: f32 = 320.0;
+const MASTER_LIST_MIN_WIDTH: f32 = 260.0;
+const MASTER_LIST_MAX_WIDTH: f32 = 420.0;
+
 /// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
 /// X display so the app matches the browser viewport (not a 390×780 island).
 /// Override: `SLEEK_FIT_VIEWPORT=1` always fit; `=0` force phone size.
@@ -1799,6 +1808,122 @@ impl SleekApp {
         }
     }
 
+    /// Open a chat and optionally request history when the buffer is empty.
+    fn open_chat_with_history(&mut self, name: String) {
+        let need_history = self
+            .state
+            .channels
+            .get(&name)
+            .map(|b| !b.has_chat_messages())
+            .unwrap_or(true);
+        self.state.open_chat(&name);
+        if need_history {
+            self.net.send(NetCmd::HistoryLatest {
+                target: name,
+                count: 100,
+            });
+        }
+    }
+
+    /// Handle actions from [`ui::chat_screen`].
+    fn handle_chat_action(&mut self, _ctx: &egui::Context, act: ChatAction) {
+        match act {
+            ChatAction::None => {}
+            ChatAction::Back => {
+                self.state.close_chat();
+            }
+            ChatAction::Send { target, text } => {
+                self.do_send(target, text);
+            }
+            ChatAction::React {
+                target,
+                msgid,
+                emoji,
+            } => {
+                self.do_toggle_react(target, msgid, emoji);
+            }
+            ChatAction::Edit {
+                target,
+                msgid,
+                text,
+            } => {
+                self.do_edit(target, msgid, text);
+            }
+            ChatAction::Delete { target, msgid } => {
+                self.do_delete(target, msgid);
+            }
+            ChatAction::Part(channel) => {
+                self.do_part(channel);
+            }
+            ChatAction::OpenChannel(channel) => {
+                let ch = AppState::normalize_channel(&channel);
+                if !ch.is_empty() {
+                    if self
+                        .state
+                        .channels
+                        .get(&ch)
+                        .is_some_and(|b| b.is_joined())
+                    {
+                        self.state.open_chat(&ch);
+                    } else {
+                        self.do_join(ch);
+                    }
+                }
+            }
+            ChatAction::OpenDm(nick) => {
+                let key = self.state.dm_buffer_key(&nick);
+                self.open_chat_with_history(key);
+            }
+            ChatAction::OpenPolicyGate(channel) => {
+                self.open_policy_gate(&channel);
+            }
+            ChatAction::OpenProfile(nick) => {
+                self.open_profile_gate(&nick);
+            }
+            ChatAction::AvStart(channel) => {
+                self.do_av_start(channel);
+            }
+            ChatAction::AvJoin {
+                channel,
+                session_id,
+            } => {
+                self.do_av_join(channel, session_id);
+            }
+            ChatAction::AvLeave => {
+                self.do_av_leave();
+            }
+            ChatAction::AvToggleMute => {
+                self.do_av_toggle_mute();
+            }
+            ChatAction::AvToggleSpeakerMute => {
+                self.do_av_toggle_speaker_mute();
+            }
+            ChatAction::AvToggleCamera => {
+                self.do_av_toggle_camera();
+            }
+            ChatAction::AvSelectCamera(id) => {
+                self.do_av_select_camera(id);
+            }
+            ChatAction::AvSelectMic(id) => {
+                self.do_av_select_mic(id);
+            }
+            ChatAction::AvSelectSpeaker(id) => {
+                self.do_av_select_speaker(id);
+            }
+            ChatAction::OpenCallChannel(ch) => {
+                self.state.open_chat(&ch);
+            }
+        }
+    }
+
+    fn handle_chats_action(&mut self, act: ChatsAction) {
+        match act {
+            ChatsAction::None => {}
+            ChatsAction::Open(name) => self.open_chat_with_history(name),
+            ChatsAction::Join(ch) => self.do_join(ch),
+        }
+    }
+
     fn do_connect(&mut self) {
         // Guest path — no SASL web-token. Wipe any leftover Bluesky session so
         // we don't stay half-authenticated (DID/handle in UI, guest on wire).
@@ -2670,6 +2795,10 @@ impl eframe::App for SleekApp {
             || self.fill_viewport
             || screen.height() >= screen.width()
             || screen.width() < 640.0;
+        // Wide desktop / tablet: chats list + detail side by side.
+        let wide_shell = screen.width() >= WIDE_SHELL_MIN_WIDTH;
+        let registered = self.state.connection == ConnectionState::Registered;
+        let master_detail = wide_shell && registered && self.state.tab == Tab::Chats;
 
         // System status / nav safe areas (edge-to-edge). Measured via
         // WindowInsets JNI + content_rect; top is floored so the status bar
@@ -2739,12 +2868,14 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Bottom tabs (connected, not in chat detail) ────────────
+        // ── Bottom tabs (connected shell) ───────────────────────────
+        // Phone: hide while in chat detail. Wide: keep tabs so the list+detail
+        // shell can switch to Discover / Settings without a Back press.
         // Hide while the soft keyboard is up so the compose / focused field
         // has room above the IME (tabs would otherwise sit under the keys).
         let show_tabs = connected
-            && matches!(self.state.route, Route::Tabs)
-            && self.state.connection == ConnectionState::Registered
+            && registered
+            && (matches!(self.state.route, Route::Tabs) || wide_shell)
             && !ctx.wants_keyboard_input();
 
         if show_tabs {
@@ -2810,8 +2941,8 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Header (compact when in chat) ─
-        if !matches!(self.state.route, Route::Chat(_)) {
+        // ── Header (compact when in chat on phone; always on wide shell) ─
+        if wide_shell || !matches!(self.state.route, Route::Chat(_)) {
             // Landscape / short: one row (title · status) instead of stacked block.
             let (head_top, head_bot) = if short {
                 (sp.xs + 2.0, sp.xs)
@@ -2874,7 +3005,8 @@ impl eframe::App for SleekApp {
         // Android / fill: tight side padding so content uses the full width;
         // vertical pad is minimal (system chrome + header/tabs already own
         // the safe edges — large page padding looked letterboxed).
-        let page = if fill {
+        // Wide master–detail: same tight padding so the split uses the window.
+        let page = if fill || master_detail {
             let h_pad = if cfg!(target_os = "android") {
                 if short { 6_i8 } else { 8_i8 }
             } else if short {
@@ -2896,119 +3028,69 @@ impl eframe::App for SleekApp {
             th.page_frame()
         };
 
+        // Wide Chats tab: persistent master list beside the detail pane.
+        if master_detail {
+            let list_h_pad = if short { 8_i8 } else { 10_i8 };
+            let list_v_pad = if short { sp.sm as i8 } else { sp.page as i8 };
+            egui::SidePanel::left("chats_master")
+                .resizable(true)
+                .default_width(MASTER_LIST_DEFAULT_WIDTH)
+                .width_range(MASTER_LIST_MIN_WIDTH..=MASTER_LIST_MAX_WIDTH)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.window_bg)
+                        .inner_margin(egui::Margin::symmetric(list_h_pad, list_v_pad)),
+                )
+                .show_separator_line(true)
+                .show(ctx, |ui| {
+                    let panel_h = ui.available_height();
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(panel_h)
+                        .id_salt("chats_master_scroll")
+                        .show(ui, |ui| {
+                            let act = ui::chats_tab(ui, &th, &mut self.state);
+                            self.handle_chats_action(act);
+                        });
+                });
+        }
+
         egui::CentralPanel::default().frame(page).show(ctx, |ui| {
-            // Local desktop: narrow phone-like column. Codespace: full window.
+            // Wide Chats: detail fills the remaining width (list is SidePanel).
+            if master_detail {
+                let detail_w = ui.available_width().max(1.0);
+                ui.set_max_width(detail_w);
+                ui.set_min_width(detail_w);
+                if let Route::Chat(ch) = self.state.route.clone() {
+                    let act = ui::chat_screen(ui, &th, &mut self.state, &ch, true);
+                    self.handle_chat_action(ctx, act);
+                } else {
+                    ui::chat_detail_placeholder(ui, &th);
+                }
+                return;
+            }
+
+            // Local desktop: narrow phone-like column. Codespace / wide other
+            // tabs: use more of the window (capped so Settings isn't ultrawide).
             let col_w = if fill {
                 ui.available_width()
+            } else if wide_shell {
+                ui.available_width().min(560.0)
             } else {
                 ui.available_width().min(480.0)
             };
             ui.set_max_width(col_w);
             ui.set_min_width(col_w);
 
-            // Chat owns its own message ScrollArea with fixed header (← / Leave)
-            // and compose bar. Nesting it in main_scroll let those controls scroll away.
-            if let Route::Chat(ch) = self.state.route.clone() {
-                match ui::chat_screen(ui, &th, &mut self.state, &ch) {
-                    ChatAction::None => {}
-                    ChatAction::Back => {
-                        self.state.close_chat();
-                    }
-                    ChatAction::Send { target, text } => {
-                        self.do_send(target, text);
-                    }
-                    ChatAction::React {
-                        target,
-                        msgid,
-                        emoji,
-                    } => {
-                        self.do_toggle_react(target, msgid, emoji);
-                    }
-                    ChatAction::Edit {
-                        target,
-                        msgid,
-                        text,
-                    } => {
-                        self.do_edit(target, msgid, text);
-                    }
-                    ChatAction::Delete { target, msgid } => {
-                        self.do_delete(target, msgid);
-                    }
-                    ChatAction::Part(channel) => {
-                        self.do_part(channel);
-                    }
-                    ChatAction::OpenChannel(channel) => {
-                        let ch = AppState::normalize_channel(&channel);
-                        if !ch.is_empty() {
-                            if self
-                                .state
-                                .channels
-                                .get(&ch)
-                                .is_some_and(|b| b.is_joined())
-                            {
-                                self.state.open_chat(&ch);
-                            } else {
-                                self.do_join(ch);
-                            }
-                        }
-                    }
-                    ChatAction::OpenDm(nick) => {
-                        let key = self.state.dm_buffer_key(&nick);
-                        let need_history = self
-                            .state
-                            .channels
-                            .get(&key)
-                            .map(|b| !b.has_chat_messages())
-                            .unwrap_or(true);
-                        self.state.open_chat(&key);
-                        if need_history {
-                            self.net.send(NetCmd::HistoryLatest {
-                                target: key,
-                                count: 100,
-                            });
-                        }
-                    }
-                    ChatAction::OpenPolicyGate(channel) => {
-                        self.open_policy_gate(&channel);
-                    }
-                    ChatAction::OpenProfile(nick) => {
-                        self.open_profile_gate(&nick);
-                    }
-                    ChatAction::AvStart(channel) => {
-                        self.do_av_start(channel);
-                    }
-                    ChatAction::AvJoin {
-                        channel,
-                        session_id,
-                    } => {
-                        self.do_av_join(channel, session_id);
-                    }
-                    ChatAction::AvLeave => {
-                        self.do_av_leave();
-                    }
-                    ChatAction::AvToggleMute => {
-                        self.do_av_toggle_mute();
-                    }
-                    ChatAction::AvToggleSpeakerMute => {
-                        self.do_av_toggle_speaker_mute();
-                    }
-                    ChatAction::AvToggleCamera => {
-                        self.do_av_toggle_camera();
-                    }
-                    ChatAction::AvSelectCamera(id) => {
-                        self.do_av_select_camera(id);
-                    }
-                    ChatAction::AvSelectMic(id) => {
-                        self.do_av_select_mic(id);
-                    }
-                    ChatAction::AvSelectSpeaker(id) => {
-                        self.do_av_select_speaker(id);
-                    }
-                    ChatAction::OpenCallChannel(ch) => {
-                        self.state.open_chat(&ch);
-                    }
+            // Phone / narrow: chat is a full-screen route.
+            // Wide: chat lives in the master–detail branch above; Discover /
+            // Settings keep their content even if a chat remains selected.
+            if !wide_shell {
+                if let Route::Chat(ch) = self.state.route.clone() {
+                    let act = ui::chat_screen(ui, &th, &mut self.state, &ch, false);
+                    self.handle_chat_action(ctx, act);
+                    return;
                 }
-                return;
             }
 
             let panel_h = ui.available_height();
@@ -3021,45 +3103,18 @@ impl eframe::App for SleekApp {
                     ui.set_min_width(col_w);
 
                     // Route::Chat is rendered above without this outer scroll.
-                    if self.state.connection == ConnectionState::Registered {
+                    if registered {
                         match self.state.tab {
-                            Tab::Chats => match ui::chats_tab(ui, &th, &mut self.state) {
-                                ChatsAction::None => {}
-                                ChatsAction::Open(name) => {
-                                    let need_history = self
-                                        .state
-                                        .channels
-                                        .get(&name)
-                                        .map(|b| !b.has_chat_messages())
-                                        .unwrap_or(true);
-                                    self.state.open_chat(&name);
-                                    if need_history {
-                                        self.net.send(NetCmd::HistoryLatest {
-                                            target: name,
-                                            count: 100,
-                                        });
-                                    }
-                                }
-                                ChatsAction::Join(ch) => self.do_join(ch),
-                            },
+                            Tab::Chats => {
+                                let act = ui::chats_tab(ui, &th, &mut self.state);
+                                self.handle_chats_action(act);
+                            }
                             Tab::Discover => {
                                 match ui::discover_tab(ui, &th, &mut self.state) {
                                     DiscoverAction::None => {}
                                     DiscoverAction::Join(ch) => self.do_join(ch),
                                     DiscoverAction::Open(name) => {
-                                        let need_history = self
-                                            .state
-                                            .channels
-                                            .get(&name)
-                                            .map(|b| !b.has_chat_messages())
-                                            .unwrap_or(true);
-                                        self.state.open_chat(&name);
-                                        if need_history {
-                                            self.net.send(NetCmd::HistoryLatest {
-                                                target: name,
-                                                count: 100,
-                                            });
-                                        }
+                                        self.open_chat_with_history(name);
                                     }
                                 }
                             }

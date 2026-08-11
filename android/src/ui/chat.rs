@@ -120,7 +120,13 @@ fn apply_message_bubble_action(
     }
 }
 
-pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel: &str) -> ChatAction {
+pub fn chat_screen(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    channel: &str,
+    master_detail: bool,
+) -> ChatAction {
     let mut action = ChatAction::None;
     let sp = &th.spacing;
     let p = &th.palette;
@@ -189,14 +195,17 @@ pub fn chat_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState, channel:
     // Header — allocate right-side actions first so long channel names
     // (e.g. stream.place:…) truncate with an ellipsis instead of clipping
     // under Leave/Users or past the panel edge.
+    // Master-detail (wide shell): list stays visible — skip ←; Esc still deselects.
     ui.horizontal(|ui| {
-        if button(ui, th, "←").clicked() {
-            // Same dismiss stack as Esc / Android back gesture.
-            if state.chat_back_step() {
-                action = ChatAction::Back;
+        if !master_detail {
+            if button(ui, th, "←").clicked() {
+                // Same dismiss stack as Esc / Android back gesture.
+                if state.chat_back_step() {
+                    action = ChatAction::Back;
+                }
             }
+            ui.add_space(sp.sm);
         }
-        ui.add_space(sp.sm);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if !show_search && is_channel && !show_members {
                 let leave_label = if join_error.is_some() {
