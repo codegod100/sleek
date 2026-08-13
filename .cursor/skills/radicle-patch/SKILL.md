@@ -1,70 +1,48 @@
 ---
 name: radicle-patch
 description: >
-  Open or update a Radicle patch with a stable per-environment device identity.
-  Use when publishing a patch via the radicle MCP (create_patch / issue_device_key),
-  when an agent would otherwise run rad auth, or when the user asks to reuse the
-  same Radicle DID / id for a Cursor environment.
+  Open a Radicle patch for sleek. Cloud / GitHub agents must use the
+  boxci-github-patch skill (POST boxci /api/patches/from-github) — not the
+  radicle MCP and not local rad auth. Use this skill only as a pointer to
+  boxci-github-patch, or when a machine already has RADICLE_SECRET_KEY and
+  a working rad remote for a direct git push rad.
 ---
 
-# Radicle patches (stable DID per Cursor env)
+# Radicle patches (sleek)
 
-MCP source: [`rad:z4J6Hk21QrvWvQJKpH145GMAcACga`](https://nandi.radicle.garden/rad:z4J6Hk21QrvWvQJKpH145GMAcACga)
-(hosted `https://mcp.boxd.sh/radicle/mcp`). The server auto-scopes to
-`CURSOR_ENVIRONMENT_ID` / `x-cursor-environment-id` when `env_name` is omitted.
+## Cloud / Cursor agents (default)
 
-## Rule
+**Do not use the radicle MCP** (`create_patch` / `issue_device_key` on
+`mcp.boxd.sh`). Hosted MCP cannot see the agent git checkout.
 
-**One Cursor environment → one Radicle device DID.** Never mint a new identity
-with `rad auth` for patch publishing unless a dedicated CI key was already
-loaded into `$RAD_HOME` from OpenBao/Buildkite.
+**Do not** run `rad auth` to mint a device DID in the cloud VM.
 
-## Resolve `env_name`
+Follow **`.cursor/skills/boxci-github-patch/`** instead:
 
-1. Call MCP `cursor-cloud` → `environment-info`.
-2. Set `env_name` to `environment.environmentPublicId` (UUID).
-3. Pass the same `env_name` on every radicle MCP tool call in this run.
+1. Push the commit to GitHub (`origin`).
+2. `POST https://boxci.boxd.sh/api/patches/from-github` with sleek’s RID,
+   `https://github.com/codegod100/sleek.git`, and the commit SHA.
+3. Poll the boxci run and surface `https://boxci.boxd.sh/runs/<run_id>` plus
+   `patch_id` from the step output.
 
-Optional alias (first issue only): `cursor-env-<short-env-name>` (e.g.
-`cursor-env-codegod100-sleek`). Do not change the alias on later loads.
+Sleek defaults:
 
-## Issue or load the identity
+| Field | Value |
+|-------|--------|
+| `repo` | `rad:z9mjPzpVK472QXaaP1picc5U9xBR` |
+| `github_repo_url` | `https://github.com/codegod100/sleek.git` |
+| `branch` | `main` |
 
-```text
-radicle / issue_device_key
-  env_name: <environmentPublicId>
-  alias: cursor-env-…          # only matters on first create
-  start_node: false            # default
-  force: false                 # never true unless rotating
+## Local / CI exception
+
+Only when `RADICLE_SECRET_KEY` (or an existing `$RAD_HOME`) is already loaded
+and `git remote get-url rad` works — e.g. a CI job that pulled the key from
+OpenBao `secret/data/radicle` — you may open a patch with:
+
+```bash
+git push rad HEAD:refs/patches \
+  -o patch.message="Title" \
+  -o patch.message="Body paragraph"
 ```
 
-Expect `created: false` and the same `did` on subsequent runs in this env.
-
-## Open a patch
-
-```text
-radicle / create_patch
-  env_name: <environmentPublicId>   # required — same as above
-  title: …
-  body: …                           # full description, not title-only
-  branch: …
-  commit: …                         # optional: commit then patch
-```
-
-`create_patch` auto-issues credentials when needed, but still pass `env_name`
-so it does not fall back to an unscoped / ephemeral home.
-
-## Do not
-
-- Run `rad auth --alias …` in the agent VM to “get a key quickly”.
-- Omit `env_name` (unscoped home is shared/ambiguous across envs).
-- Commit `$RAD_HOME/keys` or paste private keys into the repo/PR.
-- Use `force: true` on `issue_device_key` unless the user asked to rotate.
-
-## CI exception
-
-Buildkite issue→agent loads a **dedicated CI** identity from
-`RADICLE_SECRET_KEY` / OpenBao `secret/data/radicle` via
-`scripts/buildkite/bootstrap.sh`. That path is separate from the Cursor
-env-scoped MCP identity. Prefer MCP + `env_name` for interactive/cloud-agent
-patches; use the CI key only inside Buildkite bootstrap.
+Never commit key material under `.radicle/` or elsewhere.
