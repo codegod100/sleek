@@ -13,6 +13,9 @@ pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_VIDEO_BYTES: usize = 25 * 1024 * 1024;
 /// Downscale long edge for chat thumbs (pixels).
 pub const MAX_IMAGE_DIM: u32 = 720;
+/// Downscale long edge for the full-screen lightbox (pixels). Much larger than
+/// the chat thumb so the zoomed view is sharp; still capped to bound memory.
+pub const MAX_FULL_IMAGE_DIM: u32 = 4096;
 
 /// What kind of embed a message body should show under the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
