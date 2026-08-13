@@ -12,9 +12,17 @@ description: >-
 
 Cloud agents often finish work on a **GitHub** clone. To land that commit on
 **Radicle**, call boxci — do **not** try to `git push rad` from the cloud VM
-unless Radicle is already set up there.
+unless Radicle is already set up there. Prefer this over radicle MCP
+`create_patch` or local `git push rad` on cloud VMs.
 
 Base URL (default): `https://boxci.boxd.sh`
+
+Sleek defaults:
+
+| Field | Value |
+|-------|--------|
+| `repo` | `rad:z9mjPzpVK472QXaaP1picc5U9xBR` |
+| `github_repo_url` | `https://github.com/codegod100/sleek.git` |
 
 ## When to use
 
