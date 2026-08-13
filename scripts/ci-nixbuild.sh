@@ -115,6 +115,18 @@ setup_nixbuild() {
   : "${NIXBUILDNET_TOKEN:?NIXBUILDNET_TOKEN required (run resolve-creds first)}"
   ensure_nix
 
+  # boxci's CF Containers image runs as root with no sudo binary; Buildkite
+  # agents run unprivileged and need it. Only shell out to sudo when we're
+  # not already root.
+  local -a sudo=()
+  if [[ "$(id -u)" -ne 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || {
+      echo "not root and sudo unavailable; required to write /etc/nix + /root/.ssh" >&2
+      exit 1
+    }
+    sudo=(sudo)
+  fi
+
   echo "--- :nixbuild: configure SSH + Nix for $NIXBUILD_SSH_HOST"
 
   ssh_known_hosts="$(mktemp)"
@@ -154,11 +166,11 @@ setup_nixbuild() {
   export NIX_SSHOPTS="-F$ssh_config"
 
   # Root must share SSH auth so nix-daemon remote ops authenticate.
-  sudo mkdir -p /root/.ssh
-  sudo cp "$ssh_config" /root/.ssh/config
-  sudo cp "$ssh_known_hosts" /root/.ssh/known_hosts
-  sudo chmod 700 /root/.ssh
-  sudo chmod 600 /root/.ssh/config /root/.ssh/known_hosts
+  "${sudo[@]}" mkdir -p /root/.ssh
+  "${sudo[@]}" cp "$ssh_config" /root/.ssh/config
+  "${sudo[@]}" cp "$ssh_known_hosts" /root/.ssh/known_hosts
+  "${sudo[@]}" chmod 700 /root/.ssh
+  "${sudo[@]}" chmod 600 /root/.ssh/config /root/.ssh/known_hosts
 
   echo "--- :nixbuild: fetch signing key (auth liveness)"
   nixbuild_pubkey="$(
@@ -179,9 +191,9 @@ setup_nixbuild() {
     echo 'nixbuild i686-linux - 32 1 big-parallel,benchmark,kvm,nixos-test,ca-derivations'
   } >"$builders_file"
 
-  sudo mkdir -p /etc/nix
-  sudo cp "$builders_file" /etc/nix/sleek-nixbuild-builders
-  sudo chmod 644 /etc/nix/sleek-nixbuild-builders
+  "${sudo[@]}" mkdir -p /etc/nix
+  "${sudo[@]}" cp "$builders_file" /etc/nix/sleek-nixbuild-builders
+  "${sudo[@]}" chmod 644 /etc/nix/sleek-nixbuild-builders
 
   {
     echo 'experimental-features = nix-command flakes'
@@ -193,21 +205,21 @@ setup_nixbuild() {
     # Prefer Host alias (SSH config) so SetEnv/token applies; priority matches nixbuild-action.
     echo 'extra-substituters = ssh://nixbuild?priority=100'
     echo "extra-trusted-public-keys = $nixbuild_pubkey"
-  } | sudo tee /etc/nix/sleek-nixbuild.conf >/dev/null
-  sudo chmod 644 /etc/nix/sleek-nixbuild.conf
+  } | "${sudo[@]}" tee /etc/nix/sleek-nixbuild.conf >/dev/null
+  "${sudo[@]}" chmod 644 /etc/nix/sleek-nixbuild.conf
 
-  if ! sudo grep -q 'sleek-nixbuild.conf' /etc/nix/nix.conf 2>/dev/null; then
-    echo 'include /etc/nix/sleek-nixbuild.conf' | sudo tee -a /etc/nix/nix.conf >/dev/null
+  if ! "${sudo[@]}" grep -q 'sleek-nixbuild.conf' /etc/nix/nix.conf 2>/dev/null; then
+    echo 'include /etc/nix/sleek-nixbuild.conf' | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
   fi
-  if ! sudo grep -qF "$nixbuild_pubkey" /etc/nix/nix.conf 2>/dev/null; then
-    echo "extra-trusted-public-keys = $nixbuild_pubkey" | sudo tee -a /etc/nix/nix.conf >/dev/null
+  if ! "${sudo[@]}" grep -qF "$nixbuild_pubkey" /etc/nix/nix.conf 2>/dev/null; then
+    echo "extra-trusted-public-keys = $nixbuild_pubkey" | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
   fi
-  if ! sudo grep -q 'ssh://nixbuild' /etc/nix/nix.conf 2>/dev/null; then
-    echo 'extra-substituters = ssh://nixbuild?priority=100' | sudo tee -a /etc/nix/nix.conf >/dev/null
+  if ! "${sudo[@]}" grep -q 'ssh://nixbuild' /etc/nix/nix.conf 2>/dev/null; then
+    echo 'extra-substituters = ssh://nixbuild?priority=100' | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
   fi
 
   mkdir -p "$HOME/.config/nix"
-  sudo cp /etc/nix/sleek-nixbuild.conf "$HOME/.config/nix/nix.conf"
+  "${sudo[@]}" cp /etc/nix/sleek-nixbuild.conf "$HOME/.config/nix/nix.conf"
   export NIX_CONFIG="include /etc/nix/sleek-nixbuild.conf"
 
   # Persist SSH opts for later remote-build in the same job (via env file).
@@ -223,7 +235,7 @@ setup_nixbuild() {
 
   if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
     echo "Starting nix-daemon with nixbuild trusted keys"
-    sudo /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon.log 2>&1 &
+    "${sudo[@]}" /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon.log 2>&1 &
     for _ in $(seq 1 30); do
       [[ -S /nix/var/nix/daemon-socket/socket ]] && break
       sleep 1
