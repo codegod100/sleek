@@ -114,6 +114,12 @@ ensure_nix() {
 setup_nixbuild() {
   : "${NIXBUILDNET_TOKEN:?NIXBUILDNET_TOKEN required (run resolve-creds first)}"
   ensure_nix
+  # Resolve once, right after ensure_nix confirms it's on PATH: on boxci's CF
+  # Containers image nix is already at /bin/nix, while hosted Buildkite
+  # agents get a fresh install at /nix/var/nix/profiles/default/bin/nix —
+  # don't hardcode either path.
+  local nix_bin
+  nix_bin="$(command -v nix)"
 
   # boxci's CF Containers image runs as root with no sudo binary; Buildkite
   # agents run unprivileged and need it. Only shell out to sudo when we're
@@ -252,7 +258,7 @@ setup_nixbuild() {
 
   if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
     echo "Starting nix-daemon with nixbuild trusted keys"
-    "${sudo[@]}" /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon.log 2>&1 &
+    "${sudo[@]}" "$nix_bin" daemon >/tmp/nix-daemon.log 2>&1 &
     for _ in $(seq 1 30); do
       [[ -S /nix/var/nix/daemon-socket/socket ]] && break
       sleep 1
