@@ -127,6 +127,23 @@ setup_nixbuild() {
     sudo=(sudo)
   fi
 
+  # boxci's CF Containers image is a minimal dockerTools build with no
+  # /etc/passwd — ssh calls getpwuid() at startup and aborts with
+  # "No user exists for uid N" when that lookup fails (Buildkite hosted
+  # agents always have a real passwd db, so this only bites the CF runner).
+  # Synthesize a minimal entry for the current uid/gid before ssh runs.
+  local current_uid current_gid
+  current_uid="$(id -u)"
+  current_gid="$(id -g)"
+  if ! grep -q "^[^:]*:[^:]*:${current_uid}:" /etc/passwd 2>/dev/null; then
+    echo "no /etc/passwd entry for uid ${current_uid} — ssh needs one; synthesizing" >&2
+    printf 'root:x:%s:%s:root:%s:/bin/sh\n' "$current_uid" "$current_gid" "${HOME:-/root}" \
+      | "${sudo[@]}" tee -a /etc/passwd >/dev/null
+  fi
+  if ! grep -q "^[^:]*:[^:]*:${current_gid}:" /etc/group 2>/dev/null; then
+    printf 'root:x:%s:\n' "$current_gid" | "${sudo[@]}" tee -a /etc/group >/dev/null
+  fi
+
   echo "--- :nixbuild: configure SSH + Nix for $NIXBUILD_SSH_HOST"
 
   ssh_known_hosts="$(mktemp)"
