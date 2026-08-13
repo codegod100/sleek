@@ -141,6 +141,11 @@ steps:
       command -v jq >/dev/null 2>&1 || pkgs+=(nixpkgs#jq)
       command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
       command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+      # sed parses NIXBUILD_SETUP_ENV below; ci-nixbuild.sh (child process,
+      # inherits this PATH) uses awk for its show-config diagnostic. Neither
+      # ships in boxci's minimal CF Containers image.
+      command -v sed >/dev/null 2>&1 || pkgs+=(nixpkgs#gnused)
+      command -v awk >/dev/null 2>&1 || pkgs+=(nixpkgs#gawk)
       if ((${#pkgs[@]})); then
         echo "--- :nix: shell (${pkgs[*]})"
         # shellcheck disable=SC2016
@@ -198,6 +203,11 @@ steps:
       command -v jq >/dev/null 2>&1 || pkgs+=(nixpkgs#jq)
       command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
       command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+      # sed parses NIXBUILD_SETUP_ENV below; ci-nixbuild.sh (child process,
+      # inherits this PATH) uses awk for its show-config diagnostic. Neither
+      # ships in boxci's minimal CF Containers image.
+      command -v sed >/dev/null 2>&1 || pkgs+=(nixpkgs#gnused)
+      command -v awk >/dev/null 2>&1 || pkgs+=(nixpkgs#gawk)
       if ((${#pkgs[@]})); then
         echo "--- :nix: shell (${pkgs[*]})"
         # shellcheck disable=SC2016
