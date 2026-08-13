@@ -89,7 +89,7 @@ with urllib.request.urlopen(req, timeout=120) as resp:
 print(run["id"], run["status"])
 ```
 
-## Poll for `patch_id`
+## Poll for `patch_id` / `patch_url`
 
 Default response is **async** (`202`, `status: "running"`). Poll until finished:
 
@@ -97,27 +97,45 @@ Default response is **async** (`202`, `status: "running"`). Poll until finished:
 curl -sS "https://boxci.boxd.sh/api/runs/<run_id>"
 ```
 
-On success, the `github-patch` step `output_tail` contains a line:
+On success the run JSON includes structured fields (preferred):
+
+```json
+{
+  "id": "<run_id>",
+  "status": "passed",
+  "patch_id": "<40-char-id>",
+  "patch_url": "https://radicle.network/nodes/nandi.radicle.garden/rad:…/patches/<id>"
+}
+```
+
+If those fields are absent (older boxci), the `github-patch` step `output_tail` still
+contains:
 
 ```text
 patch_id=<40-char-id>
 ```
 
-Surface that id to the user, along with:
+Build the explorer URL yourself as:
 
-- **The boxci run link** — `https://boxci.boxd.sh/runs/<run_id>` — always live,
-  always the safe default. Lead with this one.
-- **A Garden/explorer link**, if you want one — build it yourself as
-  `https://app.radicle.xyz/nodes/<seed-host>/<rid>/patches/<patch_id>`
-  (`<seed-host>` is any seed tracking the repo, e.g. `rosa.radicle.network` or
-  the repo's own `*.radicle.garden` node). Verify with a HEAD request before
-  handing it to the user.
+```text
+https://radicle.network/nodes/nandi.radicle.garden/<rid>/patches/<patch_id>
+```
+
+(`<rid>` is `RADICLE_RID` / `BOXCI_REPO_ID` from `env`, e.g. `rad:z2QL7…`.)
+
+**Surface to the user (in this order):**
+
+1. **The patch URL** — `patch_url` from the run (or the constructed explorer link).
+   This is the review artifact — lead with it.
+2. **The boxci run link** — `https://boxci.boxd.sh/runs/<run_id>` (or
+   `…/repos/<slug>/runs/<run_id>`) as supporting CI context.
 
   **Do not** just copy the URL `output_tail` prints after `✓ Synced with N
   seed(s)` — the boxci host's `rad` has a misconfigured explorer template that
   glues the wrong domain onto the `/nodes/<seed>/...` path (e.g.
   `https://nandi.radicle.garden/nodes/rosa.radicle.network/rad:.../patches/...`),
-  which 404s. Same RID/patch-id, different (working) host.
+  which 404s. Same RID/patch-id, different (working) host — prefer
+  `radicle.network` as above, or the run's `patch_url` field.
 
 ## What boxci does
 
