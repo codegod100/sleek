@@ -30,28 +30,19 @@ steps:
       echo "Job COB log URL base: ${BOXCI_PUBLIC_URL:-https://boxci.boxd.sh}"
       echo "repo ${BOXCI_REPO_ID:-${RADICLE_RID:-?}} slug=${BOXCI_REPO_SLUG:-?}"
 
-  # The CF Containers runner is long-lived (max_instances=1) and shared
-  # across repos' merge builds; nothing ever ran `nix store gc` on it, so
-  # the store fills up and later flake evaluation dies with "No space left
-  # on device". Reclaim space before anything else touches the store.
-  - label: ":wastebasket: Free disk space"
-    key: disk-gc
-    if: build.env("BOXCI_TRIGGER") == "merge"
-    depends_on: job-probe
-    command: |
-      set -euo pipefail
-      echo "--- :floppy_disk: Before GC"
-      df -h / 2>/dev/null || true
-      if command -v nix >/dev/null 2>&1; then
-        nix store gc 2>&1 | tail -20 || true
-      fi
-      echo "--- :floppy_disk: After GC"
-      df -h / 2>/dev/null || true
+  # REMOVED (was "disk-gc" / "Free disk space", added in #93): `nix store gc`
+  # ran unconditionally on the shared, long-lived CF Containers runner, which
+  # runs boxci-server (and rad-job) straight out of /nix/store with
+  # NIX_REMOTE=local and no daemon — nothing registers those live process
+  # store paths as GC roots. Every run of this step deleted the running
+  # server's own runtime deps (e.g. radicle-job-0.6.0), even with plenty of
+  # free disk. Do not reintroduce `nix store gc` here without registering
+  # proper GC roots for the container's live runtime first.
 
   - label: ":rust: Check"
     key: check
     if: build.env("BOXCI_TRIGGER") == "merge"
-    depends_on: disk-gc
+    depends_on: job-probe
     command: |
       set -euo pipefail
       cd "${BOXCI_REPO_ROOT:?}"
