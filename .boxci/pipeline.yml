@@ -88,6 +88,19 @@ steps:
       command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
       command -v patch >/dev/null 2>&1 || pkgs+=(nixpkgs#gnupatch)
       command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+      command -v sccache >/dev/null 2>&1 || pkgs+=(nixpkgs#sccache)
+
+      # CI-only compiler cache — deliberately not in flake.nix's devShell
+      # (that's shared with local dev; forcing RUSTC_WRAPPER on every
+      # developer's `nix develop` isn't this pipeline's call to make).
+      # nix develop inherits the calling shell's env, so exporting these
+      # here is enough to make cargo use sccache inside it. SCCACHE_DIR
+      # lives under $BOXCI_ROOT, which persists across runs on the same
+      # container instance (not across a redeploy — no durable storage yet).
+      export RUSTC_WRAPPER=sccache
+      export CARGO_INCREMENTAL=0
+      export SCCACHE_DIR="${BOXCI_ROOT:-$HOME}/sccache"
+      mkdir -p "$SCCACHE_DIR"
 
       run_under_tools() {
         if ((${#pkgs[@]})); then
@@ -120,6 +133,8 @@ steps:
           cargo --version
           cargo clippy --manifest-path host/Cargo.toml -- -D warnings
           cargo test --manifest-path android/Cargo.toml --lib
+          echo \"--- :floppy_disk: sccache stats\"
+          sccache --show-stats || true
         " </dev/null
       '
 
