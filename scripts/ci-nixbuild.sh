@@ -231,18 +231,18 @@ setup_nixbuild() {
   } | "${sudo[@]}" tee /etc/nix/sleek-nixbuild.conf >/dev/null
   "${sudo[@]}" chmod 644 /etc/nix/sleek-nixbuild.conf
 
-  if ! "${sudo[@]}" grep -q 'sleek-nixbuild.conf' /etc/nix/nix.conf 2>/dev/null; then
-    echo 'include /etc/nix/sleek-nixbuild.conf' | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
-  fi
-  if ! "${sudo[@]}" grep -qF "$nixbuild_pubkey" /etc/nix/nix.conf 2>/dev/null; then
-    echo "extra-trusted-public-keys = $nixbuild_pubkey" | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
-  fi
-  if ! "${sudo[@]}" grep -q 'ssh://nixbuild' /etc/nix/nix.conf 2>/dev/null; then
-    echo 'extra-substituters = ssh://nixbuild?priority=100' | "${sudo[@]}" tee -a /etc/nix/nix.conf >/dev/null
-  fi
-
-  mkdir -p "$HOME/.config/nix"
-  "${sudo[@]}" cp /etc/nix/sleek-nixbuild.conf "$HOME/.config/nix/nix.conf"
+  # Deliberately NOT writing this into /etc/nix/nix.conf or
+  # $HOME/.config/nix/nix.conf: both are global, disk-persisted config files
+  # that every nix invocation on this container reads by default — including
+  # unrelated later runs, since boxci's CF Containers runner is long-lived
+  # and shared. A prior version of this script did write there, and it
+  # leaked `builders = @.../sleek-nixbuild-builders` + `max-jobs = 0` into
+  # every future run on the same instance, breaking plain `nix develop` in
+  # the (unrelated) check step once this ran (it started requiring a live
+  # nix-daemon connection it never asked for, then failed on a stale socket
+  # once the daemon from *this* run had died). NIX_CONFIG below is process-
+  # scoped and gets threaded into remote_build via setup_env — that's all
+  # this job itself needs; nothing should touch the global config files.
   export NIX_CONFIG="include /etc/nix/sleek-nixbuild.conf"
 
   # Persist SSH opts for later remote-build in the same job (via env file).
