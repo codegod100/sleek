@@ -73,7 +73,14 @@ nix build .#flatpak
 
 ### CI artifacts
 
-Merge / patch CI (check + APK + Flatpak) runs on **boxci** — see [`.boxci/pipeline.yml`](.boxci/pipeline.yml) and https://boxci.boxd.sh. GitHub Actions no longer builds PR artifacts; [`.github/workflows/boxci-merge.yml`](.github/workflows/boxci-merge.yml) only triggers the boxci merge pipeline on push to `main`.
+Merge / PR CI (check + APK + Flatpak) runs on **boxci** — see [`.boxci/pipeline.yml`](.boxci/pipeline.yml) and https://boxci.boxd.sh.
+
+| Path | What |
+|------|------|
+| [`.github/workflows/boxci-check.yml`](.github/workflows/boxci-check.yml) | PR bridge: trigger `check`, poll, post GitHub `boxci` commit status |
+| [`.github/workflows/boxci-merge.yml`](.github/workflows/boxci-merge.yml) | On push to `main`, trigger boxci merge pipeline |
+| `./scripts/boxci/dispatch-check.sh` | Manual check dispatch (+ optional `--wait`) |
+| `./scripts/boxci/dispatch-merge.sh` | Manual merge dispatch |
 
 | Job | Flake attr | Artifact |
 |-----|------------|----------|
