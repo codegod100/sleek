@@ -3055,7 +3055,7 @@ impl eframe::App for SleekApp {
                         .fill(p.window_bg)
                         .inner_margin(egui::Margin::symmetric(list_h_pad, list_v_pad)),
                 )
-                .show_separator_line(true)
+                .show_separator_line(false)
                 .show(ctx, |ui| {
                     let panel_h = ui.available_height();
                     ScrollArea::vertical()
