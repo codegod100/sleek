@@ -6,12 +6,25 @@
 #   ../freeq/freeq-sdk
 # relative to the sleek repo root (i.e. $WORKSPACES/vidya, $WORKSPACES/freeq).
 #
+# Destinations are always next to the repo: parent of $BOXCI_REPO_ROOT when set,
+# otherwise parent of this checkout. Shared CI siblings may be root-owned; we
+# stage + rename so only the parent dir needs to be writable (e.g. boxci's
+# $BOXCI_ROOT/workspaces/).
+#
+# Requires jq + patch on PATH (and nix). boxci CF Containers images lack them;
+# .boxci/pipeline.yml wraps this script in `nix shell nixpkgs#jq nixpkgs#gnupatch …`.
+# Locally you can do the same, or install jq/patch on the host.
+#
 # Usage:
 #   bash scripts/sync-flake-path-deps.sh           # vidya + freeq
 #   bash scripts/sync-flake-path-deps.sh vidya     # one dep
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Prefer explicit boxci checkout root so siblings land under workspaces/.
+if [[ -n "${BOXCI_REPO_ROOT:-}" ]]; then
+  ROOT="$(cd "$BOXCI_REPO_ROOT" && pwd)"
+fi
 WORKSPACES="$(cd "$ROOT/.." && pwd)"
 
 log() { echo "sync-flake-deps: $*" >&2; }
@@ -26,6 +39,10 @@ load_nix() {
   export PATH="/nix/var/nix/profiles/default/bin:${HOME}/.nix-profile/bin:${PATH}"
   if [[ -S /nix/var/nix/daemon-socket/socket ]]; then
     export NIX_REMOTE=daemon
+  fi
+  # Tolerate flake evaluation when /etc/nix is not writable (CF Containers).
+  if [[ -z "${NIX_CONFIG:-}" ]]; then
+    export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
   fi
 }
 
@@ -43,9 +60,9 @@ expected_marker() {
   esac
 }
 
-# Install a staged tree at $dest. Shared CI siblings (e.g. /home/boxd/freeq)
-# may contain root-owned files that block in-place cp; renaming the directory
-# only needs write on the parent, so stage → mv aside → mv in.
+# Install a staged tree at $dest. Shared CI siblings may contain root-owned
+# files that block in-place cp; renaming the directory only needs write on the
+# parent (workspaces/), so stage → mv aside → mv in.
 install_sibling() {
   local name="$1" dest="$2" staging="$3"
   local parent tmp old
@@ -146,11 +163,15 @@ main() {
     log "nix not on PATH"
     exit 1
   fi
+  load_nix
   if ! command -v jq >/dev/null 2>&1; then
-    log "jq not on PATH"
+    log "jq not on PATH (boxci: wrap with nix shell nixpkgs#jq nixpkgs#gnupatch)"
     exit 1
   fi
-  load_nix
+  if ! command -v patch >/dev/null 2>&1; then
+    log "patch not on PATH (boxci: wrap with nix shell nixpkgs#gnupatch)"
+    exit 1
+  fi
 
   if want vidya "$@"; then
     sync_input vidya vidya

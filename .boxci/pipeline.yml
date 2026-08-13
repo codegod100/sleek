@@ -4,7 +4,12 @@
 # This file only defines merge builds (on: merge).
 #
 # boxci publishes a Radicle Job COB (xyz.radworks.job) for each merge run so
-# Desktop/Explorer show CI status + a log link back to https://boxci.boxd.sh.
+# Desktop/Explorer show CI status + a log link back to https://boxci.boxd.sh
+# (or https://boxci.latha.org on the Cloudflare Containers runner).
+#
+# Runner notes (CF Containers dockerTools image): bash/git/nix/coreutils only —
+# no apt-get, often no jq/grep/patch/sudo. Missing host tools are pulled via
+# `nix shell` from nixpkgs; flake config is set with NIX_CONFIG (no sudo).
 
 name: sleek
 on:
@@ -33,13 +38,11 @@ steps:
       set -euo pipefail
       cd "${BOXCI_REPO_ROOT:?}"
 
-      if command -v apt-get >/dev/null 2>&1; then
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq git patch curl ca-certificates
-      fi
-      command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
-
       if ! command -v nix >/dev/null 2>&1; then
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "nix and curl both missing; cannot bootstrap" >&2
+          exit 1
+        fi
         curl --proto '=https' --tlsv1.2 -sSf -L \
           https://install.determinate.systems/nix \
           | sh -s -- install linux --no-confirm --init none
@@ -47,37 +50,69 @@ steps:
         . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh || true
         export PATH="/nix/var/nix/profiles/default/bin:$PATH"
       fi
-      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
-        sudo /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon-check.log 2>&1 &
-        for _ in $(seq 1 30); do
-          [[ -S /nix/var/nix/daemon-socket/socket ]] && break
-          sleep 1
-        done
-      fi
 
-      sudo mkdir -p /etc/nix
-      if ! sudo grep -q 'accept-flake-config' /etc/nix/nix.conf 2>/dev/null; then
-        echo 'accept-flake-config = true' | sudo tee -a /etc/nix/nix.conf >/dev/null
-      fi
+      # Prefer process NIX_CONFIG over writing /etc/nix (no sudo on CF image).
       export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
 
-      bash scripts/sync-flake-path-deps.sh
-      parent="$(dirname "$PWD")"
-      [[ -f "$parent/vidya/Cargo.toml" ]] || { echo "vidya Cargo.toml missing" >&2; exit 1; }
-      [[ -f "$parent/freeq/freeq-sdk/Cargo.toml" ]] || {
-        echo "freeq-sdk Cargo.toml missing" >&2
-        exit 1
+      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+        if command -v sudo >/dev/null 2>&1; then
+          sudo /nix/var/nix/profiles/default/bin/nix daemon >/tmp/nix-daemon-check.log 2>&1 &
+          for _ in $(seq 1 30); do
+            [[ -S /nix/var/nix/daemon-socket/socket ]] && break
+            sleep 1
+          done
+        else
+          echo "no sudo and no nix daemon socket; using single-user nix"
+        fi
+      fi
+
+      if command -v sudo >/dev/null 2>&1 && command -v grep >/dev/null 2>&1; then
+        sudo mkdir -p /etc/nix
+        if ! sudo grep -q 'accept-flake-config' /etc/nix/nix.conf 2>/dev/null; then
+          echo 'accept-flake-config = true' | sudo tee -a /etc/nix/nix.conf >/dev/null
+        fi
+      fi
+
+      # Host tools missing on the CF Containers image → nixpkgs via nix shell.
+      pkgs=()
+      command -v jq >/dev/null 2>&1 || pkgs+=(nixpkgs#jq)
+      command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
+      command -v patch >/dev/null 2>&1 || pkgs+=(nixpkgs#gnupatch)
+      command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+
+      run_under_tools() {
+        if ((${#pkgs[@]})); then
+          echo "--- :nix: shell (${pkgs[*]})"
+          nix --option accept-flake-config true shell "${pkgs[@]}" --command bash -c "$1"
+        else
+          bash -c "$1"
+        fi
       }
 
-      echo "--- :nix: develop (mold + rustc from flake)"
-      nix develop --option accept-flake-config true --command bash -lc '
+      run_under_tools '
         set -euo pipefail
-        command -v mold >/dev/null
-        rustc --version
-        cargo --version
-        cargo clippy --manifest-path host/Cargo.toml -- -D warnings
-        cargo test --manifest-path android/Cargo.toml --lib
-      ' </dev/null
+        cd "${BOXCI_REPO_ROOT:?}"
+        command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 1; }
+        command -v patch >/dev/null 2>&1 || { echo "patch required" >&2; exit 1; }
+
+        bash scripts/sync-flake-path-deps.sh
+        parent="$(dirname "${BOXCI_REPO_ROOT:?}")"
+        [[ -f "$parent/vidya/Cargo.toml" ]] || { echo "vidya Cargo.toml missing at $parent/vidya" >&2; exit 1; }
+        [[ -f "$parent/freeq/freeq-sdk/Cargo.toml" ]] || {
+          echo "freeq-sdk Cargo.toml missing at $parent/freeq/freeq-sdk" >&2
+          exit 1
+        }
+
+        echo "--- :nix: develop (mold + rustc from flake)"
+        nix develop --option accept-flake-config true --command bash -lc "
+          set -euo pipefail
+          command -v mold >/dev/null
+          rustc --version
+          cargo --version
+          cargo clippy --manifest-path host/Cargo.toml -- -D warnings
+          cargo test --manifest-path android/Cargo.toml --lib
+        " </dev/null
+      '
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
@@ -90,6 +125,17 @@ steps:
       slug="${BOXCI_REPO_SLUG:-sleek}"
       artifacts="${BOXCI_ROOT:?}/artifacts/${slug}/${BOXCI_RUN_ID:?}"
       mkdir -p "$artifacts"
+
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
+
+      pkgs=()
+      command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
+      command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+      if ((${#pkgs[@]})); then
+        echo "--- :nix: shell (${pkgs[*]})"
+        # shellcheck disable=SC2016
+        eval "$(nix --option accept-flake-config true shell "${pkgs[@]}" --command bash -c 'printf "export PATH=%q\n" "$PATH"')"
+      fi
 
       chmod +x scripts/ci-nixbuild.sh scripts/fetch-openbao-env.sh
 
@@ -135,6 +181,17 @@ steps:
       slug="${BOXCI_REPO_SLUG:-sleek}"
       artifacts="${BOXCI_ROOT:?}/artifacts/${slug}/${BOXCI_RUN_ID:?}"
       mkdir -p "$artifacts"
+
+      export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
+
+      pkgs=()
+      command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
+      command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
+      if ((${#pkgs[@]})); then
+        echo "--- :nix: shell (${pkgs[*]})"
+        # shellcheck disable=SC2016
+        eval "$(nix --option accept-flake-config true shell "${pkgs[@]}" --command bash -c 'printf "export PATH=%q\n" "$PATH"')"
+      fi
 
       chmod +x scripts/ci-nixbuild.sh scripts/fetch-openbao-env.sh
 
