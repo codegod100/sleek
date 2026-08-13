@@ -129,6 +129,7 @@ steps:
       export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
 
       pkgs=()
+      command -v jq >/dev/null 2>&1 || pkgs+=(nixpkgs#jq)
       command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
       command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
       if ((${#pkgs[@]})); then
@@ -185,6 +186,7 @@ steps:
       export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
 
       pkgs=()
+      command -v jq >/dev/null 2>&1 || pkgs+=(nixpkgs#jq)
       command -v grep >/dev/null 2>&1 || pkgs+=(nixpkgs#gnugrep)
       command -v curl >/dev/null 2>&1 || pkgs+=(nixpkgs#curl)
       if ((${#pkgs[@]})); then
