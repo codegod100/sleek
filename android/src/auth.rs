@@ -539,7 +539,7 @@ fn open_system_browser(url: &str) -> Result<()> {
     }
 }
 
-/// Desktop open: prefer `$BROWSER`, then Chromium (Codespace VNC), then `open`.
+/// Desktop open: prefer `$BROWSER`, then the configured URL handler, then Chromium.
 ///
 /// Codespace / desktop-lite has no default browser; Chromium from nix needs
 /// `--no-sandbox` because user namespaces are blocked.
@@ -558,7 +558,25 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 2) Chromium / Chrome with container-friendly flags (VNC / Docker).
+    // 2) Prefer the desktop URL handler. This uses the user's configured
+    // browser (for example the installed Chrome Flatpak), whereas probing
+    // Chromium binaries first can select a browser that is unavailable or
+    // cannot start in restricted VM environments.
+    if let Ok(opener) = std::env::var("SLEEK_XDG_OPEN") {
+        if !opener.is_empty() {
+            match Command::new(&opener).arg(url).spawn() {
+                Ok(_) => return Ok(()),
+                Err(e) => log::warn!("SLEEK_XDG_OPEN={opener} failed: {e}"),
+            }
+        }
+    } else if which_bin("xdg-open").is_some() {
+        match Command::new("xdg-open").arg(url).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => log::debug!("xdg-open failed: {e}"),
+        }
+    }
+
+    // 3) Chromium / Chrome with container-friendly flags (VNC / Docker).
     let chromes = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"];
     for bin in chromes {
         if which_bin(bin).is_some() {
@@ -582,7 +600,7 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 3) Firefox (nix profile); sandbox often fails in Codespaces.
+    // 4) Firefox (nix profile); sandbox often fails in Codespaces.
     if which_bin("firefox").is_some() {
         match Command::new("firefox")
             .env("MOZ_DISABLE_CONTENT_SANDBOX", "1")
@@ -595,7 +613,7 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 4) Generic opener (xdg-open / open).
+    // 5) Generic opener (xdg-open / open).
     open::that(url).context("open browser")
 }
 
@@ -623,9 +641,9 @@ pub async fn bluesky_login_mobile(
     let url = login_url(auth_broker, handle, None);
     log::info!("bluesky mobile login url: {url}");
     match open_system_browser(&url) {
-        Ok(()) => on_status(
-            "Browser opened — complete Bluesky sign-in; Sleek will resume via freeq://".into(),
-        ),
+        Ok(()) => on_status(format!(
+            "Browser opened — complete Bluesky sign-in; Sleek will resume via freeq://\n{url}"
+        )),
         Err(e) => {
             log::warn!("failed to open browser: {e}; url={url}");
             on_status(format!(
@@ -664,7 +682,7 @@ pub async fn bluesky_login_loopback(
     // backend and used to leave the UI stuck on "Opening browser…".
     log::info!("bluesky login url: {url}");
     match open_system_browser(&url) {
-        Ok(()) => on_status("Browser opened — complete sign-in, then return here".into()),
+        Ok(()) => on_status(format!("Browser opened — complete sign-in, then return here\n{url}")),
         Err(e) => {
             log::warn!("failed to open browser: {e}; url={url}");
             on_status(format!(

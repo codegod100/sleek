@@ -9,6 +9,27 @@ use vidya::{
 use crate::state::{AppState, ConnectMode, ConnectionState};
 use crate::ui::widgets::{avatar_circle, card, text_edit_clipboard_menu};
 
+fn oauth_status(ui: &mut egui::Ui, th: &Theme, status: &str) {
+    // OAuth fallback messages append the broker URL on a separate line. Keep
+    // it clickable so sign-in remains possible when automatic browser launch
+    // is unavailable.
+    let mut lines = status.lines();
+    if let Some(message) = lines.next() {
+        dim_label(ui, th, message);
+    }
+    for line in lines {
+        let url = line.trim();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            ui.horizontal_wrapped(|ui| {
+                ui.hyperlink_to("Open login link", url);
+                ui.label(egui::RichText::new(url).small());
+            });
+        } else if !url.is_empty() {
+            dim_label(ui, th, url);
+        }
+    }
+}
+
 pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ConnectAction {
     let mut action = ConnectAction::None;
     let sp = &th.spacing;
@@ -51,7 +72,7 @@ pub fn connect_screen(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Co
                 }
 
                 if !state.status_line.is_empty() && loading {
-                    dim_label(ui, th, &state.status_line);
+                    oauth_status(ui, th, &state.status_line);
                     ui.add_space(sp.sm);
                 }
 

@@ -2026,7 +2026,7 @@ impl SleekApp {
         }
         #[cfg(not(target_os = "android"))]
         {
-            self.state.status_line = "Browser opened for sign-in — look for the Chromium window (Alt+Tab if covered).".into();
+            self.state.status_line = "Browser opened for sign-in — look for the browser window (Alt+Tab if covered).".into();
             // Fullscreen Sleek sits above everything on Fluxbox/VNC; yield first.
             self.yield_to_oauth_browser(ctx);
         }
@@ -3057,15 +3057,10 @@ impl eframe::App for SleekApp {
                 )
                 .show_separator_line(false)
                 .show(ctx, |ui| {
-                    let panel_h = ui.available_height();
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(panel_h)
-                        .id_salt("chats_master_scroll")
-                        .show(ui, |ui| {
-                            let act = ui::chats_tab(ui, &th, &mut self.state);
-                            self.handle_chats_action(act);
-                        });
+                    // chats_tab keeps the join card pinned and scrolls only
+                    // the conversation list below it.
+                    let act = ui::chats_tab(ui, &th, &mut self.state, true);
+                    self.handle_chats_action(act);
                 });
         }
 
@@ -3107,6 +3102,14 @@ impl eframe::App for SleekApp {
                 }
             }
 
+            // Chats owns its own list scroll area so the join card remains
+            // pinned instead of moving with the outer page scroll.
+            if registered && self.state.tab == Tab::Chats {
+                let act = ui::chats_tab(ui, &th, &mut self.state, true);
+                self.handle_chats_action(act);
+                return;
+            }
+
             let panel_h = ui.available_height();
             ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -3119,10 +3122,9 @@ impl eframe::App for SleekApp {
                     // Route::Chat is rendered above without this outer scroll.
                     if registered {
                         match self.state.tab {
-                            Tab::Chats => {
-                                let act = ui::chats_tab(ui, &th, &mut self.state);
-                                self.handle_chats_action(act);
-                            }
+                            // Handled by the early return above (chats_tab has its own
+                            // scroll area); unreachable here whenever `registered`.
+                            Tab::Chats => {}
                             Tab::Discover => {
                                 match ui::discover_tab(ui, &th, &mut self.state) {
                                     DiscoverAction::None => {}
@@ -3164,7 +3166,19 @@ impl eframe::App for SleekApp {
                             ui.add_space(sp.xl * 2.0);
                             title(ui, &th, "Connecting");
                             ui.add_space(sp.md);
-                            dim_label(ui, &th, &self.state.status_line);
+                            let mut status_lines = self.state.status_line.lines();
+                            if let Some(message) = status_lines.next() {
+                                dim_label(ui, &th, message);
+                            }
+                            for line in status_lines {
+                                let url = line.trim();
+                                if url.starts_with("http://") || url.starts_with("https://") {
+                                    ui.hyperlink_to("Open login link", url);
+                                    ui.label(egui::RichText::new(url).small());
+                                } else if !url.is_empty() {
+                                    dim_label(ui, &th, url);
+                                }
+                            }
                             ui.add_space(sp.lg);
                             if button(ui, &th, "Cancel").clicked() {
                                 self.do_intentional_disconnect();

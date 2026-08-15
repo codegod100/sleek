@@ -12,11 +12,14 @@ pub enum ChatsAction {
     Join(String),
 }
 
-pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAction {
+pub fn chats_tab(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    pinned_join: bool,
+) -> ChatsAction {
     let mut action = ChatsAction::None;
     let sp = &th.spacing;
-    let p = &th.palette;
-
     // Quick join
     card(ui, th, |ui| {
         title_2(ui, th, "Join channel");
@@ -48,6 +51,25 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     });
     ui.add_space(sp.md);
 
+    if pinned_join {
+        // In the wide master panel, keep the join controls pinned and scroll
+        // only the conversation list. The narrow layout already has one
+        // outer scroll area, so do not nest another scrollbar there.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .id_salt("chats_conversation_scroll")
+            .show(ui, |ui| action = chats_list(ui, th, state));
+    } else {
+        action = chats_list(ui, th, state);
+    }
+
+    action
+}
+
+pub fn chats_list(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAction {
+    let mut action = ChatsAction::None;
+    let sp = &th.spacing;
+    let p = &th.palette;
     let conversations: Vec<(String, String, bool, u32, String, String, i64)> = state
         .sorted_conversations()
         .into_iter()
