@@ -43,6 +43,18 @@ wasmtime = { version = "29", default-features = false, features = [
 egui-winit = { path = "../third-party/egui-winit" }
 # GLES mediump → highp for font-atlas UVs (emilk/egui#6893). Drop on egui ≥ 0.32.
 egui_glow = { path = "../third-party/egui_glow" }
+# Upstream build.rs bakes an *absolute* env::current_dir()-based path into
+# generated include_bytes!() calls — fine under plain `cargo build` (one
+# persistent cwd for the whole build), breaks under buck2: the build
+# script and the crate's own compile step are separate, independently-
+# sandboxed actions, and remote execution tears down the build script's
+# cwd before the compile action (possibly on a different machine) reads
+# it — "No such file or directory" for every extension.xml. Patch swaps
+# the pre-resolved string for a `concat!(env!("CARGO_MANIFEST_DIR"), ...)`
+# literal in the *generated* source, so it's resolved fresh at whatever
+# action actually compiles khronos_api, using that action's own (always
+# correct) CARGO_MANIFEST_DIR instead of the build script's.
+khronos_api = { path = "../third-party/khronos_api" }
 # Pin rev (not floating main) — same as freeq Cargo.lock; main tip is 1.1.0 and breaks iroh 0.97.
 noq = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
 noq-proto = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }

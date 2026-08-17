@@ -917,6 +917,7 @@ PY
             openssh
             curl
             cacert
+            gnused
           ];
           rust = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
@@ -943,6 +944,12 @@ PY
                 # Faster linking for in-tree .cargo/config.toml (-fuse-ld=mold).
                 pkgs.mold
                 pkgs.starship
+                # third-party/BUCK's reindeer-vendored rust_library graph +
+                # toolchains/ (hermetic rustc/zig) — see reindeer.toml.
+                pkgs.buck2
+                # Desktop host build's dev-shell env (pixi.toml/pixi.lock) —
+                # see scripts/pixi-activate.sh.
+                pkgs.pixi
               ]
               ++ buildLibs
               ++ cliTools;

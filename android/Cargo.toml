@@ -245,6 +245,8 @@ scheme = "freeq"
 egui-winit = { path = "../third-party/egui-winit" }
 # GLES mediump → highp for font-atlas UVs (emilk/egui#6893). Drop on egui ≥ 0.32.
 egui_glow = { path = "../third-party/egui_glow" }
+# See host/Cargo.toml's patch comment — same reason, kept in sync.
+khronos_api = { path = "../third-party/khronos_api" }
 # Pin rev (not floating main) — same as freeq Cargo.lock; main tip is 1.1.0 and breaks iroh 0.97.
 noq = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
 noq-proto = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
