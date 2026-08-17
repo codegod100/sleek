@@ -3,15 +3,52 @@
 # enterShell. Sourced (not exec'd) by `pixi shell` / `pixi run`, so it must
 # only export vars, never `set -e` or otherwise take over the shell.
 
-# bindgen (v4l2r, etc.) needs the clang resource-dir headers alongside
-# libclang. The version subdir tracks the installed clang package, so
-# discover it instead of hardcoding (mirrors pkgs.llvmPackages.libclang.version
-# in devenv.nix).
+# bindgen (v4l2r, libspa-sys/cpal's pipewire feature, etc.) needs the clang
+# resource-dir headers alongside libclang. The version subdir tracks the
+# installed clang package, so discover it instead of hardcoding (mirrors
+# pkgs.llvmPackages.libclang.version in devenv.nix).
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
   clang_res_dir=$(find "${CONDA_PREFIX}/lib/clang" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
   if [[ -n "${clang_res_dir}" ]]; then
     export BINDGEN_EXTRA_CLANG_ARGS="-I${clang_res_dir}/include"
   fi
+fi
+
+# bindgen also needs the real libc headers (stdint.h etc.) from conda's own
+# bundled sysroot: it parses headers through libclang's low-level
+# parseTranslationUnit API, not the `clang`/`cc` *driver* (the CLI binary)
+# — and it's specifically the driver layer that does GCC-installation
+# autodetection and injects the matching --sysroot/-isystem flags for you.
+# libclang's API skips all of that, so without help bindgen can locate and
+# start parsing a header fine (its own -I is enough) but then fails deeper
+# in, unable to resolve basic libc types the header pulls in transitively
+# (uint32_t, uintptr_t, …) — confirmed hitting exactly that running
+# libspa-sys's build.rs under RBE. `clang -v -c` on the same header, same
+# env, resolves it via the driver's autodetection to this same
+# conda-bundled sysroot, so this is just closing that gap, not picking a
+# different toolchain.
+#
+# BINDGEN_EXTRA_CLANG_ARGS's own docs give `--sysroot=...` as the textbook
+# example for exactly this — but empirically (a throwaway build.rs,
+# isolating one variable at a time, ruling out stale-build-script-cache
+# false negatives with a clean rebuild each time) adding it there never
+# actually took effect; the parse kept failing exactly as if unset. CPATH
+# picks up the slack instead — but *only* the sysroot's plain glibc
+# usr/include, deliberately NOT joined with clang_res_dir above: CPATH is
+# consumed by *every* C frontend process-wide, including the real GCC
+# (x86_64-conda-linux-gnu-cc, see below) that actually compiles
+# ring/aws-lc-sys/etc.'s C code — tried including clang_res_dir here too
+# first, and GCC picked up *clang's* emmintrin.h ahead of its own matching
+# one, choking on a clang-only builtin name it doesn't know
+# (__builtin_ia32_psrldqi128_byteshift). Plain glibc headers are
+# compiler-neutral, so this half is safe to share; the compiler-specific
+# resource-dir half stays scoped to BINDGEN_EXTRA_CLANG_ARGS above.
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  sysroot_include="${CONDA_PREFIX}/x86_64-conda-linux-gnu/sysroot/usr/include"
+  if [[ -d "${sysroot_include}" ]]; then
+    export CPATH="${sysroot_include}${CPATH:+:${CPATH}}"
+  fi
+  unset sysroot_include
 fi
 
 # v4l2r's build.rs resolves `#include <linux/videodev2.h>` to *this* conda
@@ -54,6 +91,18 @@ if [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-c
   export AR="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-ar"
   export AR_x86_64_unknown_linux_gnu="${AR}"
 fi
+
+# ring's C (crypto/curve25519/*, BoringSSL-derived) predates clang making
+# -Wimplicit-function-declaration a hard *error* by default (was always
+# just a warning historically, flipped around clang 15) — ring's own
+# build.rs passes a fixed cc::Build flag list with no -Werror at all, so
+# this isn't ring opting into stricter checking, it's conda's clang 22
+# silently promoting a pre-existing (harmless in this code) warning to a
+# build-breaking error. Confirmed hitting this compiling
+# crypto/curve25519/curve25519_64_adx.c under RBE. cc-rs (the Rust `cc`
+# crate every C shim above uses) appends this to its own invocation
+# automatically — no per-crate opt-in needed.
+export CFLAGS="${CFLAGS:-}${CFLAGS:+ }-Wno-error=implicit-function-declaration"
 
 export SLEEK_BROWSER_PROFILE="${TMPDIR:-/tmp}/sleek-chromium"
 

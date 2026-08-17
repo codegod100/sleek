@@ -35,12 +35,12 @@ default = []
 #   default = ["video-previews"]
 
 [dependencies]
-vidya = { path = "../../vidya" }
+vidya = { path = "../patched-crates/vidya" }
 # Guest IRC + freeq events. Prefer aws-lc-rs to match moq-native / iroh
 # (aws-lc-sys is already required). Note: `ring` still builds via quinn /
 # rustls-webpki defaults — this only avoids enabling rustls' ring *provider*
 # from freeq-sdk on top of aws-lc.
-freeq-sdk = { path = "../../freeq/freeq-sdk", default-features = false, features = [
+freeq-sdk = { path = "../patched-crates/freeq/freeq-sdk", default-features = false, features = [
     "aws-lc-rs",
     "rustls-tls",
     "websocket",

@@ -32,6 +32,31 @@ buildscript_genrule = "buildscript_run"
 buckfile_imports = """
 load("@prelude//rust:cargo_buildscript.bzl", "buildscript_run")
 load("@prelude//rust:cargo_package.bzl", "cargo")
+
+# Hand-maintained (not reindeer output) — exposes the patched forks that
+# live inside this package (cpal/, egui-winit/, egui_glow/, khronos_api/ —
+# real reindeer-buckified git crates, can't move out: reindeer's own vendor
+# step re-checks-out cpal here, and its generated `cpal-0.18` rust_library
+# target's own srcs list is package-relative, so even other, unrelated
+# targets in this file fail to *parse* if the directory isn't here; see
+# reindeer.toml's comment on this block, and cargo.bzl's _srcs() for why
+# this exists at all: a plain glob() rooted in the *root* BUCK/cargo.bzl
+# package can't cross into this one, but a target label like this can).
+# glob() here is fine — same package as the files. Keep this list in sync
+# with cargo.bzl's cargo genrule srcs comment if another patched fork ever
+# needs to stay under third-party/ instead of moving to patched-crates/
+# (vidya/, freeq/ — plain filesystem path deps, not reindeer/Cargo.lock
+# tracked at all, so they live there instead).
+filegroup(
+    name = "patched-fork-srcs",
+    srcs = glob([
+        "cpal/**",
+        "egui-winit/**",
+        "egui_glow/**",
+        "khronos_api/**",
+    ]),
+    visibility = ["PUBLIC"],
+)
 """
 generated_file_header = """
 ##

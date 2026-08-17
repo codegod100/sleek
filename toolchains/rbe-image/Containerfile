@@ -1,0 +1,77 @@
+# RBE worker image for sleek's cargo.bzl-backed genrules (sleek-host,
+# sleek-android-lib) — these still shell out to `pixi run -- cargo build`,
+# unlike the hermetic reindeer-vendored third-party/ graph, which
+# self-provisions its own rustc/zig via buck2 http_archive and works fine
+# on BuildBuddy's plain stock image. This one extends that same stock
+# image with pixi + the Android NDK baked in, matching flake.nix's
+# devShell env exactly, so sleek-android-lib's `cargo build` has
+# everything it needs without depending on this machine's local pixi/NDK
+# install. See README.md in this directory for how to build + push it.
+FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
+
+# build-essential: pixi's own clang/libclang (bindgen's dependency, see
+# pixi.toml) still needs a real /usr/include with libc's own headers
+# (stdint.h etc.) present on the system to successfully parse C headers —
+# without it, any build.rs that runs bindgen (cpal's pipewire feature,
+# among others) fails with "unknown type name 'uint32_t'". Confirmed by
+# hitting exactly that error without this.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git unzip xz-utils bzip2 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,
+# v4l2-controls.h,v4l2-common.h,const.h} into conda's own bundled (even
+# staler) compat sysroot so v4l2r's bindgen-generated bindings have the
+# V4L2 stateless-codec control structs (VP9/AV1/H264 decode, …) its
+# src/controls/codec.rs unconditionally references — but that only helps
+# if the *system's own* copies have them. This base image's jammy
+# (22.04) linux-libc-dev is pinned to a 5.15 kernel UAPI baseline, which
+# predates those structs entirely — confirmed missing, and apt has no
+# newer linux-libc-dev for jammy (Ubuntu ties it to the release, not
+# HWE). Pull a current noble (24.04) linux-libc-dev .deb instead, purely
+# for its /usr/include/linux/*.h — a pinned build (not :latest-of-noble)
+# so this doesn't silently drift on a future rebuild; bump deliberately
+# if v4l2r ever needs something newer than this.
+RUN curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/l/linux/linux-libc-dev_6.8.0-139.139_amd64.deb" -o /tmp/linux-libc-dev.deb \
+    && dpkg -x /tmp/linux-libc-dev.deb /tmp/linux-libc-dev-extracted \
+    && cp -f /tmp/linux-libc-dev-extracted/usr/include/linux/videodev2.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/v4l2-controls.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/v4l2-common.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/const.h \
+             /usr/include/linux/ \
+    && rm -rf /tmp/linux-libc-dev.deb /tmp/linux-libc-dev-extracted
+
+# pixi — same install method as everywhere else in this repo (see
+# pixi-activate.sh's own comments); installs to /root/.pixi/bin.
+RUN curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/opt/pixi bash
+ENV PATH="/opt/pixi/bin:${PATH}"
+
+# Android NDK r29 — same version flake.nix's devShell pins
+# ($HOME/.local/share/android-ndk-r29), extracted to the same shape so
+# the exact same env vars work unmodified. Downloaded at image-build time
+# rather than checked in (~780MB).
+RUN curl -fsSL "https://dl.google.com/android/repository/android-ndk-r29-linux.zip" -o /tmp/android-ndk.zip \
+    && mkdir -p /opt/android \
+    && unzip -q /tmp/android-ndk.zip -d /opt/android \
+    && mv /opt/android/android-ndk-r29 /opt/android/ndk \
+    && rm /tmp/android-ndk.zip
+
+ENV ANDROID_NDK_HOME=/opt/android/ndk
+ENV ANDROID_NDK_ROOT=/opt/android/ndk
+ENV PATH="/opt/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+ENV CC_x86_64_linux_android=x86_64-linux-android28-clang
+ENV CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=x86_64-linux-android28-clang
+ENV AR_x86_64_linux_android=llvm-ar
+ENV CC_aarch64_linux_android=aarch64-linux-android28-clang
+ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android28-clang
+ENV AR_aarch64_linux_android=llvm-ar
+
+# Pre-warm the pixi env at image-build time (network access, but only
+# once here — not on every RE action) so `pixi run --` on an RE worker
+# doesn't need to solve/fetch conda-forge packages itself. Copies just
+# the manifest/lockfile, not the whole repo — this image is meant to be
+# reused across commits; the actual source comes from the RE action's
+# own inputs.
+COPY pixi.toml pixi.lock /tmp/sleek-pixi/
+RUN cd /tmp/sleek-pixi && pixi install --locked && rm -rf /tmp/sleek-pixi
