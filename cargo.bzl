@@ -86,6 +86,21 @@ def _srcs():
         "//third-party:patched-fork-srcs",
     ]
 
+# `//third-party:patched-fork-srcs` (see _srcs()) is a *target*, not a raw
+# glob-matched file — repo_relative_root's genrule staging only remaps raw
+# file srcs onto their real repo-relative path; a target dependency
+# instead lands at its own buck-out artifact path (confirmed by hand:
+# buck-out/.../third-party/__patched-fork-srcs__/patched-fork-srcs/cpal/...,
+# not third-party/cpal/...). So stage it ourselves via $(location) before
+# cargo ever runs. `-n` (no-clobber): locally repo_relative_root already
+# runs in the real repo root, where
+# third-party/{cpal,egui-winit,egui_glow,khronos_api} already exist for
+# real — this is a no-op there. Remotely third-party/ doesn't exist at all
+# yet (that's the whole bug this works around), so the copy is what
+# actually populates it. Shared by every cargo-backed genrule below since
+# they all build off the same [patch]-carrying Cargo.tomls.
+_STAGE_PATCHED_FORKS = 'mkdir -p third-party\ncp -rn "$(location //third-party:patched-fork-srcs)"/* third-party/\n'
+
 def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = None, default_outs = None, executable = False):
     """A genrule that shells out to `cargo build` (via `pixi run`) and copies its artifact(s) to $OUT.
 
@@ -106,20 +121,6 @@ def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = No
     build_cmd = "cargo build --manifest-path {} {}".format(manifest, cargo_args)
     log_path = manifest[:-len("Cargo.toml")] + "cargo-build.log"
 
-    # `//third-party:patched-fork-srcs` (see _srcs()) is a *target*, not a
-    # raw glob-matched file — repo_relative_root's genrule staging only
-    # remaps raw file srcs onto their real repo-relative path; a target
-    # dependency instead lands at its own buck-out artifact path
-    # (confirmed by hand: buck-out/.../third-party/__patched-fork-srcs__/
-    # patched-fork-srcs/cpal/..., not third-party/cpal/...). So stage it
-    # ourselves via $(location) before cargo ever runs. `-n` (no-clobber):
-    # locally repo_relative_root already runs in the real repo root, where
-    # third-party/{cpal,egui-winit,egui_glow,khronos_api} already exist for
-    # real — this is a no-op there. Remotely third-party/ doesn't exist at
-    # all yet (that's the whole bug this works around), so the copy is what
-    # actually populates it.
-    stage_patched_forks = 'mkdir -p third-party\ncp -rn "$(location //third-party:patched-fork-srcs)"/* third-party/\n'
-
     native.genrule(
         name = name,
         srcs = _srcs(),
@@ -133,7 +134,7 @@ def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = No
         # replaced with a bare "Result too large to display" — including
         # for the actual error, on failure. Confirmed hitting exactly that
         # trying to see why a remote sleek-android-lib build failed.
-        cmd = 'set -euo pipefail\n{}{} {} 2>&1 | tee "{}" | tail -c 200000\n{}'.format(stage_patched_forks, _ENTER, build_cmd, log_path, collect_cmd),
+        cmd = 'set -euo pipefail\n{}{} {} 2>&1 | tee "{}" | tail -c 200000\n{}'.format(_STAGE_PATCHED_FORKS, _ENTER, build_cmd, log_path, collect_cmd),
         # Real repo layout (not a symlinked sandbox): cargo/rustc need the
         # actual `.git`, `target/` incremental cache, and CARGO_HOME — and
         # `pixi run` needs to find pixi.toml from the real root. Meaningful
@@ -152,5 +153,99 @@ def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = No
         # gives build.rs (crates.io, git deps) network access instead.
         always_print_stderr = True,
         executable = executable,
+        visibility = ["PUBLIC"],
+    )
+
+def cargo_apk_genrule(name, manifest, package, target = "aarch64-linux-android"):
+    """A genrule that runs `cargo apk build --release` and produces a signed sleek.apk.
+
+    - manifest: path to android's Cargo.toml (e.g. "android/Cargo.toml").
+    - package: crate name to build (`-p <package>`) — cargo-apk rejects
+      multi-member workspaces without one selected.
+    - target: Android Rust target triple. Default aarch64-linux-android
+      (real phones); toolchains/rbe-image/Containerfile also provisions
+      an x86_64-linux-android linker (Waydroid/emulator) if ever needed.
+
+    Mirrors flake.nix's `sleek-android` derivation (`nix build .#android`)
+    step for step — same cargo-apk invocation, the same committed CI
+    keystore (android/ci.keystore — shared across builds so adb/phone
+    upgrades don't break with "App not installed", the way ephemeral keys
+    would), the same dex-injection script for SleekActivity (so `freeq://`
+    OAuth deep links work; cargo-apk alone only ships bare NativeActivity)
+    — just as a buck2 genrule (RBE-capable, see toolchains/rbe-image/) in
+    place of a Nix builder.
+    """
+    android_dir = manifest[:-len("Cargo.toml")]
+    log_path = android_dir + "cargo-apk-build.log"
+
+    # cargo-apk's --release needs [package.metadata.android.signing.release]
+    # in Cargo.toml, with an *absolute* keystore path — can't be a
+    # committed static value (repo checkout location isn't fixed: local
+    # dev, buck2's RBE execroot, etc. are all different absolute paths) —
+    # so inject it at build time instead, same as flake.nix's build does
+    # (shared script, see its own comment for why it's not just inlined
+    # Python here).
+    # $PWD (bash builtin), not $(pwd) — buck2's genrule `cmd` scans for
+    # $(...) anywhere in the string and tries to resolve it as one of
+    # *its own* macros ($(location ...), $(exe ...), …); an unrecognized
+    # one like $(pwd) or $(find ...) below isn't silently passed through
+    # to the shell, it errors ("no mapping for pwd") — confirmed hitting
+    # exactly that earlier standing up a throwaway diagnostic genrule.
+    inject_signing = 'python3 {}scripts/inject-release-signing.py {} "$PWD/{}ci.keystore"\n'.format(android_dir, manifest, android_dir)
+
+    # NOT --manifest-path: cargo-apk's own --manifest-path mode rejects
+    # android/Cargo.toml's self-referencing `[workspace] members = ["."]`
+    # (added specifically *for* cargo-apk — see that file's own comment)
+    # with "Did not expect a [workspace]" — a real quirk/limitation of
+    # this cargo-apk version, confirmed hitting it. flake.nix's build
+    # sidesteps this the same way: `cd` into android/ first, invoke
+    # plain `cargo apk build` there. Mirrored via a `(cd ... && ...)`
+    # subshell below so cwd reverts for the rest of this script
+    # afterwards (find_apk/inject_dex stay repo-root-relative).
+    build_cmd = "cargo apk build --release --target {} -p {} --lib".format(target, package)
+
+    # cargo-apk's own output path has shifted across versions (bare
+    # target/sleek.apk vs target/release/apk/sleek.apk) — flake.nix's
+    # derivation already hedges across both known shapes plus a fallback
+    # find(); mirrored verbatim rather than assuming just one.
+    find_apk = (
+        'apk=""\n' +
+        'for cand in "{ad}target/release/apk/{pkg}.apk" "{ad}target/{pkg}.apk" "{ad}target/release/apk/{pkg}-release.apk"; do\n'.format(ad = android_dir, pkg = package) +
+        '  if [ -f "$cand" ]; then apk="$cand"; break; fi\n' +
+        "done\n" +
+        'if [ -z "$apk" ]; then\n' +
+        # Backticks, not $(find ...) — same buck2 macro-collision reason
+        # as $PWD above.
+        '  apk="`find {}target -type f -path "*/release/apk/*.apk" ! -name "*-unaligned.apk" 2>/dev/null | head -1 || true`"\n'.format(android_dir) +
+        "fi\n" +
+        '[ -n "$apk" ] && [ -f "$apk" ] || { echo "APK not found under ' + android_dir + 'target" >&2; exit 1; }\n'
+    )
+
+    inject_dex = (
+        'export SLEEK_KEYSTORE="$PWD/{ad}ci.keystore"\n'.format(ad = android_dir) +
+        "export SLEEK_KEYSTORE_PASSWORD=android\n" +
+        "export SLEEK_KEY_ALIAS=androiddebugkey\n" +
+        "export SLEEK_KEY_PASSWORD=android\n" +
+        'bash {ad}scripts/inject-activity-dex.sh "$apk" {ad}src/assets/sleek_activity.dex\n'.format(ad = android_dir) +
+        'cp "$apk" "$OUT"\n'
+    )
+
+    native.genrule(
+        name = name,
+        srcs = _srcs(),
+        out = "sleek.apk",
+        cmd = 'set -euo pipefail\n{stage}{sign}(cd {ad} && {enter} {build}) 2>&1 | tee "{log}" | tail -c 200000\n{find_apk}{inject_dex}'.format(
+            stage = _STAGE_PATCHED_FORKS,
+            sign = inject_signing,
+            ad = android_dir,
+            enter = _ENTER,
+            build = build_cmd,
+            log = log_path,
+            find_apk = find_apk,
+            inject_dex = inject_dex,
+        ),
+        # Same rationale as cargo_genrule — see its own comment.
+        repo_relative_root = True,
+        always_print_stderr = True,
         visibility = ["PUBLIC"],
     )

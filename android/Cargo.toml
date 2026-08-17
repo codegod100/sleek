@@ -6,12 +6,20 @@ description = "Sleek — mobile freeq client with Vidya (egui)"
 license = "MIT"
 publish = false
 
-# Own workspace root so cargo-apk builds in-tree (mirrors vidya/android-demo).
-# members = ["."] is required by current cargo-apk / cargo_toml (empty [workspace] errors).
-[workspace]
-members = ["."]
+# No [workspace] section (used to have `members = ["."]` — a self-
+# referencing single-member workspace, once needed by an older cargo-apk/
+# cargo_toml that errored on an empty [workspace]). The *current*
+# cargo-apk (0.10.0, crates.io's latest and unchanged since 2023 — its
+# dep cargo-subcommand 0.12.0) has the opposite problem: it re-parses
+# each declared member's own manifest and rejects any member that itself
+# contains a `[workspace]` table — which a self-referencing member=["."]
+# always does, since it's the same file. Confirmed hitting "Did not
+# expect a `[workspace]`" with the old section present. A plain manifest
+# with no [workspace] at all sidesteps that whole codepath (cargo-
+# subcommand's map_nonvirtual_package, not its buggy members() scan) and
+# is otherwise identical for a real cargo build (no ambient parent
+# workspace exists to accidentally sweep this crate into either).
 
-# Dev iteration: default rustc debuginfo=2 makes `sleek` ~800MB and slow to link.
 # Line tables on workspace crates; no debuginfo on deps (biggest link/disk win).
 # Full DWARF: CARGO_PROFILE_DEV_DEBUG=2 cargo build …
 [profile.dev]

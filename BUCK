@@ -1,4 +1,4 @@
-load(":cargo.bzl", "cargo_genrule")
+load(":cargo.bzl", "cargo_apk_genrule", "cargo_genrule")
 
 # `buck2 build //:sleek-host` / `buck2 run //:sleek-host`
 # Equivalent to `just host` (desktop egui/eframe window), minus the DISPLAY /
@@ -14,8 +14,9 @@ cargo_genrule(
 
 # `buck2 build //:sleek-android-lib`
 # Equivalent to `just lib` — the android/ package built as a library for the
-# desktop target (sanity-check build; NOT the cross-compiled aarch64 APK,
-# which still goes through `just android` / cargo-apk + the NDK via nix).
+# desktop target (sanity-check build; NOT the cross-compiled aarch64 APK —
+# see //:sleek-android-apk below, or `just android` / cargo-apk + the NDK
+# via nix, for that).
 cargo_genrule(
     name = "sleek-android-lib",
     manifest = "android/Cargo.toml",
@@ -30,4 +31,16 @@ cp android/target/release/libsleek.rlib "$OUT/libsleek.rlib"
         "so": ["libsleek.so"],
     },
     default_outs = ["libsleek.so"],
+)
+
+# `buck2 build //:sleek-android-apk`
+# The real, installable aarch64 APK — buck2/RBE equivalent of `nix build
+# .#android` (see flake.nix's sleek-android derivation, which this mirrors
+# step for step). Output is a single signed sleek.apk:
+#   buck2 build --show-output //:sleek-android-apk
+#   adb install -r buck-out/.../sleek.apk
+cargo_apk_genrule(
+    name = "sleek-android-apk",
+    manifest = "android/Cargo.toml",
+    package = "sleek",
 )

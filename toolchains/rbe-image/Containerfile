@@ -18,6 +18,7 @@ FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
+    openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,
@@ -67,11 +68,40 @@ ENV CC_aarch64_linux_android=aarch64-linux-android28-clang
 ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android28-clang
 ENV AR_aarch64_linux_android=llvm-ar
 
+# Android SDK cmdline-tools + platform 34 + build-tools 34.0.0 — same
+# versions flake.nix's androidComposition pins (platformVersions = ["34"],
+# buildToolsVersions = ["34.0.0"]) — for `cargo apk build`'s packaging
+# step (aapt2, apksigner, zipalign), which the NDK alone doesn't provide;
+# `sdkmanager --licenses` piped through `yes` accepts every license
+# non-interactively (no need to track specific license-hash files).
+RUN curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip \
+    && mkdir -p /opt/android/sdk/cmdline-tools \
+    && unzip -q /tmp/cmdline-tools.zip -d /opt/android/sdk/cmdline-tools \
+    && mv /opt/android/sdk/cmdline-tools/cmdline-tools /opt/android/sdk/cmdline-tools/latest \
+    && rm /tmp/cmdline-tools.zip \
+    && yes | /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk --licenses > /dev/null \
+    && /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk \
+       "platforms;android-34" "build-tools;34.0.0"
+
+ENV ANDROID_HOME=/opt/android/sdk
+ENV ANDROID_SDK_ROOT=/opt/android/sdk
+ENV PATH="/opt/android/sdk/build-tools/34.0.0:${PATH}"
+
+ENV PATH="/opt/cargo-apk/bin:${PATH}"
+
 # Pre-warm the pixi env at image-build time (network access, but only
 # once here — not on every RE action) so `pixi run --` on an RE worker
 # doesn't need to solve/fetch conda-forge packages itself. Copies just
 # the manifest/lockfile, not the whole repo — this image is meant to be
 # reused across commits; the actual source comes from the RE action's
 # own inputs.
+#
+# Also builds+installs cargo-apk here, reusing this same prewarmed env
+# (not a separate `pixi run` elsewhere) — not on conda-forge, so it's
+# built from source via pixi's own cargo, same rustc it'll later invoke.
+# Installed to a dedicated root (not pixi's own bin dir) so it survives
+# independent of whatever pixi does with its own env.
 COPY pixi.toml pixi.lock /tmp/sleek-pixi/
-RUN cd /tmp/sleek-pixi && pixi install --locked && rm -rf /tmp/sleek-pixi
+RUN cd /tmp/sleek-pixi && pixi install --locked \
+    && pixi run -- cargo install --root /opt/cargo-apk cargo-apk \
+    && rm -rf /tmp/sleek-pixi
