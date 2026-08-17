@@ -2,8 +2,12 @@
 name = "sleek"
 description = "Sleek — mobile freeq client (Vidya + freeq-sdk)"
 channels = ["conda-forge"]
-# Android/Waydroid/Flatpak packaging still goes through flake.nix — this
-# manifest only covers the dev shell + desktop host build (see README).
+# Waydroid/Flatpak packaging still goes through flake.nix — this manifest
+# covers the dev shell, the desktop host build, and (via cargo-apk +
+# rust-std-aarch64-linux-android below) the real Android APK build, for
+# buck2's RBE-capable //:sleek-android-apk (see cargo.bzl, BUCK) — a
+# from-scratch reimplementation of flake.nix's `nix build .#android`
+# derivation on this toolchain instead, not a wrapper around it.
 platforms = ["linux-64", "linux-aarch64"]
 
 [dependencies]
@@ -20,6 +24,11 @@ mold = "*"
 # hitting this under RBE; 17 is a well-established, mature LLVM release.
 libclang = "17.*"
 clang = "17.*"
+# aarch64-linux-android — real Android phones (arm64-v8a). Without this,
+# rustc has no core/std for that target at all: "can't find crate for
+# `core` ... the aarch64-linux-android target may not be installed" —
+# conda-forge's plain `rust` package only ships the host target.
+rust-std-aarch64-linux-android = "*"
 pipewire = "*"
 alsa-lib = "*"
 xorg-libx11 = "*"

@@ -474,28 +474,9 @@
               pushd sleek/android >/dev/null
               # cargo-apk rejects multi-member workspaces unless a package is selected (-p).
               # --release: optimized, no debuginfo — APK stays installable size.
-              # Inject release signing before [patch] (path is absolute; not committed).
-              if ! grep -q 'signing.release' Cargo.toml; then
-                python3 - "$keystore" <<'PY'
-import pathlib, sys
-keystore = sys.argv[1]
-path = pathlib.Path("Cargo.toml")
-text = path.read_text()
-block = f"""
-[package.metadata.android.signing.release]
-path = "{keystore}"
-keystore_password = "android"
-key_alias = "androiddebugkey"
-key_password = "android"
-"""
-marker = "[patch.crates-io]"
-if marker in text:
-    text = text.replace(marker, block + "\n" + marker, 1)
-else:
-    text = text + block
-path.write_text(text)
-PY
-              fi
+              # Inject release signing before [patch] (path is absolute; not committed) —
+              # shared with buck2's cargo_apk_genrule (cargo.bzl), see that script's comment.
+              python3 scripts/inject-release-signing.py Cargo.toml "$keystore"
               cargo apk build --release --target ${androidTarget} -p sleek --lib
 
               # Inject SleekActivity as classes.dex so freeq:// OAuth deep links work.
