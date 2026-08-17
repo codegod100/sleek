@@ -4,51 +4,59 @@
 # only export vars, never `set -e` or otherwise take over the shell.
 
 # bindgen (v4l2r, libspa-sys/cpal's pipewire feature, etc.) needs the clang
-# resource-dir headers alongside libclang. The version subdir tracks the
-# installed clang package, so discover it instead of hardcoding (mirrors
-# pkgs.llvmPackages.libclang.version in devenv.nix).
+# resource-dir headers alongside libclang, *and* the real libc headers
+# (stdint.h etc.) from conda's own bundled sysroot: it parses headers
+# through libclang's low-level parseTranslationUnit API, not the `clang`/
+# `cc` *driver* (the CLI binary) — and it's specifically the driver layer
+# that does GCC-installation autodetection and injects the matching
+# --sysroot/-isystem flags for you. libclang's API skips all of that, so
+# without help bindgen can locate and start parsing a header fine (its own
+# -I is enough) but then fails deeper in, unable to resolve basic libc
+# types the header pulls in transitively (uint32_t, uintptr_t, …) —
+# confirmed hitting exactly that running libspa-sys's build.rs under RBE.
+# `clang -v -c` on the same header, same env, resolves it via the driver's
+# autodetection to this same conda-bundled sysroot, so this is just
+# closing that gap, not picking a different toolchain. The version subdir
+# tracks the installed clang package, so discover it instead of
+# hardcoding (mirrors pkgs.llvmPackages.libclang.version in devenv.nix).
+#
+# `-isystem <sysroot>/usr/include`, not `--sysroot=<sysroot>` (the literal
+# example BINDGEN_EXTRA_CLANG_ARGS's own docs give for this): --sysroot is
+# a *driver*-level flag that expands into several different internal
+# search paths depending on target/multilib — exactly the translation
+# libclang's raw parse API skips doing, so it never actually took effect
+# passed that way (confirmed: a throwaway build.rs, isolating one
+# variable at a time with a clean rebuild every time to rule out stale-
+# build-script-cache false negatives, kept failing exactly as if unset).
+# -isystem is a single, unambiguous "add this dir to the system include
+# path" instruction with no driver-side indirection required — confirmed
+# this one actually works.
+#
+# And NOT CPATH (tried that too, in between): CPATH is consumed by
+# *every* C frontend process-wide, including the real GCC
+# (x86_64-conda-linux-gnu-cc, see below) that actually compiles
+# ring/aws-lc-sys/etc.'s C code for the *host* target, and — worse — also
+# the NDK's own clang compiling for aarch64-linux-android when this same
+# pixi env drives `cargo apk build` (see cargo.bzl's cargo_apk_genrule):
+# GCC picked up *clang's* emmintrin.h ahead of its own matching one and
+# choked on a clang-only builtin name it doesn't know
+# (__builtin_ia32_psrldqi128_byteshift); the NDK's clang, cross-compiling,
+# picked up *this x86_64 host sysroot's* glibc and failed even earlier
+# looking for a 32-bit multilib stub header
+# (gnu/stubs.h → gnu/stubs-32.h: file not found) that doesn't exist here
+# and has nothing to do with an aarch64/bionic target anyway. Both
+# confirmed live. BINDGEN_EXTRA_CLANG_ARGS is the properly *scoped*
+# mechanism: it only ever reaches bindgen's own libclang parse calls,
+# regardless of how many other different-target compiler invocations
+# share this same activated env.
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
   clang_res_dir=$(find "${CONDA_PREFIX}/lib/clang" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
-  if [[ -n "${clang_res_dir}" ]]; then
-    export BINDGEN_EXTRA_CLANG_ARGS="-I${clang_res_dir}/include"
-  fi
-fi
-
-# bindgen also needs the real libc headers (stdint.h etc.) from conda's own
-# bundled sysroot: it parses headers through libclang's low-level
-# parseTranslationUnit API, not the `clang`/`cc` *driver* (the CLI binary)
-# — and it's specifically the driver layer that does GCC-installation
-# autodetection and injects the matching --sysroot/-isystem flags for you.
-# libclang's API skips all of that, so without help bindgen can locate and
-# start parsing a header fine (its own -I is enough) but then fails deeper
-# in, unable to resolve basic libc types the header pulls in transitively
-# (uint32_t, uintptr_t, …) — confirmed hitting exactly that running
-# libspa-sys's build.rs under RBE. `clang -v -c` on the same header, same
-# env, resolves it via the driver's autodetection to this same
-# conda-bundled sysroot, so this is just closing that gap, not picking a
-# different toolchain.
-#
-# BINDGEN_EXTRA_CLANG_ARGS's own docs give `--sysroot=...` as the textbook
-# example for exactly this — but empirically (a throwaway build.rs,
-# isolating one variable at a time, ruling out stale-build-script-cache
-# false negatives with a clean rebuild each time) adding it there never
-# actually took effect; the parse kept failing exactly as if unset. CPATH
-# picks up the slack instead — but *only* the sysroot's plain glibc
-# usr/include, deliberately NOT joined with clang_res_dir above: CPATH is
-# consumed by *every* C frontend process-wide, including the real GCC
-# (x86_64-conda-linux-gnu-cc, see below) that actually compiles
-# ring/aws-lc-sys/etc.'s C code — tried including clang_res_dir here too
-# first, and GCC picked up *clang's* emmintrin.h ahead of its own matching
-# one, choking on a clang-only builtin name it doesn't know
-# (__builtin_ia32_psrldqi128_byteshift). Plain glibc headers are
-# compiler-neutral, so this half is safe to share; the compiler-specific
-# resource-dir half stays scoped to BINDGEN_EXTRA_CLANG_ARGS above.
-if [[ -n "${CONDA_PREFIX:-}" ]]; then
   sysroot_include="${CONDA_PREFIX}/x86_64-conda-linux-gnu/sysroot/usr/include"
-  if [[ -d "${sysroot_include}" ]]; then
-    export CPATH="${sysroot_include}${CPATH:+:${CPATH}}"
-  fi
-  unset sysroot_include
+  args=""
+  [[ -n "${clang_res_dir}" ]] && args="-I${clang_res_dir}/include"
+  [[ -d "${sysroot_include}" ]] && args="${args}${args:+ }-isystem ${sysroot_include}"
+  [[ -n "${args}" ]] && export BINDGEN_EXTRA_CLANG_ARGS="${args}"
+  unset clang_res_dir sysroot_include args
 fi
 
 # v4l2r's build.rs resolves `#include <linux/videodev2.h>` to *this* conda
