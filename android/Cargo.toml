@@ -133,7 +133,7 @@ iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc53
 # Enable cpal's native PipeWire host (feature-unified into moq-media's cpal).
 # Without this we only see ALSA PCMs ("pipewire", "sysdefault") and cannot pick
 # the real OS sources the browser uses (e.g. "EMEET SmartCam C960 Mono").
-cpal = { path = "../vendor/cpal", features = ["pipewire"] }
+cpal = { path = "../third-party/cpal", features = ["pipewire"] }
 # V4L2 diagnostics + fallback capture path (probe example, loopback workaround).
 v4l2r = "0.0.7"
 libc = "0.2"
@@ -144,7 +144,7 @@ eframe = { version = "0.31", default-features = false, features = [
     "glow",
     "android-native-activity",
 ] }
-egui-winit = { path = "../vendor/egui-winit", default-features = false, features = [
+egui-winit = { path = "../third-party/egui-winit", default-features = false, features = [
     "android-native-activity",
 ] }
 android_logger = "0.14"
@@ -242,9 +242,9 @@ scheme = "freeq"
 # (so compose-bar image paste can run). Upstream still swallows V on image-only paste.
 # iroh-live needs unreleased iroh 0.97 (same pins as freeq workspace).
 [patch.crates-io]
-egui-winit = { path = "../vendor/egui-winit" }
+egui-winit = { path = "../third-party/egui-winit" }
 # GLES mediump → highp for font-atlas UVs (emilk/egui#6893). Drop on egui ≥ 0.32.
-egui_glow = { path = "../vendor/egui_glow" }
+egui_glow = { path = "../third-party/egui_glow" }
 # Pin rev (not floating main) — same as freeq Cargo.lock; main tip is 1.1.0 and breaks iroh 0.97.
 noq = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
 noq-proto = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
@@ -262,4 +262,4 @@ web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "
 # Cargo.lock cannot pick a master tip that dropped StreamError / Device::name().
 # Same rev freeq locks: 63ea9fffbd3b15af0180f0800a61a3c4fec9b88a
 [patch."https://github.com/RustAudio/cpal.git"]
-cpal = { path = "../vendor/cpal" }
+cpal = { path = "../third-party/cpal" }

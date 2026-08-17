@@ -1,0 +1,45 @@
+[workspace]
+name = "sleek"
+description = "Sleek — mobile freeq client (Vidya + freeq-sdk)"
+channels = ["conda-forge"]
+# Android/Waydroid/Flatpak packaging still goes through flake.nix — this
+# manifest only covers the dev shell + desktop host build (see README).
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+rust = "*"
+just = "*"
+pkg-config = "*"
+openssl = "*"
+mold = "*"
+libclang = "*"
+clang = "*"
+pipewire = "*"
+alsa-lib = "*"
+xorg-libx11 = "*"
+libxkbcommon = "*"
+libgl-devel = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxrandr = "*"
+git = "*"
+curl = "*"
+ca-certificates = "*"
+
+[activation.env]
+OPENSSL_NO_VENDOR = "1"
+SLEEK_LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+# egui/winit + cpal/pipewire runtime libs live in the pixi env's own prefix
+# (unlike Nix, this one prefix covers all of them — no makeLibraryPath list).
+SLEEK_LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
+
+[activation]
+# clang's resource-dir version changes with the package; discover it instead
+# of hardcoding, same as devenv.nix does via pkgs.llvmPackages.libclang.version.
+scripts = ["scripts/pixi-activate.sh"]
+
+[tasks]
+# Desktop window (see justfile `host` for the fuller DISPLAY/libclang guard).
+host = "just host"
+lib = "cargo build --manifest-path android/Cargo.toml --lib"

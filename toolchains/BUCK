@@ -1,0 +1,67 @@
+# genrule toolchain: the cargo-backed targets (cargo.bzl) still need this —
+# host/ and android/ themselves aren't buckified yet, so they still shell
+# out to pixi's own cargo/rustc directly; only the native rust_library/
+# rust_binary graph under third-party/ (reindeer-vendored) uses the
+# hermetic toolchains below.
+#
+# rust + cxx toolchains: buck2-fetched and pinned, no pixi/system deps —
+# see rust_dist.bzl for the rustc/rust-std/clippy sysroot merge, and
+# @prelude//toolchains/cxx/zig for the zig-cc-based C/C++ toolchain (zig
+# bundles its own libc for a chosen glibc version, picked below to match
+# what conda's compiler packages targeted — see scripts/pixi-activate.sh's
+# __isoc23_sscanf comment for why that pin matters — and its own linker,
+# replacing pixi's mold).
+load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
+load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
+load("@prelude//toolchains/cxx/zig:defs.bzl", "download_zig_distribution")
+load(":cxx_zig_toolchain.bzl", "cxx_zig_toolchain")
+load(":rust.bzl", "hermetic_rust_toolchain")
+load(":rust_dist.bzl", "rust_dist_sysroot")
+
+system_genrule_toolchain(
+    name = "genrule",
+    visibility = ["PUBLIC"],
+)
+
+# cxx_zig_toolchain.bzl's default for its internal `_target_filter` attr
+# needs a real target label to reference, not just a bare package-relative
+# path (that's only coercible from within a BUCK file, not a .bzl module).
+export_file(
+    name = "zig_target_filter.sh",
+    visibility = [],
+)
+
+rust_dist_sysroot(
+    name = "rust-sysroot",
+    visibility = [],
+)
+
+hermetic_rust_toolchain(
+    name = "rust",
+    sysroot = ":rust-sysroot",
+    visibility = ["PUBLIC"],
+)
+
+# rust rules' internal tooling (transitive_dependency_symlinks, etc.) needs
+# this — whatever python3 is on PATH is fine, it's only used for small
+# build-time helper scripts, not part of the actual toolchain output.
+system_python_bootstrap_toolchain(
+    name = "python_bootstrap",
+    visibility = ["PUBLIC"],
+)
+
+download_zig_distribution(
+    name = "zig-dist",
+    version = "0.14.0",
+)
+
+cxx_zig_toolchain(
+    name = "cxx",
+    distribution = ":zig-dist",
+    # Matches conda-forge's cross-compiler packages' bundled glibc (2.28) —
+    # zig statically bundles glibc-version-specific compat shims per
+    # target, so this is the same trick conda-forge's compiler packages
+    # use, just buck2-fetched instead of pixi-installed.
+    target = "x86_64-linux-gnu.2.28",
+    visibility = ["PUBLIC"],
+)

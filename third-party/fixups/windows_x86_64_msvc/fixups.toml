@@ -1,0 +1,2 @@
+# Windows/macOS-only — never selected on our linux-x86_64 target.
+buildscript.run = false

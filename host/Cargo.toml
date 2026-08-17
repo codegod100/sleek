@@ -40,9 +40,9 @@ wasmtime = { version = "29", default-features = false, features = [
 
 # Same patches as android/ (host is its own workspace root).
 [patch.crates-io]
-egui-winit = { path = "../vendor/egui-winit" }
+egui-winit = { path = "../third-party/egui-winit" }
 # GLES mediump → highp for font-atlas UVs (emilk/egui#6893). Drop on egui ≥ 0.32.
-egui_glow = { path = "../vendor/egui_glow" }
+egui_glow = { path = "../third-party/egui_glow" }
 # Pin rev (not floating main) — same as freeq Cargo.lock; main tip is 1.1.0 and breaks iroh 0.97.
 noq = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
 noq-proto = { git = "https://github.com/n0-computer/noq", rev = "ab042ea7e3f7bae1e43eaba2ac9dba47ddb52e69" }
@@ -60,8 +60,8 @@ web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "
 # Cargo.lock cannot pick a master tip that dropped StreamError / Device::name().
 # Same rev freeq locks: 63ea9fffbd3b15af0180f0800a61a3c4fec9b88a
 [patch."https://github.com/RustAudio/cpal.git"]
-cpal = { path = "../vendor/cpal" }
+cpal = { path = "../third-party/cpal" }
 
 # See android/Cargo.toml — feature-unify native PipeWire host for moq-media audio.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-cpal = { path = "../vendor/cpal", features = ["pipewire"] }
+cpal = { path = "../third-party/cpal", features = ["pipewire"] }

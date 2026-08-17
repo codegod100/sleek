@@ -30,12 +30,27 @@ Sleek on Waydroid (chat + in-call video):
 
 ## Run
 
+Dev shell + desktop host build work via either **pixi** or **Nix** — pick one.
+Android/Waydroid/Flatpak packaging, Buck2, and Cachix pushes below are still
+Nix-only (`flake.nix`); `pixi.toml` only replaces `devenv.nix`'s job.
+
 ```bash
+# pixi (conda-forge toolchain — no /nix/store, works on any Linux box):
+pixi install        # once, materializes .pixi/envs/default from pixi.lock
+pixi shell           # or: pixi run <task>
+just host            # desktop window (cargo run) — same recipe either shell
+just lib             # build android package as rlib (desktop target)
+```
+
+```bash
+just host          # desktop window — buck2 build + run (see BUCK, cargo.bzl)
+just lib           # build android package as rlib (desktop target, via buck2)
+just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
+# `host` / `lib` re-enter the flake shell themselves — nix develop below is
+# only needed for recipes that still call cargo directly (gleam-slash) or
+# for an interactive shell:
 nix develop        # or: direnv allow  (after .envrc)
 # or: ./scripts/enter
-just host          # desktop window (cargo run)
-just lib           # build android package as rlib (desktop target)
-just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
 
 # Or via the flake:
 nix run            # flake devShell + just host --release (needs sibling vidya/freeq)
@@ -69,6 +84,19 @@ just push ./result-android
 just flatpak                   # → result-flatpak/*.flatpak
 nix build .#flatpak
 # Install: flatpak install --user ./result-flatpak/*.flatpak
+
+# `just host` / `just lib` are buck2 under the hood; the raw targets also
+# work directly (e.g. for `--show-output`, CI compile-checks with no DISPLAY):
+buck2 build //:sleek-host          # → buck-out/…/sleek       (build only, no run)
+buck2 build //:sleek-android-lib   # → buck-out/…/libsleek.so
+buck2 run //:sleek-host            # same as `just host` minus the DISPLAY/VNC setup
+# BuildBuddy remote caching is on by default (shares cargo's output across
+# machines/CI when inputs match — see .buckconfig). Needs an API key:
+export BUILDBUDDY_API_KEY=…   # org key from https://app.buildbuddy.io/
+# No BuildBuddy account? Every build hard-fails without a key — opt out:
+cp .buckconfig.local.no-buildbuddy-example .buckconfig.local
+# Verbose by default (buck2 -v=2,stderr,full_failed_command); override:
+BUCK_VERBOSITY=1 just host
 ```
 
 ### CI artifacts

@@ -10,3 +10,11 @@ result-*
 # Staging tree used by scripts/sync-flake-path-deps.sh
 /.deps-sync/
 /host/target/
+/buck-out/
+/host/cargo-build.log
+/android/cargo-build.log
+/.buckconfig.local
+# pixi dev-shell env (pixi.toml) — reproduced from pixi.lock, not committed
+.pixi/
+# devenv's local nix-eval cache/state (devenv.nix) — same role as .direnv/
+.devenv/
