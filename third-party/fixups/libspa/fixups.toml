@@ -1,1 +1,7 @@
-buildscript.run = true
+# libspa-sys/libspa/pipewire-sys's build.rs use the `system-deps` crate
+# (built on pkg_config), same PKG_CONFIG/PKG_CONFIG_PATH env vars as
+# alsa-sys. See toolchains/BUCK's `pipewire`/`pkgconfig` conda_pkg targets
+# — a single pipewire conda package bundles both libpipewire-0.3.pc and
+# libspa-0.2.pc (verified: no separate libspa conda package exists).
+[buildscript.run]
+env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:pipewire)/lib/pkgconfig" }

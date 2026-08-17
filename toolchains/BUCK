@@ -14,6 +14,7 @@
 load("@prelude//toolchains:genrule.bzl", "system_genrule_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
 load("@prelude//toolchains/cxx/zig:defs.bzl", "download_zig_distribution")
+load(":conda_pkg.bzl", "conda_pkg")
 load(":cxx_zig_toolchain.bzl", "cxx_zig_toolchain")
 load(":rust.bzl", "hermetic_rust_toolchain")
 load(":rust_dist.bzl", "rust_dist_sysroot")
@@ -63,5 +64,89 @@ cxx_zig_toolchain(
     # target, so this is the same trick conda-forge's compiler packages
     # use, just buck2-fetched instead of pixi-installed.
     target = "x86_64-linux-gnu.2.28",
+    visibility = ["PUBLIC"],
+)
+
+# Native libs for -sys crates whose build.rs shells out to pkg-config
+# (alsa-sys, libspa-sys, pipewire-sys) — same conda-forge packages pixi.lock
+# already pins (see pixi.lock for the exact URLs/versions), just
+# buck2-fetched instead of pixi-installed. See conda_pkg.bzl for the
+# .conda unpacking + .pc placeholder-prefix rewrite.
+conda_pkg(
+    name = "alsa-lib",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/alsa-lib-1.2.16.1-hb03c661_0.conda",
+    sha256 = "cf93ca0f1f107e95a35969a4622684e08fcb8cf37f8cf4a1e9e424828386c921",
+    visibility = ["PUBLIC"],
+)
+
+# Bundles both libpipewire-0.3.pc and libspa-0.2.pc (libspa-sys needs the
+# latter) plus spa-0.2 headers — verified no separate libspa conda package
+# exists; pipewire's own package carries it all.
+conda_pkg(
+    name = "pipewire",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/pipewire-1.6.8-h9c4946d_0.conda",
+    sha256 = "280bee17c37030b0d694a41cc33e3ff43c5ddece750f16f89970b87ee1d0f227",
+    visibility = ["PUBLIC"],
+)
+
+# `pkg-config` itself — none of the buildscript_run actions have it on
+# PATH otherwise. conda's own bin/pkg-config is an activation-aware bash
+# wrapper around bin/pkg-config.bin that assembles PKG_CONFIG_LIBDIR from
+# ${CC} -print-sysroot and friends; we don't need any of that; the plain
+# ELF binary works standalone given a real PKG_CONFIG_PATH (see the
+# fixups.toml files under third-party/fixups/*-sys for how it's wired in).
+conda_pkg(
+    name = "pkgconfig",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda",
+    sha256 = "ff8d0023722ef5600850074a9bbf418be4d2ec78edbf4d5db45d9f0331f248e4",
+    visibility = ["PUBLIC"],
+)
+
+# libclang for bindgen (libspa-sys/pipewire-sys's build.rs). `libclang` is a
+# thin meta-package (just a symlink); the real payload is split across
+# libclang13 (libclang.so.13, matches clang-sys's `libclang.so.*` probe
+# pattern directly, no rename needed) and libllvm22 (libclang's own
+# libLLVM.so.22.1 dependency) — verified via ldd that every *other*
+# transitive dep of both (libstdc++, libz, libzstd, libxml2, libicuuc,
+# libicudata, libgcc_s, ...) already resolves from this machine's own
+# /usr/lib, so those two are the only conda packages actually needed.
+# libclang.so.13 carries `RPATH=$ORIGIN/:$ORIGIN/../lib` (verified via
+# readelf -d), so merging both packages' lib/ into one directory is enough
+# for the dynamic loader to find libLLVM.so.22.1 — no LD_LIBRARY_PATH.
+conda_pkg(
+    name = "libclang13",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/libclang13-22.1.8-default_hd70ba2e_6.conda",
+    sha256 = "8475136d3be6c2d16bdb801dcaf8769cb2ba372cad239c89ebd6a58912e14465",
+)
+
+conda_pkg(
+    name = "libllvm22",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/libllvm22-22.1.8-hf7376ad_1.conda",
+    sha256 = "e9b5f301d6b001a9b8ce782157f56b75c92c4fbc9eba95dc6345c1139251d13b",
+)
+
+# bindgen's dlopen'd libclang doesn't auto-detect its own resource-dir
+# (stdbool.h, stddef.h, ...) the way a real `clang` binary would — without
+# it, parsing any header that includes them fails ("fatal error: 'stdbool.h'
+# file not found"). This is the same package pixi.toml's `clang` +
+# pixi-activate.sh's clang-resource-dir discovery covered; we only need
+# lib/clang/<ver>/include/ out of it, not the actual clang binary (zig cc
+# is our C compiler).
+conda_pkg(
+    name = "clang-resource-dir",
+    url = "https://conda.anaconda.org/conda-forge/linux-64/clang-22-22.1.8-default_hd70ba2e_6.conda",
+    sha256 = "cd5a792ce357ba33957a63465f74d3b67aef22e340a969dbdde391e28854ddc4",
+    visibility = ["PUBLIC"],
+)
+
+genrule(
+    name = "libclang",
+    # No `srcs =` here on purpose: buck2 genrule's `srcs` stages each dep
+    # into a shared `srcs/` dir keyed by its *default output's basename*
+    # — both conda_pkg targets output a directory literally named "out"
+    # (see conda_pkg.bzl), which collides. `$(location ...)` macros in
+    # `cmd` create the dependency edge on their own, no `srcs` entry needed.
+    out = "lib",
+    cmd = "mkdir -p $OUT && cp -RL $(location :libclang13)/lib/. $OUT/ && cp -RL $(location :libllvm22)/lib/. $OUT/",
     visibility = ["PUBLIC"],
 )

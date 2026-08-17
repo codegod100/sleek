@@ -464,6 +464,8 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "4",
         "CARGO_PKG_VERSION_PATCH": "0",
         "CARGO_PKG_VERSION_PRE": "",
+        "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
+        "PKG_CONFIG_PATH": "$(location toolchains//:alsa-lib)/lib/pkgconfig",
     },
     version = "0.4.0",
 )
@@ -5804,6 +5806,8 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
+        "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
+        "PKG_CONFIG_PATH": "$(location toolchains//:pipewire)/lib/pkgconfig",
     },
     features = ["v0_3_33"],
     version = "0.9.2",
@@ -5881,6 +5885,7 @@ buildscript_run(
     package_name = "libspa-sys",
     buildscript_rule = ":libspa-sys-0.9-build-script-build",
     env = {
+        "BINDGEN_EXTRA_CLANG_ARGS": "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include",
         "CARGO_MANIFEST_LINKS": "libspa-0.2",
         "CARGO_PKG_AUTHORS": "Tom Wagner <tom.a.wagner@protonmail.com>:Guillaume Desmottes <guillaume.desmottes@collabora.com>",
         "CARGO_PKG_DESCRIPTION": "Rust FFI bindings for libspa",
@@ -5892,6 +5897,9 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
+        "LIBCLANG_PATH": "$(location toolchains//:libclang)",
+        "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
+        "PKG_CONFIG_PATH": "$(location toolchains//:pipewire)/lib/pkgconfig",
     },
     version = "0.9.2",
 )
@@ -7662,6 +7670,7 @@ buildscript_run(
     package_name = "pipewire-sys",
     buildscript_rule = ":pipewire-sys-0.9-build-script-build",
     env = {
+        "BINDGEN_EXTRA_CLANG_ARGS": "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include",
         "CARGO_MANIFEST_LINKS": "pipewire-0.3",
         "CARGO_PKG_AUTHORS": "Tom Wagner <tom.a.wagner@protonmail.com>:Guillaume Desmottes <guillaume.desmottes@collabora.com>",
         "CARGO_PKG_DESCRIPTION": "Rust FFI bindings for PipeWire",
@@ -7673,6 +7682,9 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
+        "LIBCLANG_PATH": "$(location toolchains//:libclang)",
+        "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
+        "PKG_CONFIG_PATH": "$(location toolchains//:pipewire)/lib/pkgconfig",
     },
     version = "0.9.2",
 )

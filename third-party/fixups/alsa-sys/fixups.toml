@@ -1,1 +1,8 @@
-buildscript.run = true
+# alsa-sys's build.rs (extern crate pkg_config) unconditionally shells out
+# to a real `pkg-config` binary — no env-var bypass for the discovered
+# flags themselves, only for which pkg-config binary/PKG_CONFIG_PATH it
+# uses. See toolchains/BUCK's `alsa-lib`/`pkgconfig` conda_pkg targets and
+# conda_pkg.bzl for where these come from and why the .pc file needed its
+# prefix= rewritten.
+[buildscript.run]
+env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:alsa-lib)/lib/pkgconfig" }
