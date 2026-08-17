@@ -59,10 +59,17 @@ def _srcs():
     # touched by reindeer/Cargo.lock at all — so they live in
     # patched-crates/, a plain non-reindeer-owned directory in *this*
     # package, where glob() just works directly.
+    #
+    # assets/** (app icons) — android/src/app.rs include_bytes!()s
+    # ../assets/icons/*.png relative to its own crate dir, i.e. this
+    # top-level assets/ dir. Missing here for the same reason freeq/vidya
+    # were: worked locally via repo_relative_root's real-filesystem
+    # bypass, silently absent for remote workers.
     return native.glob(
         [
             "host/**",
             "android/**",
+            "assets/**",
             "patched-crates/vidya/**",
             "patched-crates/freeq/**",
             "patches/**",

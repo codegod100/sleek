@@ -86,11 +86,23 @@ def _platforms(ctx):
                 # build still hit the pre-build-essential failure — the
                 # local image genuinely had libc6-dev/stdint.h, so the
                 # remote workers were provably not seeing the new content).
-                # Get the current digest with:
-                #   skopeo inspect docker://ghcr.io/codegod100/sleek-rbe:latest
-                # and update this after every rebuild (see
+                #
+                # This must be the linux/amd64 *sub-manifest* digest, not
+                # the top-level tag/index digest: images built via
+                # `.github/workflows/rbe-image.yml` (docker/build-push-
+                # action) come out as an OCI image *index* — one real
+                # amd64 manifest plus an auto-attached SLSA provenance/
+                # attestation manifest with platform "unknown/unknown" —
+                # so pointing at the index digest is ambiguous for a
+                # single-platform RE pull. Get the right one with:
+                #   skopeo inspect --raw docker://ghcr.io/codegod100/sleek-rbe:latest
+                # (take the `digest` under the manifests[] entry whose
+                # platform is amd64/linux, not the "unknown" one) — or, for
+                # a plain `podman build`+`push` (no index wrapper), the
+                # digest `skopeo inspect` (no --raw) prints directly is
+                # already the one to use. Update after every rebuild (see
                 # toolchains/rbe-image/README.md).
-                "container-image": "docker://ghcr.io/codegod100/sleek-rbe@sha256:5814a2fecabaa59826ee7690e80c059b0a9e6a4064086d9999a9b411d5307bcc",
+                "container-image": "docker://ghcr.io/codegod100/sleek-rbe@sha256:36f0a719e3513f752423868c288b08fdc83e14a963999aff515e761772425776",
                 # cargo_genrule's build.rs steps hit the network (crates.io,
                 # git deps) — off by default on BuildBuddy's containers.
                 "dockerNetwork": "bridge",
