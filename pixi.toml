@@ -12,8 +12,14 @@ just = "*"
 pkg-config = "*"
 openssl = "*"
 mold = "*"
-libclang = "*"
-clang = "*"
+# Pinned below 22 (conda-forge's current default): clang 22 ships genuinely
+# broken AVX10.2/AMX intrinsic headers (pre-release, unreleased-hardware ISA
+# extensions) — <immintrin.h> pulling them in fails to parse under -std=c1x
+# with "cannot convert a value of type 'int' to vector type ... which has
+# different size", breaking ring's (BoringSSL-derived) C build. Confirmed
+# hitting this under RBE; 17 is a well-established, mature LLVM release.
+libclang = "17.*"
+clang = "17.*"
 pipewire = "*"
 alsa-lib = "*"
 xorg-libx11 = "*"

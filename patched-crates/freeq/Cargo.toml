@@ -1,0 +1,65 @@
+# A trimmed extraction of freeq-sdk + its two sibling-crate deps
+# (freeq-oauth, freeq-ssrf) out of the freeq monorepo
+# (https://github.com/codegod100/freeq, pinned at flake.lock's
+# `nodes.freeq.locked.rev`), so buck2's cargo_genrule targets (sleek-host,
+# sleek-android-lib — see cargo.bzl) don't depend on a sibling checkout of
+# the whole ~30-crate freeq monorepo existing outside this repo (the way
+# scripts/sync-flake-path-deps.sh materializes it for `nix build`).
+#
+# freeq-sdk/freeq-oauth/freeq-ssrf are all `workspace = true`-coupled to
+# freeq's own root Cargo.toml — not standalone crates — so this file is a
+# real (not auto-generated) [workspace] root carrying over exactly the
+# [workspace.package] fields and the subset of [workspace.dependencies]
+# entries those 3 crates actually reference (grep '= { workspace = true }'
+# / '.workspace = true' across all three), verbatim from the real
+# upstream root Cargo.toml. iroh's git pin is deliberately NOT repeated
+# here as a [patch] — android/Cargo.toml's own [patch.crates-io] already
+# pins it (same rev freeq's own patch section uses), and Cargo's patch
+# mechanism applies transitively across the whole build regardless of
+# which Cargo.toml in the graph declares the plain semver dependency.
+[workspace]
+members = ["freeq-sdk", "freeq-oauth", "freeq-ssrf"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+await_holding_lock = "allow"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart"] }
+k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+bs58 = "0.5"
+signature = "2"
+clap = { version = "4", features = ["derive", "env"] }
+webpki-roots = "1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+percent-encoding = "2"
+freeq-oauth = { path = "freeq-oauth" }
+freeq-ssrf = { path = "freeq-ssrf" }
+open = "5"
+dirs = "5"
+axum = { version = "0.8", features = ["ws", "multipart"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+iroh = "0.97"
+iroh-quinn = "0.16"

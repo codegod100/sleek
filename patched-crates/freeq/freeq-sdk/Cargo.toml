@@ -1,0 +1,59 @@
+[package]
+name = "freeq-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client SDK for IRC servers with AT Protocol SASL authentication"
+
+[dependencies]
+freeq-oauth = { workspace = true }
+freeq-ssrf = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+webpki-roots = { workspace = true }
+rustls-native-certs = "0.8"
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+bs58 = { workspace = true }
+signature = { workspace = true }
+p256 = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+iroh = { workspace = true, optional = true }
+iroh-quinn = { workspace = true, optional = true }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+open = { workspace = true }
+url = "2"
+dirs = { workspace = true }
+parking_lot = "0.12"
+
+[features]
+default = ["iroh-transport", "aws-lc-rs", "native-tls"]
+iroh-transport = ["iroh", "iroh-quinn"]
+websocket = ["tokio-tungstenite", "futures-util"]
+aws-lc-rs = ["rustls/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
+ring = ["rustls/ring", "tokio-rustls/ring"]
+native-tls = ["reqwest/native-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+
+[dev-dependencies]
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+
+[lints]
+workspace = true
