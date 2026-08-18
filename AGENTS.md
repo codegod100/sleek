@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Code review
+
+This project does not use GitHub Copilot pull request review. The GitHub Copilot
+PR reviewer (`dynamic/agents/copilot-pull-request-reviewer`) should be disabled
+in repository Settings → Copilot → Pull request review.
+
 ## Cursor Cloud specific instructions
 
 Sleek is a Rust + egui desktop/mobile **freeq (IRC) chat client**. The runnable
