@@ -58,17 +58,49 @@ for PUTting artifacts back.
 `./deploy.sh` is idempotent — re-run it any time `worker.js` changes or a
 secret rotates (pass the new value as the same env var).
 
-## Open items / assumptions to validate on the first real run
+## Testing without a Cloudflare account
 
-- BuildBuddy's `repo` field is documented only with `git@github.com:...`
-  examples; this sends Tangled's `repository.clone_url` (plain HTTPS)
-  instead. Should work for a generic git clone, but is unconfirmed against
-  BuildBuddy's remote-bazel runner for a non-GitHub host — watch the first
-  triggered run's BuildBuddy invocation page for a clone failure.
-- The remote script self-installs Nix (Determinate installer) since
-  BuildBuddy's stock remote-bazel image isn't expected to have it — this
-  needs root/sudo on the executor; unconfirmed until tested.
-- `.tangled/workflows/packages.yml` still exists and still builds on Spindle
-  in parallel for now (belt-and-suspenders) — once this path is proven,
-  consider trimming Spindle back to just the tag-move/publish steps, or
-  dropping it and moving publish logic into the BuildBuddy script instead.
+`test_worker.mjs` exercises `worker.js` directly under plain Node (its
+`Request`/`Response`/`crypto.subtle` globals match the Workers runtime
+closely enough) — no `wrangler`, no deploy, no account needed. Stubs
+`fetch` (the BuildBuddy call) and `env.ARTIFACTS` (an in-memory R2 mock) so
+nothing outbound happens:
+
+```bash
+node cloudflare/proxy-latha-org/test_worker.mjs
+```
+
+Covers: HMAC accept/reject, `push`-only + `refs/heads/main`-only filtering,
+the exact JSON BuildBuddy expects (`repo`/`branch`/`steps[0].run`), and the
+R2 upload → download → `latest/` alias roundtrip.
+
+## Validated so far (real infrastructure, not assumptions)
+
+- `git clone https://tangled.org/nandi.uk/sleek` — works, plain HTTPS, no
+  auth (checked both locally and from an actual BuildBuddy executor's log).
+- A live BuildBuddy remote run (`POST /api/v1/Run` with the key already in
+  `.buckconfig.local`) cloned the repo, self-installed Nix, and ran
+  `nix build .#android` **from source** (no cache hit) to a real signed
+  20M `sleek.apk` in ~10.4 min — `bazelExitCode: OK`. Executor had 18G free
+  disk going in, finished at 75% used (16G/22G) — the actual problem this
+  replaces (Spindle's microvm ran out of disk mid-build).
+- Fixed along the way: Determinate's `--init none` install never starts
+  `nix-daemon`, so the first `nix build` failed with a lock-file permission
+  error until the script explicitly starts the daemon and waits for the
+  socket (same pattern as `scripts/ci-nixbuild.sh`'s `setup_nixbuild()`).
+- `worker.js`'s own logic (HMAC, routing, R2 read/write) — unit-tested
+  locally, all passing (see above).
+
+## What's still unverified
+
+Only the Worker's deployment itself — it has never actually run on
+Cloudflare, because that needs an API token + account ID only the account
+owner can produce. Everything upstream (clone, build, disk capacity) and
+the Worker's own logic (tested locally) are now proven; deploying should be
+close to a formality once credentials are available.
+
+`.tangled/workflows/packages.yml` still exists and still builds on Spindle
+in parallel for now (belt-and-suspenders) — once this path is proven live,
+consider trimming Spindle back to just the tag-move/publish steps, or
+dropping it and moving that publish logic into the BuildBuddy script
+instead.
