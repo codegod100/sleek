@@ -50,6 +50,19 @@ export default {
     if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
       return handleDownload(request, env, url);
     }
+    // atproto OAuth — lets nandi authorize this Worker once, via a URL, to
+    // publish sh.tangled.repo.artifact release records to tangled.org
+    // instead of pasting an app password. See the block near the bottom of
+    // this file.
+    if (request.method === "GET" && url.pathname === "/client-metadata.json") {
+      return handleClientMetadata();
+    }
+    if (request.method === "GET" && url.pathname === "/oauth/login") {
+      return handleOAuthLogin(env);
+    }
+    if (request.method === "GET" && url.pathname === "/oauth/callback") {
+      return handleOAuthCallback(request, env, url);
+    }
     return new Response("not found", { status: 404 });
   },
 };
@@ -286,10 +299,281 @@ async function handleUploadComplete(request, env, url) {
 
 async function handleDownload(request, env, url) {
   const key = url.pathname.replace(/^\/artifacts\//, "");
+  // oauth/ holds the atproto session (refresh token + DPoP private key) in
+  // this same R2 bucket — never let it be fetched through the public
+  // artifact route.
+  if (key.startsWith("oauth/")) return new Response("not found", { status: 404 });
   const obj = await env.ARTIFACTS.get(key);
   if (!obj) return new Response("not found", { status: 404 });
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
   headers.set("etag", obj.httpEtag);
   return new Response(obj.body, { headers });
+}
+
+// --- atproto OAuth ---------------------------------------------------------
+//
+// Lets nandi authorize this Worker once, by visiting a URL and clicking
+// approve, instead of generating/pasting an app password. Standard atproto
+// OAuth: no client_secret — client_id is a URL to a hosted metadata document
+// (this Worker serves it). Pushed Authorization Request (PAR) + PKCE +
+// DPoP-bound tokens are all mandatory parts of the protocol, not optional
+// extras. The resulting session (refresh token + the DPoP keypair it's
+// bound to) is stashed in the same R2 bucket as build artifacts, under an
+// `oauth/` prefix that handleDownload refuses to ever serve publicly.
+//
+// End goal this unlocks: a tag-triggered build step can later use
+// getAtprotoSession() to call com.atproto.repo.uploadBlob +
+// sh.tangled.repo.artifact createRecord and post release artifacts
+// straight to the tangled.org repo page. That publish step itself isn't
+// wired up yet — this is just the auth plumbing.
+
+const ATPROTO_CLIENT_ID = "https://proxy.latha.org/client-metadata.json";
+const ATPROTO_REDIRECT_URI = "https://proxy.latha.org/oauth/callback";
+const ATPROTO_SCOPE = "atproto transition:generic";
+// nandi's personal DID (handle nandi.uk resolves here; DIDs are the stable
+// identifier, handles can change). Confirmed live: resolveHandle(nandi.uk)
+// -> this DID -> plc.directory doc has alsoKnownAs: ["at://nandi.uk"] and a
+// real Bluesky-hosted PDS. (Not the tangled `git@tangled.org:did:plc:...`
+// remote DID — that one's the *repo's* auto-assigned DID, empty
+// alsoKnownAs, served by the knot itself, not nandi's identity.)
+const ATPROTO_DID = "did:plc:ngokl2gnmpbvuvrfckja3g7p";
+
+function b64url(bytesLike) {
+  let bin = "";
+  for (const b of new Uint8Array(bytesLike)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlFromString(str) {
+  return b64url(new TextEncoder().encode(str));
+}
+function randomB64url(byteLen) {
+  const arr = new Uint8Array(byteLen);
+  crypto.getRandomValues(arr);
+  return b64url(arr);
+}
+async function sha256(input) {
+  return crypto.subtle.digest("SHA-256", typeof input === "string" ? new TextEncoder().encode(input) : input);
+}
+
+async function generateDpopKeypair() {
+  const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const privateJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+  const publicJwk = await crypto.subtle.exportKey("jwk", kp.publicKey);
+  delete publicJwk.d;
+  return { privateJwk, publicJwk };
+}
+
+// One DPoP proof JWT, signed fresh per request (each needs its own `jti`).
+// `nonce` is the server-issued DPoP-Nonce from a prior response, once we
+// have one. `accessToken`, when present, adds the `ath` claim required on
+// resource-server requests (not needed for PAR/token-endpoint calls).
+async function signDpopProof(privateJwk, publicJwk, { htm, htu, nonce, accessToken }) {
+  const key = await crypto.subtle.importKey(
+    "jwk", privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"],
+  );
+  const header = {
+    typ: "dpop+jwt",
+    alg: "ES256",
+    jwk: { kty: publicJwk.kty, crv: publicJwk.crv, x: publicJwk.x, y: publicJwk.y },
+  };
+  const payload = { jti: randomB64url(16), htm, htu, iat: Math.floor(Date.now() / 1000) };
+  if (nonce) payload.nonce = nonce;
+  if (accessToken) payload.ath = b64url(await sha256(accessToken));
+  const signingInput = `${b64urlFromString(JSON.stringify(header))}.${b64urlFromString(JSON.stringify(payload))}`;
+  // WebCrypto's ECDSA/P-256 signature output is already the raw r||s format
+  // JOSE/ES256 wants — no DER re-encoding needed.
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${b64url(sig)}`;
+}
+
+// POSTs with a DPoP proof, handling the mandatory nonce dance every atproto
+// auth/resource server does: first attempt commonly 400s with
+// {"error":"use_dpop_nonce"} plus a DPoP-Nonce response header; retry once
+// with that nonce baked into the proof.
+async function dpopFetch(url, { method = "POST", body, headers = {}, dpopKeys, nonce, accessToken } = {}) {
+  const attempt = async (n) => {
+    const proof = await signDpopProof(dpopKeys.privateJwk, dpopKeys.publicJwk, { htm: method, htu: url, nonce: n, accessToken });
+    const h = { ...headers, DPoP: proof };
+    if (accessToken) h["Authorization"] = `DPoP ${accessToken}`;
+    return fetch(url, { method, headers: h, body });
+  };
+  let resp = await attempt(nonce);
+  if (resp.status === 400) {
+    let errBody = {};
+    try { errBody = await resp.clone().json(); } catch { /* not json, not a nonce error */ }
+    if (errBody.error === "use_dpop_nonce") {
+      resp = await attempt(resp.headers.get("DPoP-Nonce"));
+    }
+  }
+  return resp;
+}
+
+function handleClientMetadata() {
+  return new Response(JSON.stringify({
+    client_id: ATPROTO_CLIENT_ID,
+    client_name: "sleek build artifact publisher",
+    client_uri: "https://proxy.latha.org/",
+    redirect_uris: [ATPROTO_REDIRECT_URI],
+    scope: ATPROTO_SCOPE,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+    application_type: "web",
+    dpop_bound_access_tokens: true,
+  }), { headers: { "content-type": "application/json" } });
+}
+
+// PDS lookup is dynamic (in case of migration) even though the DID is
+// hardcoded; the Bluesky-hosted PDS here delegates OAuth to a separate
+// entryway/authorization server, discovered via the protected-resource
+// metadata rather than assumed to be the PDS itself.
+async function resolvePdsAndAuthServer() {
+  const didDocResp = await fetch(`https://plc.directory/${ATPROTO_DID}`);
+  if (!didDocResp.ok) throw new Error(`plc.directory lookup failed: ${didDocResp.status}`);
+  const didDoc = await didDocResp.json();
+  const pds = didDoc.service.find((s) => s.type === "AtprotoPersonalDataServer")?.serviceEndpoint;
+  if (!pds) throw new Error("no AtprotoPersonalDataServer service in DID doc");
+
+  const resourceMetaResp = await fetch(`${pds}/.well-known/oauth-protected-resource`);
+  if (!resourceMetaResp.ok) throw new Error(`oauth-protected-resource lookup failed: ${resourceMetaResp.status}`);
+  const resourceMeta = await resourceMetaResp.json();
+  const issuer = resourceMeta.authorization_servers?.[0];
+  if (!issuer) throw new Error("no authorization_servers in protected-resource metadata");
+
+  const authServerMetaResp = await fetch(`${issuer}/.well-known/oauth-authorization-server`);
+  if (!authServerMetaResp.ok) throw new Error(`oauth-authorization-server lookup failed: ${authServerMetaResp.status}`);
+  const authServerMeta = await authServerMetaResp.json();
+  return { pds, issuer, authServerMeta };
+}
+
+async function handleOAuthLogin(env) {
+  try {
+    const { pds, issuer, authServerMeta } = await resolvePdsAndAuthServer();
+    const dpopKeys = await generateDpopKeypair();
+    const verifier = randomB64url(32);
+    const challenge = b64url(await sha256(verifier));
+    const state = randomB64url(16);
+
+    const parBody = new URLSearchParams({
+      client_id: ATPROTO_CLIENT_ID,
+      redirect_uri: ATPROTO_REDIRECT_URI,
+      response_type: "code",
+      scope: ATPROTO_SCOPE,
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      login_hint: ATPROTO_DID,
+    });
+
+    const parResp = await dpopFetch(authServerMeta.pushed_authorization_request_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: parBody.toString(),
+      dpopKeys,
+    });
+    if (!parResp.ok) {
+      const t = await parResp.text();
+      return new Response(`PAR request failed: ${parResp.status} ${t}`, { status: 502 });
+    }
+    const { request_uri } = await parResp.json();
+
+    await env.ARTIFACTS.put(`oauth/flow/${state}.json`, JSON.stringify({
+      verifier, dpopKeys, pds, issuer, authServerMeta, createdAt: new Date().toISOString(),
+    }));
+
+    const authUrl = new URL(authServerMeta.authorization_endpoint);
+    authUrl.searchParams.set("client_id", ATPROTO_CLIENT_ID);
+    authUrl.searchParams.set("request_uri", request_uri);
+    return Response.redirect(authUrl.toString(), 302);
+  } catch (e) {
+    return new Response(`oauth login setup failed: ${e.message}`, { status: 500 });
+  }
+}
+
+async function handleOAuthCallback(request, env, url) {
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const err = url.searchParams.get("error");
+  if (err) return new Response(`oauth error: ${err} ${url.searchParams.get("error_description") || ""}`, { status: 400 });
+  if (!code || !state) return new Response("missing code/state", { status: 400 });
+
+  const flowObj = await env.ARTIFACTS.get(`oauth/flow/${state}.json`);
+  if (!flowObj) return new Response("unknown or expired oauth state — try /oauth/login again", { status: 400 });
+  const flow = JSON.parse(await new Response(flowObj.body).text());
+
+  try {
+    const tokenBody = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: ATPROTO_REDIRECT_URI,
+      client_id: ATPROTO_CLIENT_ID,
+      code_verifier: flow.verifier,
+    });
+    const tokenResp = await dpopFetch(flow.authServerMeta.token_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: tokenBody.toString(),
+      dpopKeys: flow.dpopKeys,
+    });
+    if (!tokenResp.ok) {
+      const t = await tokenResp.text();
+      return new Response(`token exchange failed: ${tokenResp.status} ${t}`, { status: 502 });
+    }
+    const tokens = await tokenResp.json();
+
+    await env.ARTIFACTS.put("oauth/session.json", JSON.stringify({
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+      dpopKeys: flow.dpopKeys,
+      pds: flow.pds,
+      issuer: flow.issuer,
+      tokenEndpoint: flow.authServerMeta.token_endpoint,
+      sub: tokens.sub || ATPROTO_DID,
+      updatedAt: new Date().toISOString(),
+    }));
+    await env.ARTIFACTS.delete(`oauth/flow/${state}.json`);
+
+    return new Response(
+      "Authorized. sleek's build publisher is now connected to your atproto account — you can close this tab.",
+      { headers: { "content-type": "text/plain" } },
+    );
+  } catch (e) {
+    return new Response(`oauth callback failed: ${e.message}`, { status: 500 });
+  }
+}
+
+// For later use by a tag-triggered publish step: returns a valid (silently
+// refreshed if needed) access token plus the DPoP key material to sign PDS
+// requests with (uploadBlob / createRecord for sh.tangled.repo.artifact).
+// Returns null if never authorized or the refresh token itself is dead —
+// caller should fall back to pointing at /oauth/login again in that case.
+async function getAtprotoSession(env) {
+  const obj = await env.ARTIFACTS.get("oauth/session.json");
+  if (!obj) return null;
+  let session = JSON.parse(await new Response(obj.body).text());
+  if (Date.now() < session.expiresAt - 60_000) return session;
+
+  const resp = await dpopFetch(session.tokenEndpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: session.refreshToken,
+      client_id: ATPROTO_CLIENT_ID,
+    }).toString(),
+    dpopKeys: session.dpopKeys,
+  });
+  if (!resp.ok) return null;
+  const tokens = await resp.json();
+  session = {
+    ...session,
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token || session.refreshToken,
+    expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+    updatedAt: new Date().toISOString(),
+  };
+  await env.ARTIFACTS.put("oauth/session.json", JSON.stringify(session));
+  return session;
 }

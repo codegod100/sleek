@@ -60,6 +60,9 @@ class MockBucket {
     }
     this.store.set(key, Buffer.concat(chunks.map((c) => Buffer.from(c))));
   }
+  async delete(key) {
+    this.store.delete(key);
+  }
   async get(key) {
     const buf = this.store.get(key);
     if (!buf) return null;
@@ -286,6 +289,41 @@ async function testDownloadMissingKey404() {
   console.log("PASS: download of missing key -> 404");
 }
 
+async function testOauthSessionNeverServedAsArtifact() {
+  // The whole point of the oauth/ prefix guard in handleDownload: even if
+  // an oauth session file exists in the bucket, /artifacts/oauth/... must
+  // never serve it.
+  await env.ARTIFACTS.put("oauth/session.json", JSON.stringify({ accessToken: "should-never-leak" }));
+  const req = new Request("https://proxy.latha.org/artifacts/oauth/session.json");
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 404, "oauth/ prefix must never be servable via /artifacts/");
+  await env.ARTIFACTS.delete("oauth/session.json");
+  console.log("PASS: /artifacts/oauth/... is always 404, never leaks the session");
+}
+
+async function testClientMetadataDocument() {
+  const req = new Request("https://proxy.latha.org/client-metadata.json");
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json");
+  const meta = await res.json();
+  assert.equal(meta.client_id, "https://proxy.latha.org/client-metadata.json", "client_id must exactly match the URL it's served from");
+  assert.deepEqual(meta.redirect_uris, ["https://proxy.latha.org/oauth/callback"]);
+  assert.equal(meta.dpop_bound_access_tokens, true);
+  assert.ok(meta.scope.includes("atproto"));
+  console.log("PASS: /client-metadata.json is well-formed and self-referential");
+}
+
+async function testOauthCallbackRejectsUnknownState() {
+  const req = new Request("https://proxy.latha.org/oauth/callback?code=abc&state=never-issued");
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 400);
+  console.log("PASS: oauth callback with unknown state -> 400, not a crash");
+}
+
 const tests = [
   testValidPushWebhook,
   testBadSignatureRejected,
@@ -296,6 +334,9 @@ const tests = [
   testMultipartEndpointsRejectBadToken,
   testUploadRejectsBadToken,
   testDownloadMissingKey404,
+  testOauthSessionNeverServedAsArtifact,
+  testClientMetadataDocument,
+  testOauthCallbackRejectsUnknownState,
 ];
 
 let failed = 0;
