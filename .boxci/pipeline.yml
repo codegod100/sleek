@@ -27,7 +27,6 @@ steps:
   # Fast heartbeat so Job COB start is visible before the heavy check/APK steps.
   - label: ":radar: Job COB probe"
     key: job-probe
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
     command: |
       set -euo pipefail
       echo "boxci merge run ${BOXCI_RUN_ID:-?} for ${GIT_SHA:-unknown}"
@@ -45,7 +44,6 @@ steps:
 
   - label: ":rust: Check"
     key: check
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
     depends_on: job-probe
     command: |
       set -euo pipefail
@@ -148,7 +146,6 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
     depends_on: check
     allow_dependency_failure: true
     command: |
@@ -210,7 +207,6 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
     depends_on: check
     allow_dependency_failure: true
     command: |
