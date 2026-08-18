@@ -2,7 +2,7 @@
 Title=Sleek
 Name=uk.nandi.sleek
 Branch=master
-Url=https://proxy.latha.org/artifacts/repo/
+Url=https://artifacts.latha.org/artifacts/sleek/repo/
 SuiteName=sleek
 RuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo
 IsRuntime=false

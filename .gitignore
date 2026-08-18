@@ -33,3 +33,4 @@ result-*
 # sleek-sif target) — 600MB+, a local build artifact, never committed.
 /sleek.sif
 /result-sif
+.wrangler/
