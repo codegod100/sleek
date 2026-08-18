@@ -5,10 +5,11 @@ characters. License (summary): free to use, modify, and redistribute;
 must not use Bitstream/DejaVu names to endorse derived works without
 permission. Full text: https://dejavu-fonts.github.io/License.html
 
-Generated with fonttools pyftsubset for UI punctuation/symbols plus
+Generated with fonttools pyftsubset for UI punctuation/symbols,
 common math-in-prose Unicode (Greek, letterlike ℕℤℚℝℂ, superscripts/
 subscripts, mathematical operators, general punctuation spaces, and
-mathematical alphanumeric forms). Rebuild:
+mathematical alphanumeric forms), and box drawing / block elements
+(U+2500–U+259F) for profile ASCII art. Rebuild:
 `scripts/rebuild-symbols-ttf.sh`.
 
 ---
