@@ -377,6 +377,25 @@
             skipAbiChecks = true;
           };
 
+          # Singularity/Apptainer container image of packages.sleek.
+          #   nix build .#sif
+          #   singularity run ./result           (or apptainer run ./result)
+          # Uses vmTools.runInLinuxVM under the hood — needs a builder with
+          # the `kvm` system feature (nixbuild.net's builders advertise it;
+          # see scripts/ci-nixbuild.sh's sleek-nixbuild-builders line).
+          sleek-sif = pkgs.singularity-tools.buildImage {
+            name = "sleek";
+            contents = [ sleek-host ];
+            # GUI/Wayland/GL/audio closure (mesa, wayland, pipewire, …) is
+            # much larger than the singularity-tools default (1024 MiB).
+            diskSize = 8192;
+            memSize = 2048;
+            runScript = ''
+              #!${pkgs.runtimeShell}
+              exec ${sleek-host}/bin/sleek "$@"
+            '';
+          };
+
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "34" ];
@@ -834,6 +853,8 @@
           inherit sleek-host;
           flatpak = sleek-flatpak;
           inherit sleek-flatpak;
+          sif = sleek-sif;
+          inherit sleek-sif;
           android = sleek-android;
           inherit sleek-android;
           inherit install-android;
@@ -974,7 +995,7 @@
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix build .#android | nix build .#flatpak"
+                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix build .#android | nix build .#flatpak | nix build .#sif"
                 fi
                 # Starship prompt for interactive shells (bashrc also inits; this
                 # covers `nix develop` / ./scripts/enter before bashrc reloads).
