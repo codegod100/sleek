@@ -158,13 +158,19 @@ function buildScript(env, sha) {
     "[ -S /nix/var/nix/daemon-socket/socket ] || { echo 'nix-daemon socket missing'; cat /tmp/nix-daemon.log; exit 1; }",
     "export NIX_CONFIG=$'experimental-features = nix-command flakes\\naccept-flake-config = true'",
     "nix show-config | grep -E '^(substituters|trusted-substituters|trusted-public-keys) =' || true",
-    // Recycled runners keep whatever the *previous* build's store looked
-    // like, including anything that only became garbage after that build
-    // finished (its result-* out-links only exist in that dead job's
-    // workdir) — reclaim it before adding more, since disk is the one
-    // resource this whole pipeline exists to have enough of.
+    "echo '--- disk before gc ---'; df -h / || true",
+    // result-*'s out-link symlinks from a *previous* invocation in this same
+    // (possibly recycled) workdir are themselves GC roots — nix-collect-
+    // garbage can't reclaim anything they point at until they're gone.
+    // Confirmed the cachix-trust fix above worked (cargo-vendor-dir stopped
+    // being rebuilt from source) but a run still hit "No space left on
+    // device" later, mid-compile — this is the next most likely reason gc
+    // wasn't actually freeing prior builds' output.
+    "rm -f result-android result-flatpak",
     "sudo nix-collect-garbage -d || true",
+    "echo '--- disk after gc ---'; df -h / || true",
     "nix build .#android --out-link result-android -L --print-build-logs",
+    "echo '--- disk after android build ---'; df -h / || true",
     "nix build .#flatpak --out-link result-flatpak -L --print-build-logs",
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @result-android/sleek.apk`,
     `curl -fsS -X PUT "${uploadBase}/uk.nandi.sleek.flatpak" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @result-flatpak/uk.nandi.sleek.flatpak`,
