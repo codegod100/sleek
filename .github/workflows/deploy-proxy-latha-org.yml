@@ -12,18 +12,18 @@
 # CLOUDFLARE_ACCOUNT_ID isn't a secret in the same sense — not stored in
 # OpenBao, just resolved live from the API token itself (GET /accounts).
 #
-# BUILDBUDDY_API_KEY, TANGLED_WEBHOOK_SECRET and UPLOAD_TOKEN are read
-# from OpenBao if already present there, else seeded/generated + persisted
-# back (so later runs reuse the same value instead of rotating on every
-# deploy — deploy.sh overwrites the live Worker's secret bindings each
-# run). BUILDBUDDY_API_KEY isn't randomly generated if missing — it has to
-# be the real org key from https://app.buildbuddy.io/ → Settings, so a
-# missing copy falls back to the repo secret BUILDBUDDY_API_KEY_FALLBACK
-# (never written into any tracked file — same reason .buckconfig.local,
-# which holds this same key locally, is gitignored). Only
-# TANGLED_WEBHOOK_SECRET has an external dependency (Tangled's own
-# Settings → Hooks → Secret config must match), so a freshly generated one
-# is printed in the job log as a one-time follow-up instruction.
+# TANGLED_WEBHOOK_SECRET / BUILDBUDDY_API_KEY / UPLOAD_TOKEN are
+# deliberately *not* provisioned here at all: deploy.sh (see its own
+# header comment) now sends `inherit`-type bindings for any of these 3
+# secret_text values it isn't given, which tells Cloudflare to carry the
+# live Worker's already-configured values forward unchanged. This
+# workflow only ever needs to update worker.js's code, never these
+# secrets' values — so it never needs to know them, matching the
+# constraint that this key material only ever lives in a human's own
+# machine or wherever it was originally deployed from. If any of these
+# 3 secrets ever needs to be rotated, that's a separate, deliberate
+# `./deploy.sh` run (by a human, with the new value exported locally) —
+# not something this workflow does.
 name: Deploy proxy.latha.org
 
 on:
@@ -54,49 +54,6 @@ jobs:
           chmod +x scripts/fetch-openbao-env.sh
           ./scripts/fetch-openbao-env.sh --github-env --keys \
             CLOUDFLARE_API_TOKEN
-
-      - name: Read or seed/generate BUILDBUDDY_API_KEY / TANGLED_WEBHOOK_SECRET / UPLOAD_TOKEN
-        env:
-          OPENBAO_ADDR: https://openbao.boxd.sh
-          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
-          OPENBAO_SECRET_PATH: secret/data/ai-api-keys
-          # Repo secret, not a literal value in source — see the header
-          # comment above for why. Only used as a fallback if OpenBao
-          # doesn't already have its own BUILDBUDDY_API_KEY.
-          KNOWN_BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY_FALLBACK }}
-        run: |
-          set -euo pipefail
-          chmod +x scripts/openbao-put-key.sh
-          for key in BUILDBUDDY_API_KEY TANGLED_WEBHOOK_SECRET UPLOAD_TOKEN; do
-            if exports="$(./scripts/fetch-openbao-env.sh --export --keys "$key" 2>/dev/null)"; then
-              eval "$exports"
-              echo "using existing $key from OpenBao"
-            else
-              if [[ "$key" == "BUILDBUDDY_API_KEY" ]]; then
-                if [[ -z "${KNOWN_BUILDBUDDY_API_KEY:-}" ]]; then
-                  echo "BUILDBUDDY_API_KEY missing from OpenBao and no BUILDBUDDY_API_KEY_FALLBACK repo secret set" >&2
-                  exit 1
-                fi
-                val="$KNOWN_BUILDBUDDY_API_KEY"
-              else
-                val="$(openssl rand -hex 32)"
-              fi
-              ./scripts/openbao-put-key.sh "$key" --value "$val" >/dev/null
-              export "$key=$val"
-              if [[ "$key" == "TANGLED_WEBHOOK_SECRET" ]]; then
-                echo "generated + stored a NEW $key in OpenBao — paste this into Tangled's Settings > Hooks > Secret for this repo:"
-                echo "  $val"
-              else
-                echo "::add-mask::$val"
-                echo "seeded/generated + stored a new $key in OpenBao"
-              fi
-            fi
-            {
-              echo "${key}<<EOF"
-              echo "${!key}"
-              echo "EOF"
-            } >>"$GITHUB_ENV"
-          done
 
       - name: Resolve CLOUDFLARE_ACCOUNT_ID from the API token
         run: |

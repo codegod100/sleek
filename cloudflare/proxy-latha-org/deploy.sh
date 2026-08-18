@@ -13,15 +13,31 @@
 #                          Account:Workers R2 Storage:Edit + Zone:Edit for
 #                          DNS on latha.org)
 #   CLOUDFLARE_ACCOUNT_ID
+#
+# Optional env (only needed to *set/rotate* a value — see below):
 #   TANGLED_WEBHOOK_SECRET Paste the same value into Tangled's
 #                          Settings -> Hooks -> Secret for this repo.
 #   BUILDBUDDY_API_KEY     Org key from https://app.buildbuddy.io/ -> Settings
 #   UPLOAD_TOKEN           Bearer token the remote build script uses to PUT
 #                          artifacts back to this worker.
 #
-# Usage:
+# Each of the 3 secret_text bindings above is independently optional on
+# every deploy after the first: leaving one unset makes this script send
+# an `inherit`-type binding for it instead of `secret_text`, which tells
+# Cloudflare to carry the existing bound value forward from the
+# currently-live script version unchanged — no need to know/resupply a
+# secret's value just to redeploy worker.js's code. `?bindings_inherit=strict`
+# on the upload makes this fail loudly (not silently drop the binding) if
+# there's no previous version to inherit from — i.e. on a script's very
+# first-ever deploy, all 3 of these *are* required.
+#
+# Usage (rotating/first deploy):
 #   export CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=...
 #   export TANGLED_WEBHOOK_SECRET=... BUILDBUDDY_API_KEY=... UPLOAD_TOKEN=...
+#   ./deploy.sh
+#
+# Usage (code-only redeploy, preserving existing secrets):
+#   export CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=...
 #   ./deploy.sh
 set -euo pipefail
 
@@ -34,9 +50,9 @@ API="https://api.cloudflare.com/client/v4"
 
 : "${CLOUDFLARE_API_TOKEN:?export CLOUDFLARE_API_TOKEN}"
 : "${CLOUDFLARE_ACCOUNT_ID:?export CLOUDFLARE_ACCOUNT_ID}"
-: "${TANGLED_WEBHOOK_SECRET:?export TANGLED_WEBHOOK_SECRET}"
-: "${BUILDBUDDY_API_KEY:?export BUILDBUDDY_API_KEY}"
-: "${UPLOAD_TOKEN:?export UPLOAD_TOKEN}"
+: "${TANGLED_WEBHOOK_SECRET:=}"
+: "${BUILDBUDDY_API_KEY:=}"
+: "${UPLOAD_TOKEN:=}"
 
 auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
@@ -49,25 +65,42 @@ curl -fsS "${auth[@]}" -X POST \
 # (a 10004 "bucket already exists" error here is fine on re-deploy)
 
 echo "--- upload worker script $SCRIPT_NAME" >&2
+# secret_binding NAME VALUE_VAR: emits a real secret_text binding when
+# VALUE_VAR is non-empty, else an inherit binding that carries forward
+# whatever's already bound to NAME on the live script (see the header
+# comment above).
+secret_binding() {
+  local name="$1" val="$2"
+  if [[ -n "$val" ]]; then
+    jq -n --arg name "$name" --arg text "$val" '{type: "secret_text", name: $name, text: $text}'
+  else
+    jq -n --arg name "$name" '{type: "inherit", name: $name}'
+  fi
+}
+
 metadata="$(jq -n \
   --arg main "worker.js" \
   --arg bucket "$BUCKET_NAME" \
-  --arg webhook_secret "$TANGLED_WEBHOOK_SECRET" \
-  --arg bb_key "$BUILDBUDDY_API_KEY" \
-  --arg upload_token "$UPLOAD_TOKEN" \
+  --argjson webhook_secret_binding "$(secret_binding TANGLED_WEBHOOK_SECRET "$TANGLED_WEBHOOK_SECRET")" \
+  --argjson bb_key_binding "$(secret_binding BUILDBUDDY_API_KEY "$BUILDBUDDY_API_KEY")" \
+  --argjson upload_token_binding "$(secret_binding UPLOAD_TOKEN "$UPLOAD_TOKEN")" \
   '{
     main_module: $main,
     compatibility_date: "2024-09-23",
     bindings: [
       {type: "r2_bucket", name: "ARTIFACTS", bucket_name: $bucket},
-      {type: "secret_text", name: "TANGLED_WEBHOOK_SECRET", text: $webhook_secret},
-      {type: "secret_text", name: "BUILDBUDDY_API_KEY", text: $bb_key},
-      {type: "secret_text", name: "UPLOAD_TOKEN", text: $upload_token}
+      $webhook_secret_binding,
+      $bb_key_binding,
+      $upload_token_binding
     ]
   }')"
 
+# bindings_inherit=strict: fail this request (not silently drop the
+# binding) if any inherit-type binding above can't be resolved against
+# the previous script version — e.g. this script's actual first-ever
+# deploy, when there is no previous version to inherit from.
 curl -fsS "${auth[@]}" -X PUT \
-  "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$SCRIPT_NAME" \
+  "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$SCRIPT_NAME?bindings_inherit=strict" \
   -F "metadata=$metadata;type=application/json" \
   -F "worker.js=@$ROOT/worker.js;type=application/javascript+module" \
   | jq -c '{success, errors}'
