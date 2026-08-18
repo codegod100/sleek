@@ -119,7 +119,7 @@ CI APKs are signed with the committed `android/ci.keystore` (password `android`,
 
 ### Spindle (Tangled CI)
 
-[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) also builds `.#android` and `.#flatpak` on nixbuild.net (via `scripts/nixbuild-setup.sh`) on pushes/PRs to `main` (and manual runs). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) also builds `.#android` and `.#flatpak` on nixbuild.net (via `scripts/ci-nixbuild.sh`, same remote-builder + streamed-artifact setup as boxci) on pushes/PRs to `main` (and manual runs). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
 
 | Secret | Purpose |
 |--------|---------|

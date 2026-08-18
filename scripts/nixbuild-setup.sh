@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Configure SSH so Nix can offload builds to nixbuild.net.
+# Configure SSH auth to nixbuild.net. On its own this only makes the host
+# reachable/authenticated for `ssh eu.nixbuild.net …` — it does NOT tell Nix
+# to actually use it as a builder (no `builders =` / --store is set here), so
+# a plain `nix build` afterwards still builds locally. For CI that needs the
+# build to actually run on nixbuild.net, use scripts/ci-nixbuild.sh instead
+# (its `setup` step configures builders + NIX_CONFIG, and `remote-build`
+# streams just the named output files, avoiding a full closure copy — see
+# .tangled/workflows/packages.yml). This script is kept for callers that only
+# want nixbuild.net as a pull-only substituter.
 #
 # Uses an auth token (NIXBUILD_TOKEN). On NixOS / multi-user Nix, also writes
 # /root/.ssh so nix-daemon can reach the remote builder.
@@ -7,9 +15,6 @@
 # Usage:
 #   export NIXBUILD_TOKEN=…
 #   ./scripts/nixbuild-setup.sh
-#
-# GitHub Actions should use nixbuild/nixbuild-action instead; this script is
-# for Spindle/Tangled and other shell-only environments.
 set -euo pipefail
 
 TOKEN="${NIXBUILD_TOKEN:-${nixbuild_token:-}}"

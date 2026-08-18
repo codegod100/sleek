@@ -39,8 +39,10 @@ steps:
         echo "error: NIXBUILD_TOKEN secret is not set (nixbuild.net auth token)" >&2
         exit 1
       fi
-      bash scripts/nixbuild-setup.sh
-      nix build .#android --out-link result-android -L --print-build-logs
+      chmod +x scripts/ci-nixbuild.sh
+      export NIXBUILDNET_TOKEN="$NIXBUILD_TOKEN"
+      ./scripts/ci-nixbuild.sh setup
+      ./scripts/ci-nixbuild.sh remote-build ".#android" result-android sleek.apk
       test -s result-android/sleek.apk
       ls -lah result-android/
 
@@ -48,11 +50,22 @@ steps:
     command: |
       set -euo pipefail
       export NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
-      bash scripts/nixbuild-setup.sh
-      nix build .#flatpak --out-link result-flatpak -L --print-build-logs
+      if [[ -z "${NIXBUILD_TOKEN:-}" ]]; then
+        echo "error: NIXBUILD_TOKEN secret is not set (nixbuild.net auth token)" >&2
+        exit 1
+      fi
+      chmod +x scripts/ci-nixbuild.sh
+      export NIXBUILDNET_TOKEN="$NIXBUILD_TOKEN"
+      ./scripts/ci-nixbuild.sh setup
+      # Stream just the bundle + manifest out of the remote store path — a
+      # full `nix copy` would pull the flatpak's multi-GiB runtime closure
+      # onto the runner, which is what OOM'd boxci's hosted agents before it
+      # switched to streaming (see scripts/ci-nixbuild.sh).
+      ./scripts/ci-nixbuild.sh remote-build ".#flatpak" result-flatpak \
+        uk.nandi.sleek.flatpak build-info.json
       test -s result-flatpak/uk.nandi.sleek.flatpak
       ls -lah result-flatpak/
-      cat result-flatpak/build-info.json
+      cat result-flatpak/build-info.json 2>/dev/null || true
 
   - name: "Cut / move annotated tag `dev`"
     command: |
