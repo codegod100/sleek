@@ -5,15 +5,24 @@
 # of its own — OpenBao (same secret store cachix.yml already pulls from)
 # is the only place they live outside a human's own machine.
 #
-# Expects these keys under OpenBao's secret/data/ai-api-keys (or wherever
-# OPENBAO_SECRET_PATH points): CLOUDFLARE_API_TOKEN, TANGLED_WEBHOOK_SECRET,
-# BUILDBUDDY_API_KEY, UPLOAD_TOKEN — see deploy.sh's own header comment for
-# what each one needs to be able to do. If any are missing,
-# fetch-openbao-env.sh fails loudly (no partial/silent deploy).
+# Expects CLOUDFLARE_API_TOKEN and BUILDBUDDY_API_KEY under OpenBao's
+# secret/data/ai-api-keys (or wherever OPENBAO_SECRET_PATH points) — see
+# deploy.sh's own header comment for what each one needs to be able to do.
+# If either is missing, fetch-openbao-env.sh fails loudly (no
+# partial/silent deploy).
 #
 # CLOUDFLARE_ACCOUNT_ID isn't a secret in the same sense — not stored in
-# OpenBao, just resolved live from the API token itself (GET /accounts),
-# same value deploy.sh otherwise needs passed in manually.
+# OpenBao, just resolved live from the API token itself (GET /accounts).
+#
+# TANGLED_WEBHOOK_SECRET and UPLOAD_TOKEN are read from OpenBao if already
+# present there, else generated fresh + persisted back (so later runs
+# reuse the same value instead of rotating on every deploy — deploy.sh
+# overwrites the live Worker's secret bindings each run, and Tangled's own
+# webhook config has to match TANGLED_WEBHOOK_SECRET independently). If
+# this run generates a *new* TANGLED_WEBHOOK_SECRET (first-ever run, or
+# OpenBao's copy was deleted), the job log prints it unmasked — someone
+# needs to paste it into Tangled's Settings → Hooks → Secret for this repo
+# afterward, or webhook deliveries will 401 until that's done.
 name: Deploy proxy.latha.org
 
 on:
@@ -43,7 +52,38 @@ jobs:
           fi
           chmod +x scripts/fetch-openbao-env.sh
           ./scripts/fetch-openbao-env.sh --github-env --keys \
-            CLOUDFLARE_API_TOKEN,TANGLED_WEBHOOK_SECRET,BUILDBUDDY_API_KEY,UPLOAD_TOKEN
+            CLOUDFLARE_API_TOKEN,BUILDBUDDY_API_KEY
+
+      - name: Read or generate TANGLED_WEBHOOK_SECRET / UPLOAD_TOKEN
+        env:
+          OPENBAO_ADDR: https://openbao.boxd.sh
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+          OPENBAO_SECRET_PATH: secret/data/ai-api-keys
+        run: |
+          set -euo pipefail
+          chmod +x scripts/openbao-put-key.sh
+          for key in TANGLED_WEBHOOK_SECRET UPLOAD_TOKEN; do
+            if exports="$(./scripts/fetch-openbao-env.sh --export --keys "$key" 2>/dev/null)"; then
+              eval "$exports"
+              echo "using existing $key from OpenBao"
+            else
+              val="$(openssl rand -hex 32)"
+              ./scripts/openbao-put-key.sh "$key" --value "$val" >/dev/null
+              export "$key=$val"
+              if [[ "$key" == "TANGLED_WEBHOOK_SECRET" ]]; then
+                echo "generated + stored a NEW $key in OpenBao — paste this into Tangled's Settings > Hooks > Secret for this repo:"
+                echo "  $val"
+              else
+                echo "::add-mask::$val"
+                echo "generated + stored a new $key in OpenBao"
+              fi
+            fi
+            {
+              echo "${key}<<EOF"
+              echo "${!key}"
+              echo "EOF"
+            } >>"$GITHUB_ENV"
+          done
 
       - name: Resolve CLOUDFLARE_ACCOUNT_ID from the API token
         run: |
