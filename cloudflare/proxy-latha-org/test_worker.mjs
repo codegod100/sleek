@@ -316,6 +316,75 @@ async function testClientMetadataDocument() {
   console.log("PASS: /client-metadata.json is well-formed and self-referential");
 }
 
+async function testTagPushTriggersBuildAndPublishStep() {
+  const payload = JSON.stringify({
+    after: "tagcommitsha",
+    ref: "refs/tags/v1.2.3",
+    repository: { clone_url: "https://tangled.org/nandi.uk/sleek" },
+  });
+  const req = new Request("https://proxy.latha.org/webhook", {
+    method: "POST",
+    headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": sign("test-secret", payload) },
+    body: payload,
+  });
+  const before = calls.fetch.length;
+  const { ctx, pending } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.match(text, /tag v1\.2\.3/);
+  await Promise.all(pending);
+  assert.equal(calls.fetch.length, before + 1, "tag push must also trigger exactly one BuildBuddy call");
+  const bbBody = JSON.parse(calls.fetch[calls.fetch.length - 1].opts.body);
+  assert.equal(bbBody.branch, "v1.2.3", "tag name used as the checkout ref");
+  assert.match(bbBody.steps[0].run, /refs\/tags\/v1\.2\.3\^\{tag\}/, "build script computes the annotated tag object hash");
+  assert.match(bbBody.steps[0].run, /\/publish-release\/v1\.2\.3/, "build script calls back to publish the release");
+  console.log("PASS: tag push -> build queued with branch=tag and a release-publish step appended");
+}
+
+async function testPublishReleaseRejectsBadToken() {
+  const req = new Request("https://proxy.latha.org/publish-release/v1.2.3", {
+    method: "POST",
+    headers: { Authorization: "Bearer wrong", "content-type": "application/json" },
+    body: JSON.stringify({ sha: "x", tagHash: "y" }),
+  });
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 401);
+  console.log("PASS: publish-release with bad bearer token -> 401");
+}
+
+async function testPublishReleaseMissingArtifact404() {
+  const req = new Request("https://proxy.latha.org/publish-release/v1.2.3", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
+    body: JSON.stringify({ sha: "never-uploaded-sha", tagHash: "deadbeef" }),
+  });
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 404);
+  console.log("PASS: publish-release for a sha with no stored apk -> 404 (not a crash)");
+}
+
+async function testPublishReleaseWithoutOauthSession401() {
+  // apk is present but nobody has ever completed /oauth/login -> must fail
+  // clearly, not crash, and must not attempt any atproto network call.
+  const key = "releasesha/sleek.apk";
+  await env.ARTIFACTS.put(key, "fake apk bytes for release test");
+  const before = calls.fetch.length;
+  const req = new Request("https://proxy.latha.org/publish-release/v9.9.9", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
+    body: JSON.stringify({ sha: "releasesha", tagHash: "deadbeef" }),
+  });
+  const { ctx } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 401);
+  assert.match(await res.text(), /oauth\/login/);
+  assert.equal(calls.fetch.length, before, "must not call out to atproto without a session");
+  console.log("PASS: publish-release without a prior /oauth/login -> 401, no atproto calls attempted");
+}
+
 async function testOauthCallbackRejectsUnknownState() {
   const req = new Request("https://proxy.latha.org/oauth/callback?code=abc&state=never-issued");
   const { ctx } = ctxWithWaitUntil();
@@ -337,6 +406,10 @@ const tests = [
   testOauthSessionNeverServedAsArtifact,
   testClientMetadataDocument,
   testOauthCallbackRejectsUnknownState,
+  testTagPushTriggersBuildAndPublishStep,
+  testPublishReleaseRejectsBadToken,
+  testPublishReleaseMissingArtifact404,
+  testPublishReleaseWithoutOauthSession401,
 ];
 
 let failed = 0;

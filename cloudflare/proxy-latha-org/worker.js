@@ -50,6 +50,15 @@ export default {
     if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
       return handleDownload(request, env, url);
     }
+    if (request.method === "POST" && url.pathname.startsWith("/publish-release/")) {
+      return handlePublishRelease(request, env, url);
+    }
+    // Maintenance escape hatch for a bad/test sh.tangled.repo.artifact
+    // record — same UPLOAD_TOKEN auth as everything else, deliberately not
+    // exposed any other way (no listing endpoint).
+    if (request.method === "POST" && url.pathname === "/admin/delete-record") {
+      return handleAdminDeleteRecord(request, env, url);
+    }
     // atproto OAuth — lets nandi authorize this Worker once, via a URL, to
     // publish sh.tangled.repo.artifact release records to tangled.org
     // instead of pasting an app password. See the block near the bottom of
@@ -90,9 +99,16 @@ async function handleWebhook(request, env, ctx) {
     return new Response("bad json", { status: 400 });
   }
 
-  if (payload.ref !== "refs/heads/main") {
+  // main pushes build the apk; tag pushes build it *and* publish it to
+  // tangled.org as a sh.tangled.repo.artifact release record (see
+  // handlePublishRelease near the bottom of this file) — everything else
+  // (feature branches, etc.) is ignored.
+  const isMain = payload.ref === "refs/heads/main";
+  const tagMatch = typeof payload.ref === "string" ? payload.ref.match(/^refs\/tags\/(.+)$/) : null;
+  if (!isMain && !tagMatch) {
     return new Response(`ok: ignored ref ${payload.ref}`, { status: 200 });
   }
+  const tagName = tagMatch ? tagMatch[1] : null;
 
   const sha = payload.after;
   if (!sha) {
@@ -111,8 +127,8 @@ async function handleWebhook(request, env, ctx) {
 
   // Respond fast (Tangled times out at 30s + retries on 5xx); do the actual
   // BuildBuddy trigger after responding.
-  ctx.waitUntil(triggerBuild(env, cloneUrl, sha));
-  return new Response(`ok: build queued for ${sha}`, { status: 200 });
+  ctx.waitUntil(triggerBuild(env, cloneUrl, sha, { tagName }));
+  return new Response(`ok: build queued for ${sha}${tagName ? ` (tag ${tagName})` : ""}`, { status: 200 });
 }
 
 async function verifySignature(secret, rawBody, signatureHeader) {
@@ -139,7 +155,7 @@ function timingSafeEqual(a, b) {
 
 // --- BuildBuddy trigger -----------------------------------------------
 
-function buildScript(env, sha) {
+function buildScript(env, sha, tagName) {
   const uploadBase = `https://proxy.latha.org/upload/${sha}`;
   // Runs on a BuildBuddy remote-bazel executor. NOT Nix anymore (see git
   // history for the abandoned flake.nix/nix-daemon path) — this repo
@@ -159,7 +175,7 @@ function buildScript(env, sha) {
   // flatpak bundle yet (that was flake.nix's sleek-flatpak derivation;
   // porting it is future work), so this pipeline currently only publishes
   // the APK.
-  return [
+  const steps = [
     "set -euo pipefail",
     "if ! command -v buck2 >/dev/null 2>&1; then",
     "  mkdir -p \"$HOME/.local/bin\"",
@@ -184,13 +200,36 @@ function buildScript(env, sha) {
     "apk_path=$(grep '^root//:sleek-android-apk ' /tmp/buck2-build.log | awk '{print $2}')",
     '[ -n "$apk_path" ] && [ -f "$apk_path" ] || { echo "buck2 build did not produce //:sleek-android-apk output"; exit 1; }',
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$apk_path"`,
-  ].join("\n");
+  ];
+  if (tagName) {
+    // Ask the Worker to publish this apk as a sh.tangled.repo.artifact
+    // release record (see handlePublishRelease). Best-effort — the apk is
+    // already safely uploaded above by this point, so a publish failure
+    // here (e.g. OAuth was never completed via /oauth/login) shouldn't
+    // fail the whole build. Check /artifacts/releases/<tag>.json after for
+    // the actual outcome. `^{tag}` dereferences an annotated tag to its
+    // tag object hash (what sh.tangled.repo.artifact's `tag` field wants);
+    // falls back to the ref hash directly for lightweight tags, which have
+    // no separate tag object.
+    steps.push(
+      `tag_hash=$(git rev-parse "refs/tags/${tagName}^{tag}" 2>/dev/null || git rev-parse "refs/tags/${tagName}")`,
+      `curl -fsS -X POST "https://proxy.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
+        `-H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" ` +
+        `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"$tag_hash\\"}" ` +
+        `|| echo "release publish failed (apk is still uploaded at ${uploadBase}/sleek.apk)"`,
+    );
+  }
+  return steps.join("\n");
 }
 
-async function triggerBuild(env, cloneUrl, sha) {
+async function triggerBuild(env, cloneUrl, sha, { tagName } = {}) {
   const body = {
     repo: cloneUrl,
-    branch: "main",
+    // Tag names work as a checkout ref here the same way branch names do
+    // (plain `git clone --branch <ref>` semantics) — not yet verified
+    // against a real tag push through BuildBuddy specifically, only
+    // against main-branch pushes. First real tag push is the test.
+    branch: tagName || "main",
     // No platform_properties override needed now that buildScript() runs
     // buck2 instead of Nix: the actual compile happens on BuildBuddy's own
     // RE cluster (platforms/defs.bzl's custom sleek-rbe image), so this
@@ -198,7 +237,7 @@ async function triggerBuild(env, cloneUrl, sha) {
     // final ~20MB apk — default disk (~22G) is plenty. (The old Nix path
     // needed EstimatedFreeDiskBytes:"60GB" here because it compiled the
     // *entire* dependency graph inside this one VM — see git history.)
-    steps: [{ run: buildScript(env, sha) }],
+    steps: [{ run: buildScript(env, sha, tagName) }],
   };
   const resp = await fetch("https://app.buildbuddy.io/api/v1/Run", {
     method: "POST",
@@ -295,6 +334,112 @@ async function handleUploadComplete(request, env, url) {
   await mpu.complete(parts);
   await mirrorToLatest(env, key);
   return new Response(`ok: completed multipart upload for ${key}`, { status: 200 });
+}
+
+// --- tangled release publishing (sh.tangled.repo.artifact) ---------------
+
+// The repo's own auto-assigned DID (from the `tangled` git remote,
+// git@tangled.org:did:plc:eimwo4adqwppiiweleayixez) — NOT nandi's personal
+// DID (that's ATPROTO_DID below, used for the OAuth session/identity). This
+// one goes in the artifact record's `repo` field: which git repo the
+// release belongs to.
+const TANGLED_REPO_DID = "did:plc:eimwo4adqwppiiweleayixez";
+
+function b64Standard(bytesLike) {
+  let bin = "";
+  for (const b of new Uint8Array(bytesLike)) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+// uploadBlob + createRecord against nandi's own PDS, authenticated with the
+// stored OAuth session. Throws on any failure — caller decides what to do
+// with that (the apk itself is already safely in R2 by the time this runs).
+async function publishTangledArtifact(session, { apkBytes, filename, tagHashHex }) {
+  const uploadResp = await dpopFetch(`${session.pds}/xrpc/com.atproto.repo.uploadBlob`, {
+    method: "POST",
+    headers: { "content-type": "application/vnd.android.package-archive" },
+    body: apkBytes,
+    dpopKeys: session.dpopKeys,
+    accessToken: session.accessToken,
+  });
+  if (!uploadResp.ok) throw new Error(`uploadBlob failed: ${uploadResp.status} ${await uploadResp.text()}`);
+  const { blob } = await uploadResp.json();
+
+  const record = {
+    repo: TANGLED_REPO_DID,
+    tag: b64Standard(new TextEncoder().encode(tagHashHex)),
+    name: filename,
+    artifact: blob,
+    createdAt: new Date().toISOString(),
+  };
+  const createResp = await dpopFetch(`${session.pds}/xrpc/com.atproto.repo.createRecord`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repo: session.sub, collection: "sh.tangled.repo.artifact", record }),
+    dpopKeys: session.dpopKeys,
+    accessToken: session.accessToken,
+  });
+  if (!createResp.ok) throw new Error(`createRecord failed: ${createResp.status} ${await createResp.text()}`);
+  return createResp.json();
+}
+
+// Called by buildScript() after a tag-triggered build's apk is already
+// uploaded (see /publish-release/<tag> route). Not part of the atproto
+// OAuth block below, but depends on it (getAtprotoSession, dpopFetch).
+async function handlePublishRelease(request, env, url) {
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
+  const tagName = decodeURIComponent(url.pathname.replace(/^\/publish-release\//, ""));
+  if (!tagName) return new Response("missing tag", { status: 400 });
+
+  let body;
+  try {
+    body = JSON.parse(await request.text());
+  } catch {
+    return new Response("bad json", { status: 400 });
+  }
+  const { sha, tagHash } = body;
+  if (!sha || !tagHash) return new Response("missing sha/tagHash", { status: 400 });
+
+  const apkObj = await env.ARTIFACTS.get(`${sha}/sleek.apk`);
+  if (!apkObj) return new Response(`no artifact stored for ${sha}/sleek.apk`, { status: 404 });
+  const apkBytes = await new Response(apkObj.body).arrayBuffer();
+
+  const session = await getAtprotoSession(env);
+  if (!session) {
+    return new Response(
+      "not authorized to publish — visit https://proxy.latha.org/oauth/login once, then retry",
+      { status: 401 },
+    );
+  }
+
+  try {
+    const result = await publishTangledArtifact(session, { apkBytes, filename: "sleek.apk", tagHashHex: tagHash });
+    await env.ARTIFACTS.put(`releases/${tagName}.json`, JSON.stringify({
+      tagName, sha, tagHash, publishedAt: new Date().toISOString(), record: result,
+    }));
+    return new Response(JSON.stringify(result), { headers: { "content-type": "application/json" } });
+  } catch (e) {
+    await env.ARTIFACTS.put(`releases/${tagName}.json`, JSON.stringify({
+      tagName, sha, tagHash, failedAt: new Date().toISOString(), error: e.message,
+    }));
+    return new Response(`publish failed: ${e.message}`, { status: 502 });
+  }
+}
+
+async function handleAdminDeleteRecord(request, env, url) {
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
+  const rkey = url.searchParams.get("rkey");
+  if (!rkey) return new Response("missing ?rkey=", { status: 400 });
+  const session = await getAtprotoSession(env);
+  if (!session) return new Response("no atproto session", { status: 401 });
+  const resp = await dpopFetch(`${session.pds}/xrpc/com.atproto.repo.deleteRecord`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repo: session.sub, collection: "sh.tangled.repo.artifact", rkey }),
+    dpopKeys: session.dpopKeys,
+    accessToken: session.accessToken,
+  });
+  return new Response(await resp.text(), { status: resp.status, headers: { "content-type": "application/json" } });
 }
 
 async function handleDownload(request, env, url) {
@@ -399,10 +544,21 @@ async function dpopFetch(url, { method = "POST", body, headers = {}, dpopKeys, n
     return fetch(url, { method, headers: h, body });
   };
   let resp = await attempt(nonce);
-  if (resp.status === 400) {
-    let errBody = {};
-    try { errBody = await resp.clone().json(); } catch { /* not json, not a nonce error */ }
-    if (errBody.error === "use_dpop_nonce") {
+  // The auth/token endpoints signal a required nonce with 400 + a JSON
+  // {"error":"use_dpop_nonce"} body (confirmed live against PAR/token).
+  // Resource-server endpoints (uploadBlob, createRecord) instead use 401 +
+  // a WWW-Authenticate header (confirmed live against uploadBlob — it does
+  // NOT reuse the 400+JSON shape). Check both; either way a DPoP-Nonce
+  // response header carries the value to retry with.
+  if (resp.status === 400 || resp.status === 401) {
+    let isNonceError = (resp.headers.get("WWW-Authenticate") || "").includes("use_dpop_nonce");
+    if (!isNonceError) {
+      try {
+        const errBody = await resp.clone().json();
+        isNonceError = errBody.error === "use_dpop_nonce";
+      } catch { /* not json, not a nonce error */ }
+    }
+    if (isNonceError && resp.headers.get("DPoP-Nonce")) {
       resp = await attempt(resp.headers.get("DPoP-Nonce"));
     }
   }
