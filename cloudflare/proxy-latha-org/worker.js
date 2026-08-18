@@ -121,17 +121,49 @@ function buildScript(env, sha) {
     "    | sh -s -- install linux --no-confirm --init none",
     "  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh",
     "fi",
+    // Cache trust MUST live in the daemon's own /etc/nix/nix.conf, not just
+    // client-side NIX_CONFIG: `nix build` below runs as the unprivileged
+    // build user while nix-daemon runs as root (via sudo), and Nix silently
+    // drops extra-substituters/extra-trusted-public-keys supplied by a
+    // non-trusted-user client — same reasoning as scripts/ci-nixbuild.sh's
+    // setup_nixbuild() writing /etc/nix/sleek-nixbuild.conf as root before
+    // starting the daemon. Confirmed the hard way on a real run: cachix
+    // already had cargo-vendor-dir cached (200 on its .narinfo) but the
+    // build still compiled it from scratch and ran the executor's disk to
+    // 100% doing so — the substituter was configured but never trusted.
+    "sudo mkdir -p /etc/nix",
+    "printf '%s\\n' " +
+      "'experimental-features = nix-command flakes' " +
+      "'accept-flake-config = true' " +
+      "'extra-substituters = https://codegod100.cachix.org' " +
+      "'extra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA=' " +
+      "| sudo tee /etc/nix/sleek-cachix.conf >/dev/null",
+    "grep -qxF 'include /etc/nix/sleek-cachix.conf' /etc/nix/nix.conf 2>/dev/null || " +
+      "echo 'include /etc/nix/sleek-cachix.conf' | sudo tee -a /etc/nix/nix.conf >/dev/null",
     // `--init none` never starts nix-daemon as a background process — a bare
     // `nix build` afterwards fails with `opening lock file ".../big-lock":
     // Permission denied` (confirmed on a real BuildBuddy remote run). Start
     // it ourselves and wait for the socket, same pattern as
-    // scripts/ci-nixbuild.sh's setup_nixbuild().
-    "if [ ! -S /nix/var/nix/daemon-socket/socket ]; then",
-    "  sudo \"$(command -v nix)\" daemon >/tmp/nix-daemon.log 2>&1 &",
-    "  for _ in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; sleep 1; done",
-    "  [ -S /nix/var/nix/daemon-socket/socket ] || { echo 'nix-daemon socket missing'; cat /tmp/nix-daemon.log; exit 1; }",
+    // scripts/ci-nixbuild.sh's setup_nixbuild(). BuildBuddy recycles
+    // runners/snapshots across builds on this branch, so a daemon from an
+    // earlier invocation of this script may still be alive and holding the
+    // *old* config in memory — restart it whenever it's already running so
+    // the nix.conf edit above always actually takes effect.
+    "if [ -S /nix/var/nix/daemon-socket/socket ]; then",
+    "  sudo pkill -x nix-daemon || true",
+    "  for _ in $(seq 1 30); do [ ! -S /nix/var/nix/daemon-socket/socket ] && break; sleep 1; done",
     "fi",
-    "export NIX_CONFIG=$'experimental-features = nix-command flakes\\naccept-flake-config = true\\nextra-substituters = https://codegod100.cachix.org\\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='",
+    "sudo \"$(command -v nix)\" daemon >/tmp/nix-daemon.log 2>&1 &",
+    "for _ in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; sleep 1; done",
+    "[ -S /nix/var/nix/daemon-socket/socket ] || { echo 'nix-daemon socket missing'; cat /tmp/nix-daemon.log; exit 1; }",
+    "export NIX_CONFIG=$'experimental-features = nix-command flakes\\naccept-flake-config = true'",
+    "nix show-config | grep -E '^(substituters|trusted-substituters|trusted-public-keys) =' || true",
+    // Recycled runners keep whatever the *previous* build's store looked
+    // like, including anything that only became garbage after that build
+    // finished (its result-* out-links only exist in that dead job's
+    // workdir) — reclaim it before adding more, since disk is the one
+    // resource this whole pipeline exists to have enough of.
+    "sudo nix-collect-garbage -d || true",
     "nix build .#android --out-link result-android -L --print-build-logs",
     "nix build .#flatpak --out-link result-flatpak -L --print-build-logs",
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @result-android/sleek.apk`,
