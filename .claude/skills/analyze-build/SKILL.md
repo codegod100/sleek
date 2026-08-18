@@ -11,10 +11,25 @@ description: >
 # Analyze BuildBuddy builds
 
 Pipeline: push to `tangled.org/nandi.uk/sleek` (main) -> Worker webhook ->
-`POST /api/v1/Run` on BuildBuddy -> executor builds `.#android` + `.#flatpak`
--> PUTs artifacts back to the Worker -> stored in R2, served at
-`https://proxy.latha.org/artifacts/<sha>/...`. See
-`cloudflare/proxy-latha-org/README.md` for the full design.
+`POST /api/v1/Run` on BuildBuddy -> executor self-installs the buck2 client
+(musl static binary, no nix/toolchain install needed) and runs
+`buck2 build //:sleek-android-apk` -> the actual compile happens on
+BuildBuddy's own RE cluster via the repo's `platforms/defs.bzl` custom
+`sleek-rbe` image (pixi + Android NDK baked in), with real BuildBuddy
+action-cache reuse -> executor PUTs `sleek.apk` back to the Worker -> stored
+in R2, served at `https://proxy.latha.org/artifacts/<sha>/...`. Not Nix
+anymore — see git history for the abandoned flake.nix/nix-daemon path.
+See `cloudflare/proxy-latha-org/README.md` for the full design.
+
+## Push -> watch briefly -> if it doesn't start, just push again
+
+After a push, poll `https://proxy.latha.org/artifacts/<sha>/invocation.json`
+for ~1-2 minutes (a few 5s probes). If an `invocationId` shows up but
+`GetInvocation` stays `{}`/null for a couple more minutes, that's the
+registration bug below — don't keep waiting on it, it's probably just
+bollocked. Make a trivial retry push (`git commit --allow-empty -m retry`,
+`git push tangled main`) and watch the new invocation instead. This has
+consistently been faster than waiting out the bug.
 
 ## Find the invocation ID for a push
 
@@ -96,39 +111,33 @@ build takes ~10-15 minutes.
   pipeline-specific problem or this general flakiness before assuming a
   code bug. That build's result is unrecoverable — retry with a new commit,
   don't wait on the same invocation ID.
-- **Default executor disk (~22G) is too small** for a from-scratch build of
-  this repo. Fixed by requesting a bigger one via `platform_properties` on
-  the `Run` request body:
-  ```json
-  {"platform_properties": {"EstimatedFreeDiskBytes": "60GB"}}
-  ```
-  Confirmed this actually resizes the VM (`df -h /` inside reported a real
-  63G disk with it set, vs. ~22G without). Already baked into
-  `cloudflare/proxy-latha-org/worker.js`'s `triggerBuild`.
-- **`extra-substituters`/`extra-trusted-public-keys` set via client-side
-  `NIX_CONFIG` are silently dropped** by nix-daemon when the invoking user
-  isn't a `trusted-user` (the build script runs `nix build` as an
-  unprivileged user while the daemon runs as root via `sudo`). Confirmed
-  the hard way: `codegod100.cachix.org` already had a needed derivation
-  cached (`200` on its `.narinfo`) but the build still compiled it from
-  scratch. Fix: write substituter config into `/etc/nix/nix.conf` (the
-  daemon's own, inherently-trusted config) as root *before* starting the
-  daemon — same pattern as `scripts/ci-nixbuild.sh`'s `setup_nixbuild()`.
-  Already baked into `worker.js`.
-- **BuildBuddy recycles runners/snapshots** across builds on the same
-  branch for speed — meaning stale state (an old `nix-daemon` process, old
-  `result-*` out-link symlinks that pin GC roots, prior disk usage) can
-  carry over between otherwise-unrelated invocations. `worker.js`'s build
-  script now: removes stale out-links before `nix-collect-garbage -d`,
-  and restarts the daemon whenever one is already running so config edits
-  always take effect.
+- **buck2's `gnu` release binary needs a newer glibc than the executor
+  has**: the trigger executor image is Ubuntu 20.04 focal (glibc 2.31);
+  the `buck2-x86_64-unknown-linux-gnu` "latest" release build requires
+  glibc >=2.32 (up to 2.39), so it fails instantly at `buck2 --version`
+  with `GLIBC_2.3x not found` and the invocation completes in ~12s with
+  no artifact. Confirmed via `bb view` on a real failed invocation. Fixed
+  by installing the statically-linked `buck2-x86_64-unknown-linux-musl`
+  release instead (no glibc dependency at all) — baked into `worker.js`'s
+  `buildScript()`. A local `buck2 build` test won't catch this if your
+  dev machine's glibc happens to be newer — always verify a *fresh*
+  end-to-end run, not just a local one.
+- No disk-size override or Nix substituter/GC-root workarounds are needed
+  anymore — those were specific to the old Nix-based pipeline (see git
+  history for `flake.nix`/nix-daemon and `scripts/ci-nixbuild.sh`, since
+  removed from the active path). buck2 compiles on BuildBuddy's own RE
+  cluster via `platforms/defs.bzl`'s `sleek-rbe` container image; the
+  trigger executor itself only holds the repo checkout + buck2 client +
+  the final ~20MB apk, so default disk (~22G) is plenty.
 
 ## If a build fails
 
-1. `bb view <id>` for the full log — look for the actual compiler/linker
-   error near the end, not just `bazelExitCode: Failed`.
-2. Check `df -h /` lines in the log (the build script prints checkpoints
-   around GC and each `nix build` step) to rule disk in/out fast.
+1. `bb view <id>` for the full log — look for the actual error near the
+   end, not just `bazelExitCode: Failed`. A failure within ~15s of the
+   invocation starting means it never got to `buck2 build` at all (glibc
+   mismatch, download failure, etc.) — check the very top of the log.
+2. `df -h /` lines are printed as checkpoints around the buck2 build step,
+   in case disk is ever a factor again (unlikely now — see above).
 3. Cross-check `host` from `GetInvocation` — if two failures share a host
    within a short window, suspect executor-level contention/leftover state
    over a code bug.
