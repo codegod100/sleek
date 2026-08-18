@@ -112,6 +112,16 @@ function buildScript(env, sha) {
     "    | sh -s -- install linux --no-confirm --init none",
     "  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh",
     "fi",
+    // `--init none` never starts nix-daemon as a background process — a bare
+    // `nix build` afterwards fails with `opening lock file ".../big-lock":
+    // Permission denied` (confirmed on a real BuildBuddy remote run). Start
+    // it ourselves and wait for the socket, same pattern as
+    // scripts/ci-nixbuild.sh's setup_nixbuild().
+    "if [ ! -S /nix/var/nix/daemon-socket/socket ]; then",
+    "  sudo \"$(command -v nix)\" daemon >/tmp/nix-daemon.log 2>&1 &",
+    "  for _ in $(seq 1 30); do [ -S /nix/var/nix/daemon-socket/socket ] && break; sleep 1; done",
+    "  [ -S /nix/var/nix/daemon-socket/socket ] || { echo 'nix-daemon socket missing'; cat /tmp/nix-daemon.log; exit 1; }",
+    "fi",
     "export NIX_CONFIG=$'experimental-features = nix-command flakes\\naccept-flake-config = true\\nextra-substituters = https://codegod100.cachix.org\\nextra-trusted-public-keys = codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA='",
     "nix build .#android --out-link result-android -L --print-build-logs",
     "nix build .#flatpak --out-link result-flatpak -L --print-build-logs",
