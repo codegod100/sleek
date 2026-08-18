@@ -138,19 +138,26 @@ https://tangled.org/nandi.uk/sleek/tags/v0.1.5. Tangled serves each one at a pla
 https://tangled.org/nandi.uk/sleek/tags/<tag>/download/<filename>
 ```
 
-**Single-command install** (real hosted OSTree repo on `proxy.latha.org`, backed by R2 — built from
+**Single-command install** (real hosted OSTree repo on `artifacts.latha.org`, backed by R2 — built from
 the tagged `.flatpak` bundle via `flatpak build-import-bundle`, `flatpak/uk.nandi.sleek.flatpakref`
 points at it):
 
 ```bash
-flatpak install --user https://proxy.latha.org/artifacts/uk.nandi.sleek.flatpakref
+flatpak install --user https://artifacts.latha.org/artifacts/sleek/uk.nandi.sleek.flatpakref
 flatpak run uk.nandi.sleek
 ```
 
-The repo lives at `https://proxy.latha.org/artifacts/repo/` (ref `app/uk.nandi.sleek/x86_64/master`);
-the runtime (`org.gnome.Platform`//49) comes from Flathub via the `.flatpakref`'s `RuntimeRepo=`. This
-repo currently tracks whatever bundle was last pushed there manually — it is **not** yet wired into
-CI/the tag-artifact publish flow, so it can lag behind the latest tag.
+`artifacts.latha.org` is a multi-app build-artifact clearing house
+([codegod100/artifacts](https://github.com/codegod100/artifacts)) — sleek's artifacts live under the
+`sleek/` key prefix there. It replaces the old sleek-only Worker at `proxy.latha.org`
+(this repo's `cloudflare/proxy-latha-org/`), which is still live for now but no longer the canonical
+install path.
+
+The repo lives at `https://artifacts.latha.org/artifacts/sleek/repo/` (ref
+`app/uk.nandi.sleek/x86_64/master`); the runtime (`org.gnome.Platform`//49) comes from Flathub via the
+`.flatpakref`'s `RuntimeRepo=`. This repo currently tracks whatever bundle was last pushed there
+manually — it is **not** yet wired into CI/the tag-artifact publish flow, so it can lag behind the
+latest tag.
 
 Alternatively, the `.flatpak` bundle itself is attached to each tag as a downloadable asset — but
 `flatpak install` flatly refuses a remote URL for a bundle (`error: Remote bundles are not supported`,
