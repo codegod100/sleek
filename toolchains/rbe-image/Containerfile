@@ -6,7 +6,12 @@
 # image with pixi + the Android NDK baked in, matching flake.nix's
 # devShell env exactly, so sleek-android-lib's `cargo build` has
 # everything it needs without depending on this machine's local pixi/NDK
-# install. See README.md in this directory for how to build + push it.
+# install. Also bakes in flatpak + flatpak-builder + a system-wide
+# org.gnome.Platform//49 + org.gnome.Sdk//49 install for flatpak.bzl's
+# sleek-flatpak genrule (see near the bottom of this file) — same
+# "pre-install so RE actions don't need Flathub network access" pattern as
+# the Android NDK/SDK. See README.md in this directory for how to build +
+# push it.
 FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
 
 # build-essential: pixi's own clang/libclang (bindgen's dependency, see
@@ -105,3 +110,29 @@ COPY pixi.toml pixi.lock /tmp/sleek-pixi/
 RUN cd /tmp/sleek-pixi && pixi install --locked \
     && pixi run -- cargo install --root /opt/cargo-apk cargo-apk \
     && rm -rf /tmp/sleek-pixi
+
+# flatpak + flatpak-builder — for flatpak.bzl's sleek-flatpak genrule
+# (packages //:sleek-host into a distributable .flatpak using the GNOME
+# Platform/49 runtime; ports flake.nix's old nix2flatpak-based
+# sleek-flatpak derivation, see that file's git history). Jammy's stock
+# apt versions (flatpak 1.12.7, flatpak-builder 1.2.2 — both quite old)
+# confirmed able to pull a current GNOME 49 runtime from Flathub fine, no
+# PPA needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    flatpak flatpak-builder \
+    && rm -rf /var/lib/apt/lists/*
+
+# System-wide (not --user): RE actions may run as any/no particular user
+# and shouldn't need a real $HOME set up just to see the runtime — a
+# system install under /var/lib/flatpak is visible to everyone. Installed
+# at image-build time (network access, but only once here) so RE actions
+# themselves need no Flathub access — same rationale as pre-warming pixi
+# above and baking in the Android NDK/SDK.
+#
+# flatpak-builder's `"appstream-compose": false` manifest key (see
+# flatpak/uk.nandi.sleek.json) means appstreamcli's compose subcommand is
+# never invoked, so it deliberately isn't installed here — confirmed
+# jammy's own `appstream` package (0.15.2) doesn't ship it anyway (that
+# subcommand only exists in much newer libappstream releases).
+RUN flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo \
+    && flatpak install -y --noninteractive --system flathub org.gnome.Platform//49 org.gnome.Sdk//49

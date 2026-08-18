@@ -18,3 +18,9 @@ result-*
 .pixi/
 # devenv's local nix-eval cache/state (devenv.nix) — same role as .direnv/
 .devenv/
+# flatpak-builder scratch state + bundle output (flatpak/uk.nandi.sleek.json
+# is the only committed file in flatpak/)
+/flatpak/build-dir/
+/flatpak/export-repo/
+/flatpak/.flatpak-builder/
+/flatpak/*.flatpak

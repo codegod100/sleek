@@ -1,4 +1,5 @@
 load(":cargo.bzl", "cargo_apk_genrule", "cargo_genrule")
+load(":flatpak.bzl", "flatpak_genrule")
 
 # `buck2 build //:sleek-host` / `buck2 run //:sleek-host`
 # Equivalent to `just host` (desktop egui/eframe window), minus the DISPLAY /
@@ -43,4 +44,19 @@ cargo_apk_genrule(
     name = "sleek-android-apk",
     manifest = "android/Cargo.toml",
     package = "sleek",
+)
+
+# `buck2 build //:sleek-flatpak`
+# Packages //:sleek-host into a distributable .flatpak bundle (GNOME
+# Platform/49 runtime, uk.nandi.sleek app ID) — buck2/RBE equivalent of
+# `nix build .#flatpak` (see flake.nix's nix2flatpak-based sleek-flatpak
+# derivation, which this mirrors in appId/runtime/permissions but builds
+# via plain flatpak-builder instead — nix2flatpak has no buck2 analog).
+# Output: buck-out/.../uk.nandi.sleek.flatpak
+#   buck2 build --show-output //:sleek-flatpak
+#   flatpak install --user buck-out/.../uk.nandi.sleek.flatpak
+flatpak_genrule(
+    name = "sleek-flatpak",
+    manifest = "flatpak/uk.nandi.sleek.json",
+    app_id = "uk.nandi.sleek",
 )
