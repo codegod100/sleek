@@ -1,0 +1,11 @@
+[Flatpak Ref]
+Title=Sleek
+Name=uk.nandi.sleek
+Branch=master
+Url=https://proxy.latha.org/artifacts/repo/
+SuiteName=sleek
+RuntimeRepo=https://flathub.org/repo/flathub.flatpakrepo
+IsRuntime=false
+Comment=Mobile freeq client built with Vidya
+Description=Mobile freeq client built with Vidya (GNOME/HIG-inspired egui theme) and freeq-sdk.
+Homepage=https://tangled.org/nandi.uk/sleek
