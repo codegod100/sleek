@@ -419,14 +419,46 @@ async function handleUploadComplete(request, env, url) {
 // The repo's own auto-assigned DID (from the `tangled` git remote,
 // git@tangled.org:did:plc:eimwo4adqwppiiweleayixez) — NOT nandi's personal
 // DID (that's ATPROTO_DID below, used for the OAuth session/identity). This
-// one goes in the artifact record's `repo` field: which git repo the
-// release belongs to.
+// one goes in the artifact record's `repoDid` field: which git repo the
+// release belongs to. NOT the record's `repo` field — despite the name,
+// that one is typed as an at-uri (a pointer to a sh.tangled.repo.repo
+// *record*, which we don't have), not a bare DID; repoDid is the plain-DID
+// field. Confirmed against the actual lexicon (tangled.org/tangled.org/core,
+// lexicons/sh/tangled/repo/artifact.json, cross-checked via the generated
+// @atcute/tangled npm package's artifact.d.ts) after v0.1.4's published
+// record never showed up in the tag page's Artifacts list — turned out we'd
+// been sending this as `repo` (wrong field, wrong format: bare DID isn't a
+// valid at-uri) and never setting `repoDid` at all.
 const TANGLED_REPO_DID = "did:plc:eimwo4adqwppiiweleayixez";
 
 function b64Standard(bytesLike) {
   let bin = "";
   for (const b of new Uint8Array(bytesLike)) bin += String.fromCharCode(b);
   return btoa(bin);
+}
+
+// The lexicon's `tag` field is `bytes` constrained to exactly 20 bytes —
+// the raw binary SHA-1 digest of the git tag object, not its 40-character
+// hex string. hexToBytes() does the hex-pair -> raw-byte conversion;
+// atprotoBytes() wraps those raw bytes in the `{"$bytes": "<base64>"}` JSON
+// form the atproto data model uses to represent a `bytes`-typed field (a
+// bare base64 *string* value, which is what this code sent before, decodes
+// as a `string`-typed field instead — silently the wrong CBOR type, not
+// just the wrong length). Both bugs (wrong type, wrong length: 40 raw
+// UTF-8 bytes of the hex text vs. the required 20) are why v0.1.4's
+// published record didn't validate as a real artifact and never appeared
+// in the tag page's Artifacts list, even though createRecord itself
+// returned 200 (the PDS doesn't fetch+validate against a repo's own
+// externally-hosted lexicon before accepting a write).
+function hexToBytes(hex) {
+  if (hex.length % 2 !== 0) throw new Error(`hexToBytes: odd-length hex string ${JSON.stringify(hex)}`);
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function atprotoBytes(rawBytes) {
+  return { $bytes: b64Standard(rawBytes) };
 }
 
 // uploadBlob + createRecord against nandi's own PDS, authenticated with the
@@ -444,8 +476,8 @@ async function publishTangledArtifact(session, { apkBytes, filename, tagHashHex 
   const { blob } = await uploadResp.json();
 
   const record = {
-    repo: TANGLED_REPO_DID,
-    tag: b64Standard(new TextEncoder().encode(tagHashHex)),
+    repoDid: TANGLED_REPO_DID,
+    tag: atprotoBytes(hexToBytes(tagHashHex)),
     name: filename,
     artifact: blob,
     createdAt: new Date().toISOString(),
