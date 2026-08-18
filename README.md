@@ -119,7 +119,7 @@ CI APKs are signed with the committed `android/ci.keystore` (password `android`,
 
 ### Spindle (Tangled CI)
 
-[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs) — hosted Spindle can't compile these itself, so warm the cache first from a machine that can (`just android`, `just flatpak && cachix push codegod100 ./result-flatpak`). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) builds `.#android` and `.#flatpak` on pushes/PRs to `main` (and manual runs), preferring a hit in the `codegod100` Cachix cache but compiling in-pipeline on a miss (`just android` / `just flatpak && cachix push codegod100 ./result-flatpak` locally still saves Spindle the work). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
 
 | Secret | Purpose |
 |--------|---------|
