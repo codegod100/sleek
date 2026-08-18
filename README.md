@@ -119,11 +119,10 @@ CI APKs are signed with the committed `android/ci.keystore` (password `android`,
 
 ### Spindle (Tangled CI)
 
-[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) also builds `.#android` and `.#flatpak` on nixbuild.net (via `scripts/ci-nixbuild.sh`, same remote-builder + streamed-artifact setup as boxci) on pushes/PRs to `main` (and manual runs). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) substitutes `.#android` and `.#flatpak` from the `codegod100` Cachix cache on pushes/PRs to `main` (and manual runs) — hosted Spindle can't compile these itself, so warm the cache first from a machine that can (`just android`, `just flatpak && cachix push codegod100 ./result-flatpak`). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
 
 | Secret | Purpose |
 |--------|---------|
-| `NIXBUILD_TOKEN` | nixbuild.net auth token — remote compile |
 | `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
 | `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
 
