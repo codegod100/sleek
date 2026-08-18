@@ -1822,7 +1822,8 @@ pub fn react_picker_overlay(
                             .id_salt(("react_emoji_search", msgid.as_str()))
                             .desired_width(search_w)
                             .hint_text("Search emoji…")
-                            .font(egui::TextStyle::Body),
+                            .font(egui::TextStyle::Body)
+                            .margin(th.text_edit_margin()),
                     );
                     text_edit_clipboard_menu(ui, th, &search_resp);
                 });
