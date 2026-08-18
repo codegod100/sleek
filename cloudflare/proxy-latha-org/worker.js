@@ -81,6 +81,25 @@ export default {
 async function handleWebhook(request, env, ctx) {
   const rawBody = await request.text();
 
+  // TEMPORARY debug tap (see /goal publish built artifacts on tangled
+  // investigation, 2026-08-18): record every webhook delivery — headers +
+  // raw body — regardless of signature/ref outcome, so a real Tangled
+  // tag-push delivery can be inspected via GET /artifacts/debug/last-webhook.json
+  // without needing Cloudflare API/dashboard access. Remove once the tag
+  // pipeline is confirmed working end-to-end.
+  ctx.waitUntil(
+    env.ARTIFACTS.put(
+      "debug/last-webhook.json",
+      JSON.stringify({
+        receivedAt: new Date().toISOString(),
+        event: request.headers.get("X-Tangled-Event"),
+        hasSignature: !!request.headers.get("X-Tangled-Signature-256"),
+        bodyLength: rawBody.length,
+        body: rawBody,
+      }),
+    ),
+  );
+
   if (env.TANGLED_WEBHOOK_SECRET) {
     const sigHeader = request.headers.get("X-Tangled-Signature-256");
     const ok = await verifySignature(env.TANGLED_WEBHOOK_SECRET, rawBody, sigHeader);
