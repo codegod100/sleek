@@ -1,8 +1,8 @@
 class Sleek < Formula
   desc "Mobile freeq client (egui desktop host)"
-  homepage "https://github.com/codegod100/sleek"
+  homepage "https://tangled.org/nandi.uk/sleek"
   license "MIT"
-  head "https://github.com/codegod100/sleek.git", branch: "main"
+  head "https://tangled.org/nandi.uk/sleek.git", branch: "main"
 
   depends_on "pkg-config" => :build
   depends_on "rust" => :build
