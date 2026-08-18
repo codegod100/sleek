@@ -1725,10 +1725,10 @@ impl AppState {
 
     /// Channels to auto-join after registration (client-side room memory).
     /// Guests always get `#test` in the list so first-run / guest login has a
-    /// useful room even when prefs only remembered `#general`.
+    /// useful room even when prefs remembered no channels.
     pub fn auto_join_channels(&self) -> Vec<String> {
         let mut chans = if self.recent_channels.is_empty() {
-            vec!["#general".into(), "#test".into()]
+            vec!["#test".into()]
         } else {
             self.recent_channels.clone()
         };
@@ -2579,7 +2579,6 @@ fn normalize_recent_channels(raw: Vec<String>) -> Vec<String> {
         out.push(n);
     }
     if out.is_empty() {
-        out.push("#general".into());
         out.push("#test".into());
     }
     out
