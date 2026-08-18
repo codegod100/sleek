@@ -1,0 +1,60 @@
+[workspace]
+name = "sleek"
+description = "Sleek — mobile freeq client (Vidya + freeq-sdk)"
+channels = ["conda-forge"]
+# Waydroid/Flatpak packaging still goes through flake.nix — this manifest
+# covers the dev shell, the desktop host build, and (via cargo-apk +
+# rust-std-aarch64-linux-android below) the real Android APK build, for
+# buck2's RBE-capable //:sleek-android-apk (see cargo.bzl, BUCK) — a
+# from-scratch reimplementation of flake.nix's `nix build .#android`
+# derivation on this toolchain instead, not a wrapper around it.
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+rust = "*"
+just = "*"
+pkg-config = "*"
+openssl = "*"
+mold = "*"
+# Pinned below 22 (conda-forge's current default): clang 22 ships genuinely
+# broken AVX10.2/AMX intrinsic headers (pre-release, unreleased-hardware ISA
+# extensions) — <immintrin.h> pulling them in fails to parse under -std=c1x
+# with "cannot convert a value of type 'int' to vector type ... which has
+# different size", breaking ring's (BoringSSL-derived) C build. Confirmed
+# hitting this under RBE; 17 is a well-established, mature LLVM release.
+libclang = "17.*"
+clang = "17.*"
+# aarch64-linux-android — real Android phones (arm64-v8a). Without this,
+# rustc has no core/std for that target at all: "can't find crate for
+# `core` ... the aarch64-linux-android target may not be installed" —
+# conda-forge's plain `rust` package only ships the host target.
+rust-std-aarch64-linux-android = "*"
+pipewire = "*"
+alsa-lib = "*"
+xorg-libx11 = "*"
+libxkbcommon = "*"
+libgl-devel = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxrandr = "*"
+git = "*"
+curl = "*"
+ca-certificates = "*"
+
+[activation.env]
+OPENSSL_NO_VENDOR = "1"
+SLEEK_LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+LIBCLANG_PATH = "$CONDA_PREFIX/lib"
+# egui/winit + cpal/pipewire runtime libs live in the pixi env's own prefix
+# (unlike Nix, this one prefix covers all of them — no makeLibraryPath list).
+SLEEK_LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
+
+[activation]
+# clang's resource-dir version changes with the package; discover it instead
+# of hardcoding, same as devenv.nix does via pkgs.llvmPackages.libclang.version.
+scripts = ["scripts/pixi-activate.sh"]
+
+[tasks]
+# Desktop window (see justfile `host` for the fuller DISPLAY/libclang guard).
+host = "just host"
+lib = "cargo build --manifest-path android/Cargo.toml --lib"

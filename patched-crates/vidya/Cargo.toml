@@ -1,0 +1,17 @@
+[package]
+name = "vidya"
+version = "0.1.0"
+edition = "2021"
+description = "Vidya — GNOME/HIG-inspired theme layer for egui (no GTK)"
+license = "MIT"
+repository = "https://tangled.org/nandi.uk/vidya"
+keywords = ["egui", "theme", "gui", "vidya"]
+categories = ["gui"]
+readme = "README.md"
+
+[dependencies]
+egui = { version = "0.31", default-features = false }
+# Decode bundled Twemoji PNGs for color reaction icons.
+png = "0.17"
+# Read the full Twemoji pack (`assets/emoji/twemoji-72x72.zip`).
+zip = { version = "2", default-features = false, features = ["deflate"] }

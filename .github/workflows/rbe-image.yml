@@ -1,0 +1,53 @@
+# Builds toolchains/rbe-image/Containerfile and pushes it to
+# ghcr.io/codegod100/sleek-rbe:latest — the RBE worker image
+# platforms/defs.bzl pins (by digest — see that file's comment on why).
+#
+# Manual only (workflow_dispatch): this image only needs rebuilding when
+# the Containerfile or pixi.toml/pixi.lock changes, not on every push, and
+# GitHub's runners have far better upload bandwidth to ghcr.io than most
+# dev machines — this exists specifically to sidestep a slow local link
+# rather than fight through a `podman push` that can take the better part
+# of an hour.
+#
+# After a run finishes, update platforms/defs.bzl's container-image digest
+# to match (the job logs the new digest at the end) — see
+# toolchains/rbe-image/README.md.
+name: RBE image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          file: toolchains/rbe-image/Containerfile
+          push: true
+          tags: ghcr.io/codegod100/sleek-rbe:latest
+
+      - name: Print digest
+        run: |
+          echo "New image digest: ${{ steps.push.outputs.digest }}"
+          echo "Update platforms/defs.bzl's container-image to:"
+          echo "  docker://ghcr.io/codegod100/sleek-rbe@${{ steps.push.outputs.digest }}"

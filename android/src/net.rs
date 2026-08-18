@@ -11,6 +11,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 
 use crate::auth::{self, AuthTokens};
+use crate::bsky::{self, ActorProfile, HandleSuggestion};
 use crate::state::{prefer_websocket, websocket_url_for};
 
 use crate::av_media::{AvMediaConfig, AvMediaSession};
@@ -43,10 +44,19 @@ pub enum NetCmd {
         target: String,
         text: String,
     },
+    /// PRIVMSG with `+reply` — threaded reply to a message.
+    Reply {
+        target: String,
+        msgid: String,
+        text: String,
+    },
     /// Raw IRC line (slash-command fallthrough, NICK, TOPIC, …).
     Raw(String),
     /// Upload image bytes to freeq `/api/v1/upload`, then PRIVMSG the URL (+ caption).
     UploadAndSend {
+        /// Correlates with [`NetEvent::UploadFinished::upload_id`] so a cancelled
+        /// compose upload cannot clear a newer attachment.
+        upload_id: u64,
         target: String,
         caption: String,
         bytes: Vec<u8>,
@@ -66,6 +76,10 @@ pub enum NetCmd {
     },
     /// Download an image for inline chat preview.
     FetchImage { url: String },
+    /// Download an image at (near) full resolution for the lightbox.
+    FetchFullImage { url: String },
+    /// Download a video for muted inline playback (vidya player).
+    FetchVideo { url: String },
     /// Fetch Open Graph metadata for a link card.
     FetchLinkPreview { url: String },
     /// Open a freeq AV call in `channel` (sends `av-start`).
@@ -134,6 +148,31 @@ pub enum NetCmd {
     },
     /// TAGMSG `+draft/delete` — soft-delete a message.
     DeleteMessage { target: String, msgid: String },
+    /// Bluesky handle typeahead for the connect-screen login field.
+    SearchHandles {
+        /// Monotonic id so the UI can ignore stale responses.
+        request_id: u64,
+        query: String,
+    },
+    /// Fetch policy check + rules for the join-gate modal.
+    PolicyFetch {
+        request_id: u64,
+        channel: String,
+        api_base: String,
+        did: String,
+    },
+    /// Fetch a public Bluesky profile for the peer profile modal.
+    FetchProfile {
+        request_id: u64,
+        /// Handle or DID (`did:plc:` / `did:web:`).
+        actor: String,
+    },
+    /// Fetch a public Bluesky profile to populate the chat avatar cache.
+    /// `actor` is an AT Proto DID or a handle-shaped IRC nick.
+    FetchAvatar {
+        nick: String,
+        actor: String,
+    },
     Quit,
 }
 
@@ -148,6 +187,8 @@ pub enum NetEvent {
     /// Image upload finished; UI should clear compose attachment state.
     /// On success, `sent` is the PRIVMSG body that was just written to the server.
     UploadFinished {
+        /// Correlates with [`NetCmd::UploadAndSend::upload_id`].
+        upload_id: u64,
         /// `None` on success; error message on failure.
         error: Option<String>,
         /// Set when upload+send succeeded (for optimistic local echo).
@@ -161,6 +202,24 @@ pub enum NetEvent {
         rgba: std::sync::Arc<[u8]>,
     },
     ImageFetchFailed {
+        url: String,
+    },
+    /// Remote image decoded at (near) full resolution for the lightbox.
+    FullImageFetched {
+        url: String,
+        width: usize,
+        height: usize,
+        rgba: std::sync::Arc<[u8]>,
+    },
+    FullImageFetchFailed {
+        url: String,
+    },
+    /// Remote video bytes for muted inline playback (vidya player).
+    VideoFetched {
+        url: String,
+        bytes: std::sync::Arc<[u8]>,
+    },
+    VideoFetchFailed {
         url: String,
     },
     /// Open Graph metadata for a link card.
@@ -193,6 +252,30 @@ pub enum NetEvent {
         mic_level: Option<crate::av::MicLevel>,
         /// True when a real mic is feeding outbound Opus (false = silence/listen-only).
         has_mic: bool,
+    },
+    /// Bluesky handle typeahead results (or empty on soft failure).
+    HandleSuggestions {
+        request_id: u64,
+        query: String,
+        actors: Vec<HandleSuggestion>,
+        /// `None` on success; set when the AppView request failed.
+        error: Option<String>,
+    },
+    /// Policy check + rules for the join-gate modal.
+    PolicyFetched {
+        request_id: u64,
+        check: Result<crate::policy::PolicyCheck, String>,
+        rules: Result<String, String>,
+    },
+    /// Bluesky profile for the peer profile modal.
+    ProfileFetched {
+        request_id: u64,
+        result: Result<ActorProfile, String>,
+    },
+    /// Bluesky profile fetch finished for a chat avatar (`nick` key).
+    AvatarFetched {
+        nick: String,
+        result: Result<ActorProfile, String>,
     },
 }
 
@@ -502,6 +585,19 @@ async fn apply_cmd(
                 let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
             }
         }
+        NetCmd::Reply {
+            target,
+            msgid,
+            text,
+        } => {
+            if let Some(h) = handle {
+                if let Err(e) = h.reply(&target, &msgid, &text).await {
+                    let _ = event_tx.send(NetEvent::Failed(format!("Reply failed: {e}")));
+                }
+            } else {
+                let _ = event_tx.send(NetEvent::Failed("Not connected".into()));
+            }
+        }
         NetCmd::Raw(line) => {
             if let Some(h) = handle {
                 if let Err(e) = h.raw(&line).await {
@@ -563,6 +659,7 @@ async fn apply_cmd(
             }
         }
         NetCmd::UploadAndSend {
+            upload_id,
             target,
             caption,
             bytes,
@@ -572,6 +669,7 @@ async fn apply_cmd(
         } => {
             if handle.is_none() {
                 let _ = event_tx.send(NetEvent::UploadFinished {
+                    upload_id,
                     error: Some("Not connected".into()),
                     sent: None,
                 });
@@ -587,6 +685,7 @@ async fn apply_cmd(
                     if let Some(h) = handle {
                         if let Err(e) = h.privmsg(&target, &text).await {
                             let _ = event_tx.send(NetEvent::UploadFinished {
+                                upload_id,
                                 error: Some(format!("Upload ok, send failed: {e}")),
                                 sent: None,
                             });
@@ -594,12 +693,14 @@ async fn apply_cmd(
                         }
                     }
                     let _ = event_tx.send(NetEvent::UploadFinished {
+                        upload_id,
                         error: None,
                         sent: Some(MediaSent { target, text }),
                     });
                 }
                 Err(e) => {
                     let _ = event_tx.send(NetEvent::UploadFinished {
+                        upload_id,
                         error: Some(e),
                         sent: None,
                     });
@@ -624,7 +725,7 @@ async fn apply_cmd(
             // Fire-and-forget so IRC event loop stays responsive.
             let tx = event_tx.clone();
             tokio::spawn(async move {
-                match fetch_image_bytes(&url).await {
+                match fetch_image_bytes(&url, crate::preview::MAX_IMAGE_DIM).await {
                     Ok((width, height, rgba)) => {
                         let _ = tx.send(NetEvent::ImageFetched {
                             url,
@@ -636,6 +737,39 @@ async fn apply_cmd(
                     Err(e) => {
                         log::debug!("image fetch {url}: {e}");
                         let _ = tx.send(NetEvent::ImageFetchFailed { url });
+                    }
+                }
+            });
+        }
+        NetCmd::FetchFullImage { url } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_image_bytes(&url, crate::preview::MAX_FULL_IMAGE_DIM).await {
+                    Ok((width, height, rgba)) => {
+                        let _ = tx.send(NetEvent::FullImageFetched {
+                            url,
+                            width,
+                            height,
+                            rgba,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("full image fetch {url}: {e}");
+                        let _ = tx.send(NetEvent::FullImageFetchFailed { url });
+                    }
+                }
+            });
+        }
+        NetCmd::FetchVideo { url } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_video_bytes(&url).await {
+                    Ok(bytes) => {
+                        let _ = tx.send(NetEvent::VideoFetched { url, bytes });
+                    }
+                    Err(e) => {
+                        log::debug!("video fetch {url}: {e}");
+                        let _ = tx.send(NetEvent::VideoFetchFailed { url });
                     }
                 }
             });
@@ -837,6 +971,79 @@ async fn apply_cmd(
         NetCmd::AvSpeakerDevice { id } => {
             media.set_speaker_device(id);
         }
+        NetCmd::SearchHandles { request_id, query } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                match bsky::search_actors_typeahead(&query, bsky::TYPEAHEAD_LIMIT).await {
+                    Ok(actors) => {
+                        let _ = tx.send(NetEvent::HandleSuggestions {
+                            request_id,
+                            query,
+                            actors,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("handle typeahead {query}: {e}");
+                        let _ = tx.send(NetEvent::HandleSuggestions {
+                            request_id,
+                            query,
+                            actors: Vec::new(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            });
+        }
+        NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let check = crate::policy::fetch_check(&api_base, &channel, &did).await;
+                let rules = crate::policy::fetch_rules(&api_base, &channel).await;
+                let _ = tx.send(NetEvent::PolicyFetched {
+                    request_id,
+                    check,
+                    rules,
+                });
+            });
+        }
+        NetCmd::FetchProfile {
+            request_id,
+            actor,
+        } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result = match bsky::fetch_actor_profile(&actor).await {
+                    Ok(p) => Ok(p),
+                    Err(e) => {
+                        log::debug!("fetch profile {actor}: {e}");
+                        Err(e.to_string())
+                    }
+                };
+                let _ = tx.send(NetEvent::ProfileFetched {
+                    request_id,
+                    result,
+                });
+            });
+        }
+        NetCmd::FetchAvatar { nick, actor } => {
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result = match bsky::fetch_actor_profile(&actor).await {
+                    Ok(p) => Ok(p),
+                    Err(e) => {
+                        log::debug!("fetch avatar {nick} ({actor}): {e}");
+                        Err(e.to_string())
+                    }
+                };
+                let _ = tx.send(NetEvent::AvatarFetched { nick, result });
+            });
+        }
         NetCmd::Quit => {
             media.stop().await;
             if let Some(h) = handle.take() {
@@ -961,10 +1168,10 @@ async fn upload_media(
     bytes: Vec<u8>,
 ) -> Result<String, String> {
     if bytes.is_empty() {
-        return Err("Empty image".into());
+        return Err("Empty file".into());
     }
     if bytes.len() > 10 * 1024 * 1024 {
-        return Err("Image is too large (max 10MB)".into());
+        return Err("File is too large (max 10MB)".into());
     }
 
     let base = api_base.trim_end_matches('/');
@@ -979,6 +1186,10 @@ async fn upload_media(
         "image/jpeg" => "paste.jpg",
         "image/gif" => "paste.gif",
         "image/webp" => "paste.webp",
+        "video/mp4" => "clip.mp4",
+        "video/webm" => "clip.webm",
+        "video/quicktime" => "clip.mov",
+        _ if content_type.starts_with("video/") => "clip.mp4",
         _ => "paste.png",
     };
 
@@ -1008,7 +1219,7 @@ async fn upload_media(
         let short = body.chars().take(120).collect::<String>();
         let msg = match status.as_u16() {
             401 => "Not authorized — stay signed in and connected, then try again".into(),
-            413 => "Image is too large".into(),
+            413 => "File is too large".into(),
             _ => format!("Upload failed ({status}) {short}").trim().to_string(),
         };
         return Err(msg);
@@ -1024,9 +1235,14 @@ async fn upload_media(
         .ok_or_else(|| "Upload response missing url".into())
 }
 
-/// Fetch and decode a remote image for chat inline preview (SSRF-safe).
-async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u8]>), String> {
-    use crate::preview::{MAX_IMAGE_BYTES, MAX_IMAGE_DIM};
+/// Fetch and decode a remote image (SSRF-safe). `max_dim` downscales the long
+/// edge: chat thumbs pass [`crate::preview::MAX_IMAGE_DIM`], the lightbox passes
+/// [`crate::preview::MAX_FULL_IMAGE_DIM`] so the full-screen view stays sharp.
+async fn fetch_image_bytes(
+    url: &str,
+    max_dim: u32,
+) -> Result<(usize, usize, std::sync::Arc<[u8]>), String> {
+    use crate::preview::MAX_IMAGE_BYTES;
 
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Only http(s) image URLs".into());
@@ -1044,6 +1260,10 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
         .await
         .map_err(|e| format!("SSRF check: {e}"))?;
+    // Prefer IPv4 for DNS pin. Hosts like cdn.bsky.app return A+AAAA; on
+    // IPv6-less VMs reqwest tries the pinned AAAA first and fails the request
+    // even when A records would work (Bluesky avatars were stuck as initials).
+    let addrs = prefer_ipv4_addrs(addrs);
 
     // DNS-pin + limited redirects (CDN image hosts often 302).
     let mut builder = reqwest::Client::builder()
@@ -1079,8 +1299,8 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     }
 
     let dyn_img = image::load_from_memory(&bytes).map_err(|e| format!("Decode: {e}"))?;
-    let dyn_img = if dyn_img.width() > MAX_IMAGE_DIM || dyn_img.height() > MAX_IMAGE_DIM {
-        dyn_img.thumbnail(MAX_IMAGE_DIM, MAX_IMAGE_DIM)
+    let dyn_img = if dyn_img.width() > max_dim || dyn_img.height() > max_dim {
+        dyn_img.thumbnail(max_dim, max_dim)
     } else {
         dyn_img
     };
@@ -1088,4 +1308,90 @@ async fn fetch_image_bytes(url: &str) -> Result<(usize, usize, std::sync::Arc<[u
     let width = rgba.width() as usize;
     let height = rgba.height() as usize;
     Ok((width, height, std::sync::Arc::from(rgba.into_raw())))
+}
+
+/// Keep SSRF-checked addrs, but drop AAAA when any A is present.
+fn prefer_ipv4_addrs(addrs: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let v4: Vec<_> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
+    if v4.is_empty() {
+        addrs
+    } else {
+        v4
+    }
+}
+
+/// Fetch remote video bytes for chat inline playback (SSRF-safe).
+async fn fetch_video_bytes(url: &str) -> Result<std::sync::Arc<[u8]>, String> {
+    use crate::preview::MAX_VIDEO_BYTES;
+
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) video URLs".into());
+    }
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("Bad URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?
+        .to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+
+    let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
+        .await
+        .map_err(|e| format!("SSRF check: {e}"))?;
+    let addrs = prefer_ipv4_addrs(addrs);
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder.build().map_err(|e| format!("HTTP client: {e}"))?;
+
+    let resp = client
+        .get(url)
+        .header("Accept", "video/*,*/*;q=0.8")
+        .header("User-Agent", "Sleek/0.1 (chat video preview)")
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("HTTP error: {e}"))?;
+
+    if let Some(len) = resp.content_length() {
+        if len > MAX_VIDEO_BYTES as u64 {
+            return Err("Video too large".into());
+        }
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Body: {e}"))?;
+    if bytes.len() > MAX_VIDEO_BYTES {
+        return Err("Video too large".into());
+    }
+
+    Ok(std::sync::Arc::from(bytes.as_ref()))
+}
+
+#[cfg(test)]
+mod prefer_ipv4_tests {
+    use super::prefer_ipv4_addrs;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    #[test]
+    fn drops_aaaa_when_a_present() {
+        let v4 = SocketAddr::new(Ipv4Addr::new(1, 2, 3, 4).into(), 443);
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 443);
+        assert_eq!(prefer_ipv4_addrs(vec![v6, v4]), vec![v4]);
+    }
+
+    #[test]
+    fn keeps_aaaa_when_no_a() {
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 443);
+        assert_eq!(prefer_ipv4_addrs(vec![v6]), vec![v6]);
+    }
 }

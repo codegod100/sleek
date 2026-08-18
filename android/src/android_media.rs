@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::Context;
 use winit::platform::android::activity::{AndroidApp, WindowManagerFlags};
 
-use crate::clipboard::PickImageResult;
+use crate::clipboard::PickAttachResult;
 
 static ANDROID_APP: OnceLock<AndroidApp> = OnceLock::new();
 
@@ -40,6 +40,141 @@ pub fn set_android_app(app: AndroidApp) {
 
 fn android_app() -> Option<&'static AndroidApp> {
     ANDROID_APP.get()
+}
+
+/// Public handle for other Android modules (camera capture, etc.).
+pub fn android_app_handle() -> Option<&'static AndroidApp> {
+    android_app()
+}
+
+/// App-private directory for `prefs.json` / `session.json` (survives restarts).
+///
+/// The `dirs` crate does not support Android, so auth storage must use the
+/// NativeActivity internal files dir instead of `dirs::config_dir()`.
+pub fn app_storage_dir() -> Option<PathBuf> {
+    let app = android_app()?;
+    let base = app
+        .internal_data_path()
+        .or_else(|| app.external_data_path())?;
+    Some(base.join("sleek"))
+}
+
+/// Load an **application** class (APK `classes.dex`) by binary name.
+///
+/// `Env::find_class` from a native-created thread (tokio / media worker,
+/// egui) uses the **system** [`ClassLoader`](https://developer.android.com/training/articles/perf-jni#faq_FindClass),
+/// which cannot see types like `uk.nandi.sleek.CameraCapture`. Always resolve
+/// app classes through the Activity's loader instead.
+///
+/// `binary_name` is the Java binary name, e.g. `"uk.nandi.sleek.CameraCapture"`
+/// (dots, not slashes).
+pub fn load_app_class<'a>(
+    env: &mut jni::Env<'a>,
+    activity: &jni::objects::JObject<'_>,
+    binary_name: &str,
+) -> Result<jni::objects::JClass<'a>, String> {
+    use jni::objects::{JClass, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let loader = env
+        .call_method(
+            activity,
+            jni_str!("getClassLoader"),
+            jni_sig!(() -> java.lang.ClassLoader),
+            &[],
+        )
+        .map_err(|e| format!("getClassLoader: {e}"))?
+        .l()
+        .map_err(|e| format!("getClassLoader: {e}"))?;
+    if loader.is_null() {
+        return Err("Activity.getClassLoader returned null".into());
+    }
+
+    let class_name = env
+        .new_string(binary_name)
+        .map_err(|e| format!("new_string({binary_name}): {e}"))?;
+    let loaded = env
+        .call_method(
+            &loader,
+            jni_str!("loadClass"),
+            jni_sig!((java.lang.String) -> java.lang.Class),
+            &[JValue::Object(class_name.as_ref())],
+        )
+        .map_err(|e| format!("loadClass({binary_name}): {e}"))?
+        .l()
+        .map_err(|e| format!("loadClass({binary_name}): {e}"))?;
+    if loaded.is_null() {
+        return Err(format!("loadClass({binary_name}) returned null"));
+    }
+    env.cast_local::<JClass>(loaded)
+        .map_err(|e| format!("cast {binary_name}: {e}"))
+}
+
+/// True when CAMERA is already granted (no dialog).
+pub fn has_camera_permission() -> bool {
+    check_self_permission("android.permission.CAMERA").unwrap_or(false)
+}
+
+/// True when RECORD_AUDIO is already granted (no dialog).
+pub fn has_record_audio_permission() -> bool {
+    check_self_permission("android.permission.RECORD_AUDIO").unwrap_or(false)
+}
+
+/// Outcome of [`ensure_av_call_permissions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvCallPermissions {
+    pub mic: bool,
+    pub camera: bool,
+}
+
+/// Request mic (+ optional camera) in a **single** system dialog.
+///
+/// Calling `requestPermissions` twice in a row replaces the first dialog, so
+/// RECORD_AUDIO + CAMERA must be batched. Returns the current grant state
+/// (dialog may still be open — check again after the user responds).
+pub fn ensure_av_call_permissions(want_camera: bool) -> AvCallPermissions {
+    let mut need: Vec<&str> = vec!["android.permission.RECORD_AUDIO"];
+    if want_camera {
+        need.push("android.permission.CAMERA");
+    }
+    match request_all_permissions(&need, 0x5_1EE_9) {
+        Ok(true) => {
+            log::debug!("android AV permissions already granted (camera={want_camera})");
+        }
+        Ok(false) => {
+            log::info!(
+                "android AV permissions requested (awaiting user; want_camera={want_camera})"
+            );
+        }
+        Err(e) => {
+            log::warn!("android AV permissions: {e}");
+        }
+    }
+    AvCallPermissions {
+        mic: has_record_audio_permission(),
+        camera: has_camera_permission(),
+    }
+}
+
+/// Ensure camera access for AV video publish; prompt if needed.
+///
+/// Returns `true` when already granted. `false` means the system dialog was
+/// shown or the permission was denied — caller may still dial audio-only.
+pub fn ensure_camera_permission() -> bool {
+    match request_all_permissions(&["android.permission.CAMERA"], 0x5_1EE_8) {
+        Ok(true) => {
+            log::debug!("android CAMERA granted");
+            true
+        }
+        Ok(false) => {
+            log::info!("android CAMERA requested (awaiting user)");
+            false
+        }
+        Err(e) => {
+            log::warn!("android CAMERA permission: {e}");
+            false
+        }
+    }
 }
 
 /// System navigation interaction mode (3-button vs gestures).
@@ -642,7 +777,7 @@ pub fn ensure_read_images_permission() {
 /// Returns `true` when already granted. A `false` means the system dialog was
 /// shown — caller may dial anyway and retry after the user accepts, or wait.
 pub fn ensure_record_audio_permission() -> bool {
-    match request_permissions(&["android.permission.RECORD_AUDIO"], 0x5_1EE_7) {
+    match request_all_permissions(&["android.permission.RECORD_AUDIO"], 0x5_1EE_7) {
         Ok(true) => {
             log::debug!("android RECORD_AUDIO granted");
             true
@@ -658,13 +793,8 @@ pub fn ensure_record_audio_permission() -> bool {
     }
 }
 
-/// `Ok(true)` = at least one listed permission already granted (or none needed).
-/// `Ok(false)` = dialog shown / not granted yet.
-///
-/// For photo-read we treat *any* of the alternatives as sufficient (API 33+
-/// uses `READ_MEDIA_IMAGES`; older uses `READ_EXTERNAL_STORAGE`). For mic we
-/// pass a single permission.
-fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+/// `Ok(true)` when `permission` is already granted.
+fn check_self_permission(permission: &str) -> Result<bool, String> {
     let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
 
     let vm_ptr = app.vm_as_ptr();
@@ -687,57 +817,108 @@ fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, 
         .attach_current_thread(|env| -> jni::errors::Result<bool> {
             // SAFETY: activity is a global ref owned by the Android runtime.
             let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
-
-            // Alternatives (e.g. READ_MEDIA_IMAGES | READ_EXTERNAL_STORAGE): any
-            // one grant is enough. Single-permission lists (mic) require that one.
-            let mut need: Vec<String> = Vec::new();
-            for perm in permissions {
-                let jperm = env.new_string(*perm)?;
-                let res = env
-                    .call_method(
-                        &activity,
-                        jni_str!("checkSelfPermission"),
-                        jni_sig!((java.lang.String) -> jint),
-                        &[JValue::Object(jperm.as_ref())],
-                    )?
-                    .i()?;
-                // PackageManager.PERMISSION_GRANTED == 0
-                if res == 0 {
-                    return Ok(true);
-                }
-                need.push((*perm).to_string());
-            }
-
-            if need.is_empty() {
-                return Ok(true);
-            }
-
-            let empty = env.new_string("")?;
-            let empty_obj: &JObject = empty.as_ref();
-            let arr = env.new_object_array(
-                need.len() as jni::sys::jsize,
-                jni_str!("java/lang/String"),
-                empty_obj,
-            )?;
-            for (i, perm) in need.iter().enumerate() {
-                let jperm = env.new_string(perm)?;
-                let jperm_obj: &JObject = jperm.as_ref();
-                arr.set_element(env, i, jperm_obj)?;
-            }
-
-            let arr_obj: &JObject = arr.as_ref();
-            env.call_method(
-                &activity,
-                jni_str!("requestPermissions"),
-                jni_sig!(([java.lang.String], jint)),
-                &[JValue::Object(arr_obj), JValue::Int(request_code)],
-            )?;
-
-            Ok(false)
+            let jperm = env.new_string(permission)?;
+            let res = env
+                .call_method(
+                    &activity,
+                    jni_str!("checkSelfPermission"),
+                    jni_sig!((java.lang.String) -> jint),
+                    &[JValue::Object(jperm.as_ref())],
+                )?
+                .i()?;
+            // PackageManager.PERMISSION_GRANTED == 0
+            Ok(res == 0)
         })
         .map_err(|e| format!("{e}"))?;
 
     Ok(result)
+}
+
+/// `Ok(true)` = at least one listed permission already granted (or none needed).
+/// `Ok(false)` = dialog shown / not granted yet.
+///
+/// For photo-read we treat *any* of the alternatives as sufficient (API 33+
+/// uses `READ_MEDIA_IMAGES`; older uses `READ_EXTERNAL_STORAGE`).
+fn request_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    for perm in permissions {
+        if check_self_permission(perm)? {
+            return Ok(true);
+        }
+    }
+    if permissions.is_empty() {
+        return Ok(true);
+    }
+    // None granted — show dialog for all alternatives (user accepts either).
+    request_permissions_dialog(permissions, request_code)
+}
+
+/// `Ok(true)` = **all** listed permissions already granted.
+/// `Ok(false)` = dialog shown for the missing ones / not granted yet.
+///
+/// Use for AV (mic + camera): a second `requestPermissions` call replaces the
+/// first system dialog, so missing grants must be batched.
+fn request_all_permissions(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    let mut need: Vec<&str> = Vec::new();
+    for perm in permissions {
+        if !check_self_permission(perm)? {
+            need.push(*perm);
+        }
+    }
+    if need.is_empty() {
+        return Ok(true);
+    }
+    request_permissions_dialog(&need, request_code)?;
+    Ok(false)
+}
+
+fn request_permissions_dialog(permissions: &[&str], request_code: i32) -> Result<bool, String> {
+    let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
+
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return Err("null JavaVM".into());
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return Err("null Activity".into());
+    }
+
+    use jni::objects::{JObject, JValue};
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str, JavaVM};
+
+    // SAFETY: vm comes from the live AndroidApp for this process.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        // SAFETY: activity is a global ref owned by the Android runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+
+        let empty = env.new_string("")?;
+        let empty_obj: &JObject = empty.as_ref();
+        let arr = env.new_object_array(
+            permissions.len() as jni::sys::jsize,
+            jni_str!("java/lang/String"),
+            empty_obj,
+        )?;
+        for (i, perm) in permissions.iter().enumerate() {
+            let jperm = env.new_string(*perm)?;
+            let jperm_obj: &JObject = jperm.as_ref();
+            arr.set_element(env, i, jperm_obj)?;
+        }
+
+        let arr_obj: &JObject = arr.as_ref();
+        env.call_method(
+            &activity,
+            jni_str!("requestPermissions"),
+            jni_sig!(([java.lang.String], jint)),
+            &[JValue::Object(arr_obj), JValue::Int(request_code)],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| format!("{e}"))?;
+
+    Ok(false)
 }
 
 // ── OS image picker ─────────────────────────────────────────────────────────
@@ -768,23 +949,23 @@ enum RawPick {
     Failed(String),
 }
 
-/// Open the system image picker and block until the user chooses or cancels.
+/// Open the system image/video picker and block until the user chooses or cancels.
 ///
 /// Designed to run on a **background thread** (never the egui UI thread).
-pub fn pick_image_file() -> PickImageResult {
+pub fn pick_media_file() -> PickAttachResult {
     ensure_read_images_permission();
 
     {
         let mut busy = PICK_BUSY
             .lock()
-            .map_err(|_| "Image picker lock poisoned".to_string())?;
+            .map_err(|_| "File picker lock poisoned".to_string())?;
         if *busy {
-            return Err("An image picker is already open".into());
+            return Err("A file picker is already open".into());
         }
         *busy = true;
     }
 
-    let finish = |outcome: PickImageResult| -> PickImageResult {
+    let finish = |outcome: PickAttachResult| -> PickAttachResult {
         let _ = PICK_BUSY.lock().map(|mut g| *g = false);
         outcome
     };
@@ -814,7 +995,7 @@ pub fn pick_image_file() -> PickImageResult {
         // Primary: helper Fragment statics (set from onActivityResult).
         match poll_fragment_pick_result() {
             Ok(RawPick::Image(bytes)) => {
-                return finish(crate::clipboard::load_image_from_bytes(&bytes).map(Some));
+                return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
             }
             Ok(RawPick::Cancelled) => {
                 return finish(Ok(None));
@@ -831,7 +1012,7 @@ pub fn pick_image_file() -> PickImageResult {
         if !used_fragment {
             match scavenge_pick_result() {
                 Ok(RawPick::Image(bytes)) => {
-                    return finish(crate::clipboard::load_image_from_bytes(&bytes).map(Some));
+                    return finish(crate::clipboard::load_attach_from_vec(bytes, None).map(Some));
                 }
                 Ok(RawPick::Cancelled) => {
                     return finish(Ok(None));
@@ -913,59 +1094,10 @@ macro_rules! activity_from_raw {
 
 fn build_picker_intent<'a>(
     env: &mut jni::Env<'a>,
-    activity: &jni::objects::JObject<'_>,
+    _activity: &jni::objects::JObject<'_>,
 ) -> Result<jni::objects::JObject<'a>, String> {
-    use jni::objects::JValue;
-    use jni::{jni_sig, jni_str};
-
-    // Prefer modern photo picker (API 33+); fall back to OPEN_DOCUMENT.
-    let action = env
-        .new_string("android.provider.action.PICK_IMAGES")
-        .map_err(|e| format!("{e}"))?;
-    let intent_cls = env
-        .find_class(jni_str!("android/content/Intent"))
-        .map_err(|e| format!("{e}"))?;
-    let trial = env.new_object(
-        &intent_cls,
-        jni_sig!((java.lang.String)),
-        &[JValue::Object(action.as_ref())],
-    );
-
-    if let Ok(trial) = trial {
-        let extra_type = env
-            .new_string("android.provider.extra.PICK_IMAGES_MAX")
-            .map_err(|e| format!("{e}"))?;
-        let _ = env.call_method(
-            &trial,
-            jni_str!("putExtra"),
-            jni_sig!((java.lang.String, jint) -> android.content.Intent),
-            &[JValue::Object(extra_type.as_ref()), JValue::Int(1)],
-        );
-        let pm = env
-            .call_method(
-                activity,
-                jni_str!("getPackageManager"),
-                jni_sig!(() -> android.content.pm.PackageManager),
-                &[],
-            )
-            .map_err(|e| format!("{e}"))?
-            .l()
-            .map_err(|e| format!("{e}"))?;
-        let resolved = env
-            .call_method(
-                &pm,
-                jni_str!("resolveActivity"),
-                jni_sig!((android.content.Intent, jint) -> android.content.pm.ResolveInfo),
-                &[JValue::Object(trial.as_ref()), JValue::Int(0)],
-            )
-            .map_err(|e| format!("{e}"))?
-            .l()
-            .map_err(|e| format!("{e}"))?;
-        if !resolved.is_null() {
-            return Ok(trial);
-        }
-    }
-
+    // Prefer OPEN_DOCUMENT with image + video MIME types. The modern photo
+    // picker (`PICK_IMAGES`) is images-only and would hide `.mp4` / `.webm`.
     build_open_document_intent(env).map_err(|e| format!("{e}"))
 }
 
@@ -1195,7 +1327,7 @@ fn reset_pick_fragment_statics(env: &mut jni::Env<'_>, cls: &jni::objects::JClas
 fn build_open_document_intent<'a>(
     env: &mut jni::Env<'a>,
 ) -> jni::errors::Result<jni::objects::JObject<'a>> {
-    use jni::objects::JValue;
+    use jni::objects::{JObject, JValue};
     use jni::{jni_sig, jni_str};
 
     // Intent.ACTION_OPEN_DOCUMENT
@@ -1216,12 +1348,39 @@ fn build_open_document_intent<'a>(
         &[JValue::Object(cat.as_ref())],
     )?;
 
-    let mime = env.new_string("image/*")?;
+    let mime = env.new_string("*/*")?;
     env.call_method(
         &intent,
         jni_str!("setType"),
         jni_sig!((java.lang.String) -> android.content.Intent),
         &[JValue::Object(mime.as_ref())],
+    )?;
+
+    // EXTRA_MIME_TYPES: images + freeq-allowed videos (mp4/webm/mov).
+    let string_cls = env.find_class(jni_str!("java/lang/String"))?;
+    let arr = env.new_object_array(4, &string_cls, jni::objects::JObject::null())?;
+    let m0 = env.new_string("image/*")?;
+    let m1 = env.new_string("video/mp4")?;
+    let m2 = env.new_string("video/webm")?;
+    let m3 = env.new_string("video/quicktime")?;
+    // Disambiguate `JString: AsRef<_>` (jni has multiple impls) like requestPermissions.
+    let m0_obj: &JObject = m0.as_ref();
+    let m1_obj: &JObject = m1.as_ref();
+    let m2_obj: &JObject = m2.as_ref();
+    let m3_obj: &JObject = m3.as_ref();
+    env.set_object_array_element(&arr, 0, m0_obj)?;
+    env.set_object_array_element(&arr, 1, m1_obj)?;
+    env.set_object_array_element(&arr, 2, m2_obj)?;
+    env.set_object_array_element(&arr, 3, m3_obj)?;
+    let extra = env.new_string("android.intent.extra.MIME_TYPES")?;
+    env.call_method(
+        &intent,
+        jni_str!("putExtra"),
+        jni_sig!((java.lang.String, [java.lang.String]) -> android.content.Intent),
+        &[
+            JValue::Object(extra.as_ref()),
+            JValue::Object(arr.as_ref()),
+        ],
     )?;
 
     Ok(intent)
@@ -1806,5 +1965,222 @@ pub fn take_pending_deep_link() -> Option<String> {
             log::debug!("take_pending_deep_link: {e}");
             None
         }
+    }
+}
+
+/// Read plain text from the Android system clipboard (for long-press paste in egui).
+pub fn clipboard_get_text() -> Option<String> {
+    with_activity_jni(|env, activity| {
+        use jni::objects::{JString, JValue};
+        use jni::{jni_sig, jni_str};
+
+        let svc = env.new_string("clipboard").map_err(|e| format!("{e}"))?;
+        let mgr = env
+            .call_method(
+                activity,
+                jni_str!("getSystemService"),
+                jni_sig!((java.lang.String) -> java.lang.Object),
+                &[JValue::Object(svc.as_ref())],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if mgr.is_null() {
+            return Ok(None);
+        }
+
+        let has = env
+            .call_method(
+                &mgr,
+                jni_str!("hasPrimaryClip"),
+                jni_sig!(() -> boolean),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .z()
+            .map_err(|e| format!("{e}"))?;
+        if !has {
+            return Ok(None);
+        }
+
+        let clip = env
+            .call_method(
+                &mgr,
+                jni_str!("getPrimaryClip"),
+                jni_sig!(() -> android.content.ClipData),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if clip.is_null() {
+            return Ok(None);
+        }
+
+        let count = env
+            .call_method(&clip, jni_str!("getItemCount"), jni_sig!(() -> jint), &[])
+            .map_err(|e| format!("{e}"))?
+            .i()
+            .map_err(|e| format!("{e}"))?;
+        if count <= 0 {
+            return Ok(None);
+        }
+
+        let item = env
+            .call_method(
+                &clip,
+                jni_str!("getItemAt"),
+                jni_sig!((jint) -> android.content.ClipData::Item),
+                &[JValue::Int(0)],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if item.is_null() {
+            return Ok(None);
+        }
+
+        let seq = env
+            .call_method(
+                &item,
+                jni_str!("coerceToText"),
+                jni_sig!((android.content.Context) -> java.lang.CharSequence),
+                &[JValue::Object(activity)],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if seq.is_null() {
+            return Ok(None);
+        }
+
+        let jstr = env
+            .call_method(
+                &seq,
+                jni_str!("toString"),
+                jni_sig!(() -> java.lang.String),
+                &[],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if jstr.is_null() {
+            return Ok(None);
+        }
+
+        let js = env
+            .cast_local::<JString>(jstr)
+            .map_err(|e| format!("{e}"))?;
+        let text = format!("{js}");
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    })
+    .ok()
+    .flatten()
+}
+
+/// Write plain text to the Android system clipboard (copy/cut from egui).
+pub fn clipboard_set_text(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    with_activity_jni(|env, activity| {
+        use jni::objects::JValue;
+        use jni::{jni_sig, jni_str};
+
+        let svc = env.new_string("clipboard").map_err(|e| format!("{e}"))?;
+        let mgr = env
+            .call_method(
+                activity,
+                jni_str!("getSystemService"),
+                jni_sig!((java.lang.String) -> java.lang.Object),
+                &[JValue::Object(svc.as_ref())],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if mgr.is_null() {
+            return Err("ClipboardManager missing".into());
+        }
+
+        let clip_data = env
+            .find_class(jni_str!("android/content/ClipData"))
+            .map_err(|e| format!("{e}"))?;
+        let label = env.new_string("text").map_err(|e| format!("{e}"))?;
+        let payload = env.new_string(text).map_err(|e| format!("{e}"))?;
+        let clip = env
+            .call_static_method(
+                &clip_data,
+                jni_str!("newPlainText"),
+                jni_sig!(
+                    (java.lang.CharSequence, java.lang.CharSequence) -> android.content.ClipData
+                ),
+                &[
+                    JValue::Object(label.as_ref()),
+                    JValue::Object(payload.as_ref()),
+                ],
+            )
+            .map_err(|e| format!("{e}"))?
+            .l()
+            .map_err(|e| format!("{e}"))?;
+        if clip.is_null() {
+            return Err("ClipData.newPlainText returned null".into());
+        }
+
+        env.call_method(
+            &mgr,
+            jni_str!("setPrimaryClip"),
+            jni_sig!((android.content.ClipData)),
+            &[JValue::Object(&clip)],
+        )
+        .map_err(|e| format!("{e}"))?;
+        Ok(())
+    })
+    .is_ok()
+}
+
+/// Run a JNI closure with the stored Activity (egui / worker threads).
+fn with_activity_jni<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut jni::Env<'_>, &jni::objects::JObject<'_>) -> Result<T, String>,
+{
+    let app = android_app().ok_or_else(|| "AndroidApp not stored".to_string())?;
+    let vm_ptr = app.vm_as_ptr();
+    if vm_ptr.is_null() {
+        return Err("null JavaVM".into());
+    }
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    if activity_ptr.is_null() {
+        return Err("null Activity".into());
+    }
+
+    use jni::objects::JObject;
+    use jni::refs::Global;
+    use jni::JavaVM;
+
+    // SAFETY: vm comes from the live AndroidApp for this process.
+    let vm = unsafe { JavaVM::from_raw(vm_ptr.cast()) };
+    vm.attach_current_thread(|env| -> jni::errors::Result<Result<T, String>> {
+        // SAFETY: activity is a global ref owned by the Android runtime.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_ptr)? };
+        Ok(f(env, &activity))
+    })
+    .map_err(|e| format!("{e}"))?
+}
+
+/// Finish the host Activity (leave the app). Used when Android back / Esc is
+/// pressed at the root shell (tabs or connect) with nothing left to dismiss.
+pub fn finish_activity() {
+    match with_activity_jni(|env, activity| {
+        use jni::{jni_sig, jni_str};
+        env.call_method(activity, jni_str!("finish"), jni_sig!(()), &[])
+            .map_err(|e| format!("Activity.finish: {e}"))?;
+        Ok(())
+    }) {
+        Ok(()) => log::info!("android finish_activity: leaving"),
+        Err(e) => log::warn!("android finish_activity: {e}"),
     }
 }

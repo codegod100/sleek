@@ -1,5 +1,7 @@
 //! Sleek eframe app — desktop + Android.
 
+use std::time::{Duration, Instant};
+
 use eframe::egui::{self, Align, Layout, RichText, ScrollArea, Stroke, Vec2};
 use freeq_sdk::event::Event;
 use vidya::{apply, body, button, dim_label, reserve_system_chrome, title, Mode, Theme};
@@ -16,9 +18,19 @@ use crate::state::{
     LinkMeta, MediaFetch, Route, Tab,
 };
 use crate::ui::{
-    self, image_lightbox_overlay, ChatAction, ChatsAction, ConnectAction, DiscoverAction,
-    SettingsAction,
+    self, image_lightbox_overlay, open_profile_url, open_verification_url, policy_gate_overlay,
+    profile_gate_overlay, ChatAction, ChatsAction, ConnectAction, DiscoverAction, PolicyGateAction,
+    ProfileGateAction, SettingsAction,
 };
+
+/// Minimum window width (points) for the desktop master–detail shell:
+/// chats list + chat pane side by side.
+const WIDE_SHELL_MIN_WIDTH: f32 = 900.0;
+
+/// Master list width for the wide shell (resizable within a narrow range).
+const MASTER_LIST_DEFAULT_WIDTH: f32 = 320.0;
+const MASTER_LIST_MIN_WIDTH: f32 = 260.0;
+const MASTER_LIST_MAX_WIDTH: f32 = 420.0;
 
 /// Phone-shaped default for local desktop; on Codespaces / noVNC fill the
 /// X display so the app matches the browser viewport (not a 390×780 island).
@@ -241,23 +253,107 @@ impl SleekApp {
         apply(ctx, &self.theme());
     }
 
+    /// Fire a scheduled MoQ re-dial while still in an IRC call.
+    fn poll_media_reconnect(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.state.media_reconnect_at else {
+            return;
+        };
+        let Some(lc) = self.state.local_call.clone() else {
+            self.state.cancel_media_reconnect();
+            return;
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if std::time::Instant::now() < at {
+            return;
+        }
+        self.state.media_reconnect_at = None;
+        if lc.session_id.is_empty() {
+            return;
+        }
+        // Force past the Live/Connecting dedupe — we are intentionally redialing
+        // after a transport drop even if status was left Connecting.
+        if let Some(local) = self.state.local_call.as_mut() {
+            local.media = MediaStatus::Idle;
+        }
+        log::info!(
+            "av-media: re-dialing MoQ after transport drop (session {})",
+            lc.session_id
+        );
+        self.try_start_av_media(
+            &lc.channel,
+            &lc.session_id,
+            &lc.instance,
+            lc.token.as_deref(),
+        );
+    }
+
+    /// Fire a scheduled auto-reconnect once its backoff deadline elapses.
+    fn poll_auto_reconnect(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.state.reconnect_at else {
+            return;
+        };
+        // Keep painting so the countdown status updates and the deadline is checked.
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if std::time::Instant::now() < at {
+            let secs = at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .max(1);
+            self.state.status_line = format!("Reconnecting in {secs}s…");
+            return;
+        }
+        if self.state.connection != ConnectionState::Disconnected {
+            self.state.reconnect_at = None;
+            return;
+        }
+        if self.state.intentional_disconnect || self.state.nick.trim().is_empty() {
+            self.state.cancel_auto_reconnect();
+            return;
+        }
+        self.state.reconnect_at = None;
+        self.state.error = None;
+        if self.state.has_saved_session() {
+            self.do_reconnect_session();
+        } else {
+            self.do_connect();
+        }
+    }
+
+    /// Debounced Bluesky handle typeahead while the connect form is visible.
+    fn poll_handle_typeahead(&mut self, ctx: &egui::Context) {
+        if self.state.connection.is_live() || self.state.connect_mode != crate::state::ConnectMode::Bluesky
+        {
+            return;
+        }
+        if let Some((request_id, query)) = self.state.handle_typeahead.take_ready_fetch() {
+            self.net.send(NetCmd::SearchHandles { request_id, query });
+        }
+        if self.state.handle_typeahead.needs_repaint() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn poll_net(&mut self, ctx: &egui::Context) {
         for ev in self.net.poll() {
             self.handle_net_event(ev);
         }
         // Kick off any image / OG fetches requested while painting chat.
         self.flush_media_fetches();
+        self.poll_android_camera_permission();
         // Keep UI live while connecting / connected / media loading / in a video call.
         let in_live_call = self
             .state
             .local_call
             .as_ref()
             .is_some_and(|lc| matches!(lc.media, MediaStatus::Live | MediaStatus::Connecting));
+        let media_redial_pending = self.state.media_reconnect_at.is_some()
+            && self.state.local_call.is_some();
         if self.state.connection == ConnectionState::Connecting
             || self.state.connection.is_live()
             || self.state.awaiting_oauth
             || self.state.media.has_loading()
             || in_live_call
+            || media_redial_pending
         {
             // ~30 fps while a call is live so remote tiles update smoothly.
             let ms = if in_live_call { 33 } else { 50 };
@@ -265,13 +361,56 @@ impl SleekApp {
         }
     }
 
+    /// After the user grants CAMERA mid-call, enable publish once (no re-dial).
+    #[cfg(target_os = "android")]
+    fn poll_android_camera_permission(&mut self) {
+        let enable = {
+            let Some(lc) = self.state.local_call.as_ref() else {
+                return;
+            };
+            if !lc.camera_awaiting_permission || !lc.camera {
+                return;
+            }
+            if !matches!(lc.media, MediaStatus::Live) {
+                return;
+            }
+            if !crate::android_media::has_camera_permission() {
+                return;
+            }
+            true
+        };
+        if !enable {
+            return;
+        }
+        if let Some(lc) = self.state.local_call.as_mut() {
+            lc.camera_awaiting_permission = false;
+            // Optimistic: toggle stays usable while Camera2 opens.
+            lc.has_camera = true;
+        }
+        log::info!("av-media: CAMERA granted — enabling deferred camera publish");
+        self.net.send(NetCmd::AvCamera { enabled: true });
+        self.state.show_toast("Camera permission granted");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn poll_android_camera_permission(&mut self) {}
+
     /// Send queued media fetches to the net thread.
     fn flush_media_fetches(&mut self) {
         for req in self.state.media.drain_pending() {
             match req {
                 MediaFetch::Image(url) => self.net.send(NetCmd::FetchImage { url }),
+                MediaFetch::ImageFull(url) => self.net.send(NetCmd::FetchFullImage { url }),
+                MediaFetch::Video(url) => self.net.send(NetCmd::FetchVideo { url }),
                 MediaFetch::LinkPreview(url) => self.net.send(NetCmd::FetchLinkPreview { url }),
             }
+        }
+        for req in self.state.avatars.drain_pending() {
+            log::debug!("avatar: queue getProfile nick={} actor={}", req.nick, req.actor);
+            self.net.send(NetCmd::FetchAvatar {
+                nick: req.nick,
+                actor: req.actor,
+            });
         }
     }
 
@@ -303,24 +442,43 @@ impl SleekApp {
                 if self.state.connection == ConnectionState::Connecting {
                     self.state.connection = ConnectionState::Disconnected;
                 }
+                // A failed reconnect attempt (after EOF etc.) should keep backing off.
+                if !self.state.intentional_disconnect
+                    && self.state.reconnect_attempts > 0
+                    && !self.state.nick.trim().is_empty()
+                    && self.state.reconnect_at.is_none()
+                {
+                    self.state.schedule_auto_reconnect();
+                }
             }
             NetEvent::AuthReady(tokens) => {
                 self.state.awaiting_oauth = false;
                 self.apply_auth_tokens(tokens, /*connect=*/ true);
             }
-            NetEvent::UploadFinished { error, sent } => {
-                self.state.compose_uploading = false;
-                if let Some(err) = error {
-                    self.state.error = Some(err.clone());
-                    self.state.show_toast(err);
-                    // Keep compose_image so the user can retry Send.
-                } else {
-                    self.state.compose_image = None;
-                    self.state.compose.clear();
-                    self.state.compose_nick_tab.clear();
-                    self.state.show_toast("Image sent");
-                    if let Some(media) = sent {
-                        self.do_send_local_echo(&media.target, media.text);
+            NetEvent::UploadFinished {
+                upload_id,
+                error,
+                sent,
+            } => {
+                // Ignore finishes from a cancelled / superseded upload so Cancel
+                // (or a watchdog unlock) cannot wipe a newer compose draft.
+                if upload_id == self.state.compose_upload_id {
+                    self.state.compose_uploading = false;
+                    self.state.compose_upload_started = None;
+                    self.state.compose_encode_rx = None;
+                    self.state.compose_encode_meta = None;
+                    if let Some(err) = error {
+                        self.state.error = Some(err.clone());
+                        self.state.show_toast(err);
+                        // Keep compose_attach so the user can retry Send.
+                    } else {
+                        self.state.compose_attach = None;
+                        self.state.compose.clear();
+                        self.state.compose_nick_tab.clear();
+                        self.state.show_toast("Media sent");
+                        if let Some(media) = sent {
+                            self.do_send_local_echo(&media.target, media.text, None);
+                        }
                     }
                 }
             }
@@ -336,6 +494,25 @@ impl SleekApp {
             }
             NetEvent::ImageFetchFailed { url } => {
                 self.state.media.set_image_failed(url);
+            }
+            NetEvent::FullImageFetched {
+                url,
+                width,
+                height,
+                rgba,
+            } => {
+                self.state
+                    .media
+                    .set_full_image_ready(url, CachedPixels::new(width, height, rgba));
+            }
+            NetEvent::FullImageFetchFailed { url } => {
+                self.state.media.set_full_image_failed(url);
+            }
+            NetEvent::VideoFetched { url, bytes } => {
+                self.state.media.set_video_ready(url, bytes);
+            }
+            NetEvent::VideoFetchFailed { url } => {
+                self.state.media.set_video_failed(url);
             }
             NetEvent::LinkPreviewFetched {
                 url,
@@ -386,6 +563,7 @@ impl SleekApp {
                         has_mic: false,
                         media: MediaStatus::Idle,
                         awaiting_start: started,
+                        camera_awaiting_permission: false,
                     });
                 }
                 if started {
@@ -419,8 +597,22 @@ impl SleekApp {
                 has_mic,
             } => {
                 let mut sync_camera: Option<bool> = None;
+                let intentional_redial = self.state.local_call.as_ref().is_some_and(|lc| {
+                    matches!(lc.media, MediaStatus::Connecting)
+                });
+                let media_went_live = matches!(status, MediaStatus::Live);
+                let schedule_media_redial = matches!(
+                    status,
+                    MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
+                ) && self.state.local_call.is_some()
+                    && !intentional_redial;
                 if let Some(lc) = self.state.local_call.as_mut() {
-                    lc.media = status.clone();
+                    // `AvMediaConnect` stops the prior session (Idle) before the
+                    // new handshake — keep Connecting so we don't schedule a
+                    // second reconnect or wipe in-flight dial state.
+                    if !(matches!(status, MediaStatus::Idle) && intentional_redial) {
+                        lc.media = status.clone();
+                    }
                     if matches!(status, MediaStatus::Live) {
                         lc.has_camera = has_camera;
                         lc.has_mic = has_mic;
@@ -434,31 +626,62 @@ impl SleekApp {
                         // `lc.camera = has_camera && lc.camera` permanently forced
                         // camera off after a failed open, so a later re-dial opened
                         // the device but published no frames (gated off).
-                        if has_camera {
-                            // Hardware present — keep join/pre-call intent; re-sync
-                            // the media plane in case AtomicBool drifted.
-                            sync_camera = Some(lc.camera);
+                        //
+                        // Only re-assert *publish on* when the UI still wants
+                        // camera. Never sync `enabled: false` from Live — mute
+                        // already sends AvCamera{false}, and a Live emitted by
+                        // release_local_camera must not fight mid-toggle races.
+                        // Skip while awaiting Android CAMERA grant.
+                        if has_camera && lc.camera && !lc.camera_awaiting_permission {
+                            sync_camera = Some(true);
                         }
                     }
-                    if matches!(
+                    if schedule_media_redial {
+                        // Stay Idle/Failed so try_start_av_media won't dedupe the
+                        // scheduled re-dial (Connecting would skip it). The call
+                        // panel still paints tiles while media_reconnect_at is set.
+                        lc.camera_awaiting_permission = false;
+                    } else if matches!(
                         status,
                         MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                    ) {
-                        // Media plane down — hide camera control; keep mute/camera prefs.
+                    ) && !intentional_redial
+                    {
+                        // Media plane down for real — hide camera control; keep prefs.
                         lc.has_camera = false;
                         lc.has_mic = false;
+                        lc.camera_awaiting_permission = false;
                     }
                 }
                 if let Some(store) = video {
+                    // New MoQ sessions start with an empty store. Seed last-good
+                    // tiles into it, then always attach — so the UI keeps pixels
+                    // during Connecting/Live and decoder writes hit the same Arc.
+                    if store.is_empty() {
+                        if let Some(old) = self.state.av_video.as_ref().filter(|s| !s.is_empty()) {
+                            store.seed_missing_from(old);
+                        }
+                    }
                     self.state.av_video = Some(store);
                 }
                 if let Some(level) = mic_level {
                     self.state.av_mic_level = Some(level);
+                } else if schedule_media_redial || intentional_redial {
+                    self.state.av_mic_level = None;
                 }
-                if matches!(
+                let was_recovering = self.state.media_recovering();
+                if media_went_live {
+                    // Cancel pending timer only — do not zero attempts on a
+                    // 1-second Live blip or MoQ thrashes every 2s forever.
+                    self.state.on_media_live();
+                }
+                if schedule_media_redial {
+                    // Keep last video frames visible while MoQ reconnects.
+                    self.state.schedule_media_reconnect();
+                } else if matches!(
                     status,
                     MediaStatus::Idle | MediaStatus::Failed(_) | MediaStatus::BrowserOnly
-                ) {
+                ) && !intentional_redial
+                {
                     self.state.clear_av_media();
                 }
                 if let Some(enabled) = sync_camera {
@@ -466,36 +689,138 @@ impl SleekApp {
                 }
                 match &status {
                     MediaStatus::Live => {
-                        let cam = if has_camera {
-                            if self
+                        // Skip toast spam while recovering from transport drops.
+                        if !was_recovering {
+                            let awaiting = self
                                 .state
                                 .local_call
                                 .as_ref()
-                                .is_some_and(|lc| lc.camera)
-                            {
-                                " + camera on"
+                                .is_some_and(|lc| lc.camera_awaiting_permission);
+                            let cam = if awaiting {
+                                " · awaiting camera permission"
+                            } else if has_camera {
+                                if self
+                                    .state
+                                    .local_call
+                                    .as_ref()
+                                    .is_some_and(|lc| lc.camera)
+                                {
+                                    " + camera on"
+                                } else {
+                                    " + camera (off)"
+                                }
+                            } else if self.state.av_pref_camera {
+                                // User wanted video but open failed (busy device,
+                                // dead OBS node, etc.) — make it visible in the toast.
+                                " · camera unavailable"
                             } else {
-                                " + camera (off)"
-                            }
-                        } else if self.state.av_pref_camera {
-                            // User wanted video but open failed (busy device,
-                            // dead OBS node, etc.) — make it visible in the toast.
-                            " · camera unavailable"
-                        } else {
-                            ""
-                        };
-                        let mic = if has_mic {
-                            ""
-                        } else {
-                            " · no mic (listen-only)"
-                        };
-                        self.state
-                            .show_toast(format!("Call media connected{cam}{mic}"));
+                                ""
+                            };
+                            let mic = if has_mic {
+                                ""
+                            } else {
+                                " · no mic (listen-only)"
+                            };
+                            self.state
+                                .show_toast(format!("Call media connected{cam}{mic}"));
+                        }
                     }
                     MediaStatus::Failed(e) => {
                         self.state.show_toast(format!("Call media failed: {e}"));
                     }
                     _ => {}
+                }
+            }
+            NetEvent::HandleSuggestions {
+                request_id,
+                query,
+                actors,
+                error,
+            } => {
+                if error.is_some() {
+                    self.state.handle_typeahead.apply_failed(request_id);
+                } else {
+                    self.state
+                        .handle_typeahead
+                        .apply_results(request_id, query, actors);
+                }
+            }
+            NetEvent::ProfileFetched {
+                request_id,
+                result,
+            } => {
+                if self.state.profile_gate.fetch_id != request_id {
+                    return;
+                }
+                self.state.profile_gate.profile_fetching = false;
+                self.state.profile_gate.loading = false;
+                match result {
+                    Ok(profile) => {
+                        if self.state.profile_gate.did.is_none() {
+                            self.state.profile_gate.did = Some(profile.did.clone());
+                        }
+                        if let (Some(nick), Some(url)) = (
+                            self.state.profile_gate.nick.clone(),
+                            profile.avatar.as_deref(),
+                        ) {
+                            self.state.avatars.seed(&nick, url);
+                        }
+                        self.state.profile_gate.error = None;
+                        self.state.profile_gate.profile = Some(profile);
+                    }
+                    Err(e) => {
+                        self.state.profile_gate.error = Some(e);
+                        self.state.profile_gate.profile = None;
+                    }
+                }
+            }
+            NetEvent::AvatarFetched { nick, result } => {
+                match &result {
+                    Ok(profile) => {
+                        if let Some(url) = profile.avatar.as_deref() {
+                            log::debug!(
+                                "avatar: {} → {} ({})",
+                                nick,
+                                profile.handle,
+                                url
+                            );
+                            // Warm the image cache as soon as the URL is known.
+                            self.state.media.touch_image(url);
+                        } else {
+                            log::debug!(
+                                "avatar: {} → {} (no photo)",
+                                nick,
+                                profile.handle
+                            );
+                        }
+                        // Handle→DID learn when we resolved by nick-as-handle.
+                        if crate::bsky::is_atproto_did(&profile.did) {
+                            self.state.adopt_dm_binding(&nick, &profile.did);
+                        }
+                    }
+                    Err(e) => log::debug!("avatar: {nick} fetch failed: {e}"),
+                }
+                self.state.avatars.apply_result(&nick, result);
+            }
+            NetEvent::PolicyFetched {
+                request_id,
+                check,
+                rules,
+            } => {
+                if self.state.policy_gate.fetch_id != request_id {
+                    return;
+                }
+                self.state.policy_gate.loading = false;
+                self.state.policy_gate.accepting = false;
+                match check {
+                    Ok(c) => self.state.policy_gate.check = Some(c),
+                    Err(e) => {
+                        self.state.policy_gate.error = Some(e);
+                        self.state.policy_gate.check = None;
+                    }
+                }
+                if let Ok(text) = rules {
+                    self.state.policy_gate.rules = Some(text);
                 }
             }
             NetEvent::Sdk(event) => self.handle_sdk_event(event),
@@ -509,6 +834,9 @@ impl SleekApp {
         if !tokens.handle.is_empty() {
             self.state.handle = Some(tokens.handle.clone());
             self.state.form_handle = tokens.handle.clone();
+        } else if !self.state.form_handle.is_empty() {
+            let handle = self.state.form_handle.clone();
+            self.state.handle = Some(handle);
         }
         if !tokens.nick.is_empty() {
             self.state.nick = tokens.nick.clone();
@@ -535,6 +863,7 @@ impl SleekApp {
                 if self.state.did.is_some() && nick.starts_with("Guest") {
                     self.state
                         .show_toast("Guest nick after auth — refreshing broker session…");
+                    self.state.intentional_disconnect = true;
                     self.net.send(NetCmd::Quit);
                     self.state.connection = ConnectionState::Disconnected;
                     if self.state.has_saved_session() {
@@ -547,6 +876,8 @@ impl SleekApp {
                 self.state.form_nick = nick.clone();
                 self.state.status_line = format!("Online as {nick}");
                 self.state.error = None;
+                self.state.cancel_auto_reconnect();
+                self.state.intentional_disconnect = false;
                 self.state.show_toast(format!("Connected as {nick}"));
                 self.state.persist_session();
                 // Seed status buffer
@@ -570,6 +901,9 @@ impl SleekApp {
                 self.state.persist_session();
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(format!("DID {did}")));
+                // Own avatar for chat rows (DID-only resolve).
+                let nick = self.state.nick.clone();
+                self.state.avatars.prefetch(&nick, Some(did.as_str()));
             }
             Event::AuthFailed { reason } => {
                 self.state.error = Some(format!("Auth failed: {reason}"));
@@ -578,9 +912,17 @@ impl SleekApp {
             Event::Joined {
                 channel,
                 nick,
-                account: _,
+                account,
             } => {
+                // Extended-join account → Bluesky avatar prefetch (DID or
+                // handle-shaped nick). MemberDid usually races this; both paths
+                // are idempotent in AvatarCache.
+                if let Some(ref did) = account {
+                    self.state.adopt_dm_binding(&nick, did);
+                }
+                self.state.avatars.prefetch(&nick, account.as_deref());
                 let own = nick.eq_ignore_ascii_case(&self.state.nick);
+                let show_join_part = self.state.show_join_part;
                 let buf = self.state.ensure_buffer(&channel);
                 if own {
                     buf.join_pending = false;
@@ -597,11 +939,13 @@ impl SleekApp {
                     .iter()
                     .any(|n| n.eq_ignore_ascii_case(&nick));
                 if !already_member {
-                    if own {
-                        buf.append(ChatMessage::system(format!("Joined {channel}")));
-                        // Stay on tabs; user opens the channel from the list.
-                    } else {
-                        buf.append(ChatMessage::system(format!("{nick} joined")));
+                    if show_join_part {
+                        if own {
+                            buf.append(ChatMessage::system(format!("Joined {channel}")));
+                            // Stay on tabs; user opens the channel from the list.
+                        } else {
+                            buf.append(ChatMessage::system(format!("{nick} joined")));
+                        }
                     }
                     buf.members.push(nick);
                 }
@@ -619,9 +963,12 @@ impl SleekApp {
                 }
             }
             Event::Parted { channel, nick } => {
+                let show_join_part = self.state.show_join_part;
                 if let Some(buf) = self.state.channels.get_mut(&channel) {
                     buf.members.retain(|n| !n.eq_ignore_ascii_case(&nick));
-                    buf.append(ChatMessage::system(format!("{nick} left")));
+                    if show_join_part {
+                        buf.append(ChatMessage::system(format!("{nick} left")));
+                    }
                 }
                 if nick.eq_ignore_ascii_case(&self.state.nick) {
                     self.state.channels.remove(&channel);
@@ -662,6 +1009,12 @@ impl SleekApp {
                     .or_else(|| tags.get("reply"))
                     .cloned();
                 let timestamp = server_time_from_tags(&tags).unwrap_or_else(chrono::Local::now);
+
+                // Bluesky avatar: account-tag DID (or handle-shaped nick).
+                let account = tags.get("account").cloned();
+                self.state
+                    .avatars
+                    .prefetch(&from, account.as_deref());
 
                 let is_own = from.eq_ignore_ascii_case(&self.state.nick);
                 // Own echoed DM: target = recipient nick, dm_key = their DID.
@@ -706,7 +1059,7 @@ impl SleekApp {
                             self.state.media.touch_link(url);
                         }
                     }
-                    None => {}
+                    Some(preview::Embed::Video { .. }) | None => {}
                 }
 
                 let reactions = tags
@@ -748,7 +1101,7 @@ impl SleekApp {
                 }
 
                 let msg = ChatMessage {
-                    id: msgid,
+                    id: msgid.clone(),
                     from: from.clone(),
                     text: body,
                     is_system: false,
@@ -766,14 +1119,59 @@ impl SleekApp {
 
                 let buf = self.state.ensure_buffer(&buffer_name);
                 buf.append(msg);
-                if !viewing && !is_own {
-                    buf.unread = buf.unread.saturating_add(1);
-                }
+                self.state.record_message_for_unread(
+                    &buffer_name,
+                    &msgid,
+                    timestamp.timestamp(),
+                    is_own,
+                    viewing,
+                );
             }
             Event::MemberDid { nick, did } => {
                 // Fold nick-keyed DM into DID-keyed thread when peer identity
                 // is learned (join / whois / account tag on first message).
                 self.state.adopt_dm_binding(&nick, &did);
+                self.state.avatars.prefetch(&nick, Some(did.as_str()));
+                if self
+                    .state
+                    .profile_gate
+                    .nick
+                    .as_ref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&nick))
+                {
+                    self.state.profile_gate.did = Some(did.clone());
+                    self.maybe_fetch_profile_for_gate();
+                }
+            }
+            Event::WhoisReply { nick, info } => {
+                if self
+                    .state
+                    .profile_gate
+                    .nick
+                    .as_ref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&nick))
+                {
+                    if !self
+                        .state
+                        .profile_gate
+                        .whois_lines
+                        .iter()
+                        .any(|l| l == &info)
+                    {
+                        self.state.profile_gate.whois_lines.push(info);
+                    }
+                    // Offline / unknown nick: stop waiting on IRC identity. A
+                    // handle-shaped nick may still resolve via Bluesky AppView.
+                    if !self.state.profile_gate.profile_fetching
+                        && self.state.profile_gate.profile.is_none()
+                    {
+                        if self.state.profile_gate.bluesky_actor().is_some() {
+                            self.maybe_fetch_profile_for_gate();
+                        } else {
+                            self.state.profile_gate.loading = false;
+                        }
+                    }
+                }
             }
             Event::ChatHistoryTarget {
                 nick,
@@ -862,6 +1260,9 @@ impl SleekApp {
                 self.state.status_line = text.clone();
                 let buf = self.state.ensure_buffer("*status");
                 buf.append(ChatMessage::system(text.clone()));
+                if let Some(channel) = crate::policy::parse_policy_accepted(&text) {
+                    self.on_policy_accepted(&channel);
+                }
                 // freeq 477 (guest / policy gate) and other JOIN denials arrive
                 // as ServerNotice: "#policytest This channel requires authentication — …"
                 if let Some((channel, reason)) = parse_join_denial(&text) {
@@ -869,17 +1270,41 @@ impl SleekApp {
                 }
             }
             Event::Disconnected { reason } => {
-                self.state.clear_session();
-                if reason != "quit" {
+                let intentional = self.state.intentional_disconnect || reason == "quit";
+                self.state.intentional_disconnect = false;
+
+                // Quit after "Guest nick → refresh session" already kicked off
+                // Connecting — don't clobber that in-flight restore.
+                if intentional {
+                    if self.state.connection == ConnectionState::Connecting {
+                        return;
+                    }
+                    self.state.clear_session();
+                    return;
+                }
+
+                // Unexpected EOF / ping timeout / socket drop — keep buffers and
+                // auto-reconnect with backoff (freeq-android parity).
+                let nick_empty = self.state.nick.trim().is_empty();
+                if crate::reconnect::should_auto_reconnect(false, nick_empty, &reason) {
+                    self.state.mark_disconnected_for_reconnect(&reason);
+                    self.state.error = Some(format!("Disconnected: {reason}"));
+                    self.state.show_toast(format!("Disconnected: {reason}"));
+                    self.state.schedule_auto_reconnect();
+                } else {
+                    self.state.clear_session();
                     self.state.show_toast(format!("Disconnected: {reason}"));
                     self.state.error = Some(reason);
                 }
             }
             Event::UserQuit { nick, reason } => {
+                let show_join_part = self.state.show_join_part;
                 for buf in self.state.channels.values_mut() {
                     if buf.members.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
                         buf.members.retain(|n| !n.eq_ignore_ascii_case(&nick));
-                        buf.append(ChatMessage::system(format!("{nick} quit ({reason})")));
+                        if show_join_part {
+                            buf.append(ChatMessage::system(format!("{nick} quit ({reason})")));
+                        }
                     }
                 }
             }
@@ -908,7 +1333,29 @@ impl SleekApp {
                 self.handle_delete_tags(&key, &from, &tags);
                 self.handle_av_tags(&key, &tags);
             }
-            // batches, history, etc. — not yet rendered
+            Event::BatchStart {
+                id,
+                batch_type,
+                target,
+            } => {
+                if batch_type == "chathistory" && !target.is_empty() {
+                    self.state.history_batches.insert(id, target);
+                }
+            }
+            Event::BatchEnd { id } => {
+                if let Some(channel) = self.state.history_batches.remove(&id) {
+                    let account = self.state.account_key();
+                    if let Err(e) = self
+                        .state
+                        .message_store
+                        .baseline_after_history(&account, &channel)
+                    {
+                        log::warn!("message_store history baseline {channel}: {e:#}");
+                    }
+                    self.state.refresh_unread(&channel);
+                }
+            }
+            // other batches / events — not yet rendered
             _ => {}
         }
     }
@@ -1058,13 +1505,14 @@ impl SleekApp {
                     self.net.send(NetCmd::AvMediaStop);
                     self.state.local_call = None;
                     self.state.clear_av_media();
+                    self.state.cancel_media_reconnect();
                 }
             }
         }
     }
 
-    /// Dial MoQ media (desktop + Android). Android is audio-only publish for now
-    /// (no CameraX bridge under cargo-apk NativeActivity).
+    /// Dial MoQ media (desktop + Android). Android publishes mic + optional
+    /// Camera2 video (NV12 → H.264) when CAMERA permission is granted.
     ///
     /// Skips dial when the SFU needs a JWT we do not have yet, and skips
     /// re-dial while already Connecting/Live for the same session + token
@@ -1085,12 +1533,28 @@ impl SleekApp {
             );
             return;
         }
-        // Android 6+: RECORD_AUDIO is runtime. Prompt before opening the mic;
-        // dial still proceeds so a later retry (after grant) can succeed.
+        // Android 6+: RECORD_AUDIO / CAMERA are runtime. Batch into one dialog
+        // (a second requestPermissions replaces the first). Dial proceeds with
+        // camera publish only when CAMERA is already granted; otherwise we
+        // defer and enable after [`poll_android_camera_permission`].
         #[cfg(target_os = "android")]
-        {
-            let _ = crate::android_media::ensure_record_audio_permission();
-        }
+        let android_camera_granted = {
+            let want_camera = self
+                .state
+                .local_call
+                .as_ref()
+                .map(|lc| lc.camera)
+                .unwrap_or(self.state.av_pref_camera);
+            let perms = crate::android_media::ensure_av_call_permissions(want_camera);
+            if want_camera && !perms.camera {
+                if let Some(lc) = self.state.local_call.as_mut() {
+                    lc.camera_awaiting_permission = true;
+                }
+            }
+            perms.camera
+        };
+        #[cfg(not(target_os = "android"))]
+        let android_camera_granted = true;
         // Dedup: same session + same token while already up / in flight.
         if let Some(lc) = self.state.local_call.as_ref() {
             let same_session = lc.session_id == session_id;
@@ -1132,12 +1596,13 @@ impl SleekApp {
             .map(|lc| lc.speaker_muted)
             .unwrap_or(self.state.av_pref_speaker_muted);
         // In-call intent if set; otherwise persisted pref.
-        let camera = self
+        let camera_intent = self
             .state
             .local_call
             .as_ref()
             .map(|lc| lc.camera)
             .unwrap_or(self.state.av_pref_camera);
+        let camera = av::camera_publish_at_dial(camera_intent, android_camera_granted);
         if let Some(lc) = self.state.local_call.as_mut() {
             lc.media = MediaStatus::Connecting;
             // Keep token in sync so the next try_start can dedup.
@@ -1146,9 +1611,15 @@ impl SleekApp {
                     lc.token = Some(t.to_string());
                 }
             }
+            if camera_intent && !android_camera_granted {
+                lc.camera_awaiting_permission = true;
+            } else if android_camera_granted {
+                lc.camera_awaiting_permission = false;
+            }
         }
         log::info!(
-            "av-media: dial camera={camera} cam_id={:?} mic={:?} spk={:?} speaker_muted={speaker_muted}",
+            "av-media: dial camera={camera} (intent={camera_intent} perm={android_camera_granted}) \
+             cam_id={:?} mic={:?} spk={:?} speaker_muted={speaker_muted}",
             self.state.av_pref_camera_id,
             self.state.av_pref_mic_id,
             self.state.av_pref_speaker_id
@@ -1185,6 +1656,7 @@ impl SleekApp {
             has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: true,
+            camera_awaiting_permission: false,
         });
         self.net.send(NetCmd::AvStart { channel });
     }
@@ -1206,6 +1678,7 @@ impl SleekApp {
             has_mic: false,
             media: MediaStatus::Idle,
             awaiting_start: false,
+            camera_awaiting_permission: false,
         });
         self.net.send(NetCmd::AvJoin {
             channel,
@@ -1227,6 +1700,7 @@ impl SleekApp {
         }
         self.state.persist_av_prefs();
         self.state.clear_av_media();
+        self.state.cancel_media_reconnect();
         self.net.send(NetCmd::AvLeave {
             channel: lc.channel,
             session_id: lc.session_id,
@@ -1267,6 +1741,20 @@ impl SleekApp {
                 return;
             };
             if !lc.has_camera {
+                #[cfg(target_os = "android")]
+                {
+                    // Permission denied / not yet granted: prompt and defer enable.
+                    if !crate::android_media::has_camera_permission() {
+                        let _ = crate::android_media::ensure_camera_permission();
+                        lc.camera = true;
+                        lc.camera_awaiting_permission = true;
+                        self.state.av_pref_camera = true;
+                        self.state.persist_av_prefs();
+                        self.state
+                            .show_toast("Grant camera permission to enable video");
+                        return;
+                    }
+                }
                 self.state.show_toast("No camera available");
                 return;
             }
@@ -1275,6 +1763,19 @@ impl SleekApp {
         };
         self.state.av_pref_camera = camera;
         self.state.persist_av_prefs();
+        #[cfg(target_os = "android")]
+        if camera && !crate::android_media::has_camera_permission() {
+            let _ = crate::android_media::ensure_camera_permission();
+            if let Some(lc) = self.state.local_call.as_mut() {
+                lc.camera_awaiting_permission = true;
+            }
+            self.state
+                .show_toast("Grant camera permission to enable video");
+            return;
+        }
+        if let Some(lc) = self.state.local_call.as_mut() {
+            lc.camera_awaiting_permission = false;
+        }
         self.net.send(NetCmd::AvCamera {
             enabled: camera,
         });
@@ -1321,6 +1822,122 @@ impl SleekApp {
         }
     }
 
+    /// Open a chat and optionally request history when the buffer is empty.
+    fn open_chat_with_history(&mut self, name: String) {
+        let need_history = self
+            .state
+            .channels
+            .get(&name)
+            .map(|b| !b.has_chat_messages())
+            .unwrap_or(true);
+        self.state.open_chat(&name);
+        if need_history {
+            self.net.send(NetCmd::HistoryLatest {
+                target: name,
+                count: 100,
+            });
+        }
+    }
+
+    /// Handle actions from [`ui::chat_screen`].
+    fn handle_chat_action(&mut self, _ctx: &egui::Context, act: ChatAction) {
+        match act {
+            ChatAction::None => {}
+            ChatAction::Back => {
+                self.state.close_chat();
+            }
+            ChatAction::Send { target, text } => {
+                self.do_send(target, text);
+            }
+            ChatAction::React {
+                target,
+                msgid,
+                emoji,
+            } => {
+                self.do_toggle_react(target, msgid, emoji);
+            }
+            ChatAction::Edit {
+                target,
+                msgid,
+                text,
+            } => {
+                self.do_edit(target, msgid, text);
+            }
+            ChatAction::Delete { target, msgid } => {
+                self.do_delete(target, msgid);
+            }
+            ChatAction::Part(channel) => {
+                self.do_part(channel);
+            }
+            ChatAction::OpenChannel(channel) => {
+                let ch = AppState::normalize_channel(&channel);
+                if !ch.is_empty() {
+                    if self
+                        .state
+                        .channels
+                        .get(&ch)
+                        .is_some_and(|b| b.is_joined())
+                    {
+                        self.state.open_chat(&ch);
+                    } else {
+                        self.do_join(ch);
+                    }
+                }
+            }
+            ChatAction::OpenDm(nick) => {
+                let key = self.state.dm_buffer_key(&nick);
+                self.open_chat_with_history(key);
+            }
+            ChatAction::OpenPolicyGate(channel) => {
+                self.open_policy_gate(&channel);
+            }
+            ChatAction::OpenProfile(nick) => {
+                self.open_profile_gate(&nick);
+            }
+            ChatAction::AvStart(channel) => {
+                self.do_av_start(channel);
+            }
+            ChatAction::AvJoin {
+                channel,
+                session_id,
+            } => {
+                self.do_av_join(channel, session_id);
+            }
+            ChatAction::AvLeave => {
+                self.do_av_leave();
+            }
+            ChatAction::AvToggleMute => {
+                self.do_av_toggle_mute();
+            }
+            ChatAction::AvToggleSpeakerMute => {
+                self.do_av_toggle_speaker_mute();
+            }
+            ChatAction::AvToggleCamera => {
+                self.do_av_toggle_camera();
+            }
+            ChatAction::AvSelectCamera(id) => {
+                self.do_av_select_camera(id);
+            }
+            ChatAction::AvSelectMic(id) => {
+                self.do_av_select_mic(id);
+            }
+            ChatAction::AvSelectSpeaker(id) => {
+                self.do_av_select_speaker(id);
+            }
+            ChatAction::OpenCallChannel(ch) => {
+                self.state.open_chat(&ch);
+            }
+        }
+    }
+
+    fn handle_chats_action(&mut self, act: ChatsAction) {
+        match act {
+            ChatsAction::None => {}
+            ChatsAction::Open(name) => self.open_chat_with_history(name),
+            ChatsAction::Join(ch) => self.do_join(ch),
+        }
+    }
+
     fn do_connect(&mut self) {
         // Guest path — no SASL web-token. Wipe any leftover Bluesky session so
         // we don't stay half-authenticated (DID/handle in UI, guest on wire).
@@ -1352,6 +1969,8 @@ impl SleekApp {
             return;
         }
         self.state.error = None;
+        self.state.intentional_disconnect = false;
+        self.state.reconnect_at = None;
         self.state.connection = ConnectionState::Connecting;
         self.state.awaiting_oauth = false;
         self.state.nick = nick.clone();
@@ -1374,6 +1993,14 @@ impl SleekApp {
         });
     }
 
+    /// User-initiated disconnect: suppress auto-reconnect for the Quit event.
+    fn do_intentional_disconnect(&mut self) {
+        self.state.intentional_disconnect = true;
+        self.state.cancel_auto_reconnect();
+        self.net.send(NetCmd::Quit);
+        self.state.clear_session();
+    }
+
     fn do_bluesky_login(&mut self, ctx: &egui::Context) {
         let handle = self
             .state
@@ -1385,7 +2012,10 @@ impl SleekApp {
             self.state.error = Some("Enter your Bluesky handle".into());
             return;
         }
+        self.state.form_handle = handle.clone();
+        self.state.remember_bsky_handle(&handle);
         self.state.error = None;
+        self.state.handle_typeahead.dismiss();
         self.state.awaiting_oauth = true;
         self.state.connection = ConnectionState::Connecting;
         #[cfg(target_os = "android")]
@@ -1396,7 +2026,7 @@ impl SleekApp {
         }
         #[cfg(not(target_os = "android"))]
         {
-            self.state.status_line = "Browser opened for sign-in — look for the Chromium window (Alt+Tab if covered).".into();
+            self.state.status_line = "Browser opened for sign-in — look for the browser window (Alt+Tab if covered).".into();
             // Fullscreen Sleek sits above everything on Fluxbox/VNC; yield first.
             self.yield_to_oauth_browser(ctx);
         }
@@ -1472,6 +2102,14 @@ impl SleekApp {
     #[cfg(not(target_os = "android"))]
     fn poll_oauth_deep_link(&mut self, _ctx: &egui::Context) {}
 
+    fn poll_policy_gate_refresh(&mut self) {
+        if let Some(deadline) = self.state.policy_gate.refresh_after {
+            if std::time::Instant::now() >= deadline {
+                self.state.policy_gate.refresh_after = None;
+                self.refresh_policy_gate();
+            }
+        }
+    }
 
     fn do_reconnect_session(&mut self) {
         let Some(broker_token) = self.state.broker_token.clone() else {
@@ -1479,6 +2117,8 @@ impl SleekApp {
             return;
         };
         self.state.error = None;
+        self.state.intentional_disconnect = false;
+        self.state.reconnect_at = None;
         self.state.connection = ConnectionState::Connecting;
         self.state.status_line = "Restoring session…".into();
         self.net.send(NetCmd::ReconnectSession {
@@ -1538,6 +2178,10 @@ impl SleekApp {
             buf.join_error = Some(reason.clone());
             buf.append(ChatMessage::system(reason.clone()));
         }
+        // Authenticated users blocked by ACCEPT rules — open the join-gate modal.
+        if self.state.did.is_some() && crate::policy::is_policy_acceptance_denial(&reason) {
+            self.open_policy_gate(&ch);
+        }
         self.state.error = Some(format!("{ch}: {reason}"));
         self.state.show_toast(format!("{ch}: {reason}"));
         // Keep the chat open so the error empty-state is visible.
@@ -1547,11 +2191,193 @@ impl SleekApp {
         self.state.tab = Tab::Chats;
     }
 
+    fn open_policy_gate(&mut self, channel: &str) {
+        let did = match self.state.did.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => return,
+        };
+        let request_id = self.state.open_policy_gate(channel);
+        let channel = self
+            .state
+            .policy_gate
+            .channel
+            .clone()
+            .unwrap_or_else(|| AppState::normalize_channel(channel));
+        let api_base = api_base_for_server(&self.state.server);
+        self.net.send(NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        });
+    }
+
+    /// Open peer profile dialog; WHOIS for DID if unknown, then Bluesky getProfile.
+    fn open_profile_gate(&mut self, nick: &str) {
+        let nick = nick.trim();
+        if nick.is_empty() {
+            return;
+        }
+        self.state.open_profile_gate(nick);
+        if let Some(n) = self.state.profile_gate.nick.clone() {
+            if !self.state.profile_gate.whois_sent {
+                self.state.profile_gate.whois_sent = true;
+                self.net.send(NetCmd::Raw(format!("WHOIS {n}")));
+            }
+        }
+        // Fetch immediately when we already have a DID or a handle-shaped nick.
+        self.maybe_fetch_profile_for_gate();
+    }
+
+    fn maybe_fetch_profile_for_gate(&mut self) {
+        if !self.state.profile_gate.is_open() || self.state.profile_gate.profile_fetching {
+            return;
+        }
+        if self.state.profile_gate.profile.is_some() {
+            self.state.profile_gate.loading = false;
+            return;
+        }
+        let Some(actor) = self
+            .state
+            .profile_gate
+            .bluesky_actor()
+            .map(|s| s.to_string())
+        else {
+            // No Bluesky actor yet — UI shows "Looking up…" until WHOIS settles.
+            return;
+        };
+        let request_id = self.state.profile_gate.fetch_id;
+        self.state.profile_gate.profile_fetching = true;
+        self.state.profile_gate.loading = true;
+        self.state.profile_gate.error = None;
+        self.net.send(NetCmd::FetchProfile {
+            request_id,
+            actor,
+        });
+    }
+
+    fn handle_profile_gate_action(&mut self, ctx: &egui::Context, act: ProfileGateAction) {
+        match act {
+            ProfileGateAction::None => {}
+            ProfileGateAction::Close => {
+                self.state.close_profile_gate();
+            }
+            ProfileGateAction::Message { nick } => {
+                self.state.close_profile_gate();
+                let key = self.state.dm_buffer_key(&nick);
+                let need_history = self
+                    .state
+                    .channels
+                    .get(&key)
+                    .map(|b| !b.has_chat_messages())
+                    .unwrap_or(true);
+                self.state.open_chat(&key);
+                if need_history {
+                    self.net.send(NetCmd::HistoryLatest {
+                        target: key,
+                        count: 100,
+                    });
+                }
+            }
+            ProfileGateAction::OpenBluesky { url } => {
+                open_profile_url(ctx, &url);
+            }
+        }
+    }
+
+    fn refresh_policy_gate(&mut self) {
+        let channel = match self.state.policy_gate.channel.clone() {
+            Some(c) => c,
+            None => return,
+        };
+        let did = match self.state.did.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => return,
+        };
+        self.state.policy_gate.loading = true;
+        self.state.policy_gate.error = None;
+        self.state.policy_gate.fetch_id = self.state.policy_gate.fetch_id.wrapping_add(1);
+        let request_id = self.state.policy_gate.fetch_id;
+        let api_base = api_base_for_server(&self.state.server);
+        self.net.send(NetCmd::PolicyFetch {
+            request_id,
+            channel,
+            api_base,
+            did,
+        });
+    }
+
+    fn do_policy_accept(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        self.state.policy_gate.accepting = true;
+        self.net
+            .send(NetCmd::Raw(format!("POLICY {ch} ACCEPT\r\n")));
+    }
+
+    fn do_policy_join(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        self.state.policy_gate.joining = true;
+        self.net
+            .send(NetCmd::Raw(format!("POLICY {ch} ACCEPT\r\n")));
+        // Brief delay so the server can issue the attestation before JOIN.
+        let ch_join = ch.clone();
+        if let Some(buf) = self.state.channels.get_mut(&ch) {
+            buf.join_error = None;
+            buf.join_pending = true;
+        }
+        self.net.send(NetCmd::Join(ch_join));
+        self.state.policy_gate.close();
+    }
+
+    fn on_policy_accepted(&mut self, channel: &str) {
+        let ch = AppState::normalize_channel(channel);
+        if self.state.policy_gate.channel.as_deref() == Some(ch.as_str()) {
+            self.state.policy_gate.accepting = false;
+            self.refresh_policy_gate();
+        }
+        if let Some(buf) = self.state.channels.get_mut(&ch) {
+            if buf.join_error.is_some() {
+                buf.join_error = None;
+            }
+        }
+        self.state.show_toast(format!("{ch}: policy accepted — you may join"));
+    }
+
+    fn handle_policy_gate_action(&mut self, ctx: &egui::Context, act: PolicyGateAction) {
+        match act {
+            PolicyGateAction::None => {}
+            PolicyGateAction::Close => {
+                self.state.close_policy_gate();
+            }
+            PolicyGateAction::Refresh => {
+                self.refresh_policy_gate();
+            }
+            PolicyGateAction::AcceptRules => {
+                if let Some(ch) = self.state.policy_gate.channel.clone() {
+                    self.do_policy_accept(&ch);
+                    self.state.policy_gate.refresh_after =
+                        Some(Instant::now() + Duration::from_millis(900));
+                }
+            }
+            PolicyGateAction::VerifyExternal { url } => {
+                let api_base = api_base_for_server(&self.state.server);
+                if let Some(did) = self.state.did.clone() {
+                    open_verification_url(ctx, &api_base, &url, &did);
+                }
+            }
+            PolicyGateAction::Join => {
+                if let Some(ch) = self.state.policy_gate.channel.clone() {
+                    self.do_policy_join(&ch);
+                }
+            }
+        }
+    }
+
     fn do_send(&mut self, target: String, text: String) {
-        // Image attached: upload then PRIVMSG the freeq media URL.
+        // Media attached: upload then PRIVMSG the freeq media URL.
         // Slash commands don't apply when attaching media (caption is plain text).
-        if self.state.compose_image.is_some() {
-            self.do_send_with_image(target, text);
+        if self.state.compose_attach.is_some() {
+            self.do_send_with_attach(target, text);
             return;
         }
 
@@ -1559,6 +2385,7 @@ impl SleekApp {
         if text.is_empty() {
             return;
         }
+        let reply_to = self.state.replying_to.take().map(|r| r.msgid);
         self.state.compose.clear();
         self.state.compose_nick_tab.clear();
 
@@ -1567,8 +2394,16 @@ impl SleekApp {
             return;
         }
 
-        self.do_send_local_echo(&target, text.clone());
-        self.net.send(NetCmd::Privmsg { target, text });
+        self.do_send_local_echo(&target, text.clone(), reply_to.clone());
+        if let Some(msgid) = reply_to {
+            self.net.send(NetCmd::Reply {
+                target,
+                msgid,
+                text,
+            });
+        } else {
+            self.net.send(NetCmd::Privmsg { target, text });
+        }
     }
 
     /// Dispatch `/join`, `/me`, `/msg`, … — mirrors freeq-android ComposeBar.
@@ -1592,7 +2427,7 @@ impl SleekApp {
                 });
             }
             crate::slash::SlashCommand::Msg { target, text } => {
-                self.do_send_local_echo(&target, text.clone());
+                self.do_send_local_echo(&target, text.clone(), None);
                 self.net.send(NetCmd::Privmsg { target, text });
             }
             crate::slash::SlashCommand::Topic(topic) => {
@@ -1624,54 +2459,125 @@ impl SleekApp {
         }
     }
 
-    fn do_send_with_image(&mut self, target: String, caption: String) {
+    fn do_send_with_attach(&mut self, target: String, caption: String) {
         if self.state.compose_uploading {
             return;
         }
-        let Some(img) = self.state.compose_image.clone() else {
+        let Some(attach) = self.state.compose_attach.clone() else {
             return;
         };
         let Some(did) = self.state.did.clone() else {
             self.state
-                .show_toast("Sign in with Bluesky to send images");
+                .show_toast("Sign in with Bluesky to send media");
             return;
         };
         if self.state.connection != ConnectionState::Registered
             && self.state.connection != ConnectionState::Connected
         {
-            self.state.show_toast("Connect before sending images");
+            self.state.show_toast("Connect before sending media");
             return;
         }
 
-        let bytes = match clipboard::encode_png(&img) {
-            Ok(b) => b,
-            Err(e) => {
-                self.state.show_toast(e);
-                return;
-            }
-        };
-
+        self.state.compose_upload_id = self.state.compose_upload_id.wrapping_add(1);
+        let upload_id = self.state.compose_upload_id;
         self.state.compose_uploading = true;
-        self.state.show_toast("Uploading image…");
-        self.net.send(NetCmd::UploadAndSend {
-            target,
-            caption,
-            bytes,
-            content_type: "image/png".into(),
-            did,
-            api_base: api_base_for_server(&self.state.server),
-        });
+        self.state.compose_upload_started = Some(std::time::Instant::now());
+
+        match attach {
+            crate::state::ComposeAttach::Image(img) => {
+                // PNG encode on a worker — large pastes used to freeze the egui
+                // frame before the upload even started.
+                self.state.compose_encode_meta = Some(crate::state::ComposeEncodeMeta {
+                    upload_id,
+                    target,
+                    caption,
+                    did,
+                    api_base: api_base_for_server(&self.state.server),
+                });
+                self.state.compose_encode_rx = Some(clipboard::start_encode_png(img));
+                self.state.show_toast("Uploading image…");
+            }
+            crate::state::ComposeAttach::Video(video) => {
+                // Videos keep original bytes — no re-encode.
+                self.state.compose_encode_meta = None;
+                self.state.compose_encode_rx = None;
+                let bytes = video.bytes.as_ref().to_vec();
+                self.net.send(NetCmd::UploadAndSend {
+                    upload_id,
+                    target,
+                    caption,
+                    bytes,
+                    content_type: video.content_type,
+                    did,
+                    api_base: api_base_for_server(&self.state.server),
+                });
+                self.state.show_toast("Uploading video…");
+            }
+        }
     }
 
-    fn do_send_local_echo(&mut self, target: &str, text: String) {
-        self.do_send_local_echo_inner(target, text, false);
+    /// Drain background PNG encode → `UploadAndSend`. Keeps the UI thread free.
+    fn poll_compose_encode(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.state.compose_encode_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(bytes)) => {
+                let meta = self.state.compose_encode_meta.take();
+                self.state.compose_encode_rx = None;
+                let Some(meta) = meta else {
+                    return;
+                };
+                if meta.upload_id != self.state.compose_upload_id {
+                    return;
+                }
+                self.net.send(NetCmd::UploadAndSend {
+                    upload_id: meta.upload_id,
+                    target: meta.target,
+                    caption: meta.caption,
+                    bytes,
+                    content_type: "image/png".into(),
+                    did: meta.did,
+                    api_base: meta.api_base,
+                });
+                ctx.request_repaint();
+            }
+            Ok(Err(e)) => {
+                self.state.compose_encode_rx = None;
+                self.state.compose_encode_meta = None;
+                self.state.compose_uploading = false;
+                self.state.compose_upload_started = None;
+                self.state.show_toast(e);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.state.compose_encode_rx = None;
+                self.state.compose_encode_meta = None;
+                self.state.compose_uploading = false;
+                self.state.compose_upload_started = None;
+                self.state
+                    .show_toast("Image encode failed unexpectedly".to_string());
+            }
+        }
+    }
+
+    fn do_send_local_echo(&mut self, target: &str, text: String, reply_to: Option<String>) {
+        self.do_send_local_echo_inner(target, text, false, reply_to);
     }
 
     fn do_send_local_echo_action(&mut self, target: &str, text: String) {
-        self.do_send_local_echo_inner(target, text, true);
+        self.do_send_local_echo_inner(target, text, true, None);
     }
 
-    fn do_send_local_echo_inner(&mut self, target: &str, text: String, is_action: bool) {
+    fn do_send_local_echo_inner(
+        &mut self,
+        target: &str,
+        text: String,
+        is_action: bool,
+        reply_to: Option<String>,
+    ) {
         // Optimistic local echo for snappy UI. When the server echoes the
         // PRIVMSG back (echo-message), Buffer::append drops this local-* row
         // and keeps the real msgid / signed copy — so the user never sees
@@ -1699,7 +2605,7 @@ impl SleekApp {
             is_edited: false,
             is_deleted: false,
             timestamp: chrono::Local::now(),
-            reply_to: None,
+            reply_to,
             edit_of: None,
             is_signed: false,
             embed,
@@ -1870,10 +2776,21 @@ fn server_time_from_tags(
 
 impl eframe::App for SleekApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        crate::android_ime::drain_ime_events(ctx);
         self.apply_fit_viewport(ctx);
+        self.poll_auto_reconnect(ctx);
+        self.state.poll_media_live_stability();
+        self.poll_media_reconnect(ctx);
+        self.poll_handle_typeahead(ctx);
         self.poll_net(ctx);
         self.poll_file_pick(ctx);
+        self.poll_compose_encode(ctx);
+        if self.state.tick_compose_upload() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         self.poll_oauth_deep_link(ctx);
+        self.poll_policy_gate_refresh();
 
         let th = self.theme();
         let p = &th.palette;
@@ -1892,6 +2809,10 @@ impl eframe::App for SleekApp {
             || self.fill_viewport
             || screen.height() >= screen.width()
             || screen.width() < 640.0;
+        // Wide desktop / tablet: chats list + detail side by side.
+        let wide_shell = screen.width() >= WIDE_SHELL_MIN_WIDTH;
+        let registered = self.state.connection == ConnectionState::Registered;
+        let master_detail = wide_shell && registered && self.state.tab == Tab::Chats;
 
         // System status / nav safe areas (edge-to-edge). Measured via
         // WindowInsets JNI + content_rect; top is floored so the status bar
@@ -1961,12 +2882,14 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Bottom tabs (connected, not in chat detail) ────────────
+        // ── Bottom tabs (connected shell) ───────────────────────────
+        // Phone: hide while in chat detail. Wide: keep tabs so the list+detail
+        // shell can switch to Discover / Settings without a Back press.
         // Hide while the soft keyboard is up so the compose / focused field
         // has room above the IME (tabs would otherwise sit under the keys).
         let show_tabs = connected
-            && matches!(self.state.route, Route::Tabs)
-            && self.state.connection == ConnectionState::Registered
+            && registered
+            && (matches!(self.state.route, Route::Tabs) || wide_shell)
             && !ctx.wants_keyboard_input();
 
         if show_tabs {
@@ -2007,7 +2930,10 @@ impl eframe::App for SleekApp {
                             };
                             let mut label = tab.short().to_string();
                             if tab == Tab::Chats && total_unread > 0 {
-                                label = format!("{label} ({})", total_unread.min(99));
+                                label = format!(
+                                    "{label} ({})",
+                                    crate::message_store::unread_label(total_unread)
+                                );
                             }
                             let text = RichText::new(label)
                                 .size(th.type_scale.caption)
@@ -2029,8 +2955,8 @@ impl eframe::App for SleekApp {
                 });
         }
 
-        // ── Header (compact when in chat) ─
-        if !matches!(self.state.route, Route::Chat(_)) {
+        // ── Header (compact when in chat on phone; always on wide shell) ─
+        if wide_shell || !matches!(self.state.route, Route::Chat(_)) {
             // Landscape / short: one row (title · status) instead of stacked block.
             let (head_top, head_bot) = if short {
                 (sp.xs + 2.0, sp.xs)
@@ -2050,7 +2976,10 @@ impl eframe::App for SleekApp {
                     if landscape && short {
                         ui.horizontal(|ui| {
                             title(ui, &th, "Sleek");
-                            if connected || self.state.connection == ConnectionState::Connecting {
+                            if connected
+                                || self.state.connection == ConnectionState::Connecting
+                                || self.state.reconnect_at.is_some()
+                            {
                                 ui.add_space(sp.sm);
                                 let blurb = if self.state.connection == ConnectionState::Registered
                                 {
@@ -2067,7 +2996,10 @@ impl eframe::App for SleekApp {
                                 title(ui, &th, "Sleek");
                                 // Subtitle only when connected or mid-connect — idle connect
                                 // already has its own form; avoid stacking the same chrome.
-                                if connected || self.state.connection == ConnectionState::Connecting {
+                                if connected
+                                    || self.state.connection == ConnectionState::Connecting
+                                    || self.state.reconnect_at.is_some()
+                                {
                                     ui.add_space(sp.xs + 2.0);
                                     let blurb =
                                         if self.state.connection == ConnectionState::Registered {
@@ -2087,7 +3019,8 @@ impl eframe::App for SleekApp {
         // Android / fill: tight side padding so content uses the full width;
         // vertical pad is minimal (system chrome + header/tabs already own
         // the safe edges — large page padding looked letterboxed).
-        let page = if fill {
+        // Wide master–detail: same tight padding so the split uses the window.
+        let page = if fill || master_detail {
             let h_pad = if cfg!(target_os = "android") {
                 if short { 6_i8 } else { 8_i8 }
             } else if short {
@@ -2109,97 +3042,71 @@ impl eframe::App for SleekApp {
             th.page_frame()
         };
 
+        // Wide Chats tab: persistent master list beside the detail pane.
+        if master_detail {
+            let list_h_pad = if short { 8_i8 } else { 10_i8 };
+            let list_v_pad = if short { sp.sm as i8 } else { sp.page as i8 };
+            egui::SidePanel::left("chats_master")
+                .resizable(true)
+                .default_width(MASTER_LIST_DEFAULT_WIDTH)
+                .width_range(MASTER_LIST_MIN_WIDTH..=MASTER_LIST_MAX_WIDTH)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.window_bg)
+                        .inner_margin(egui::Margin::symmetric(list_h_pad, list_v_pad)),
+                )
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    // chats_tab keeps the join card pinned and scrolls only
+                    // the conversation list below it.
+                    let act = ui::chats_tab(ui, &th, &mut self.state, true);
+                    self.handle_chats_action(act);
+                });
+        }
+
         egui::CentralPanel::default().frame(page).show(ctx, |ui| {
-            // Local desktop: narrow phone-like column. Codespace: full window.
+            // Wide Chats: detail fills the remaining width (list is SidePanel).
+            if master_detail {
+                let detail_w = ui.available_width().max(1.0);
+                ui.set_max_width(detail_w);
+                ui.set_min_width(detail_w);
+                if let Route::Chat(ch) = self.state.route.clone() {
+                    let act = ui::chat_screen(ui, &th, &mut self.state, &ch, true);
+                    self.handle_chat_action(ctx, act);
+                } else {
+                    ui::chat_detail_placeholder(ui, &th);
+                }
+                return;
+            }
+
+            // Local desktop: narrow phone-like column. Codespace / wide other
+            // tabs: use more of the window (capped so Settings isn't ultrawide).
             let col_w = if fill {
                 ui.available_width()
+            } else if wide_shell {
+                ui.available_width().min(560.0)
             } else {
                 ui.available_width().min(480.0)
             };
             ui.set_max_width(col_w);
             ui.set_min_width(col_w);
 
-            // Chat owns its own message ScrollArea with fixed header (← / Leave)
-            // and compose bar. Nesting it in main_scroll let those controls scroll away.
-            if let Route::Chat(ch) = self.state.route.clone() {
-                match ui::chat_screen(ui, &th, &mut self.state, &ch) {
-                    ChatAction::None => {}
-                    ChatAction::Back => {
-                        self.state.close_chat();
-                    }
-                    ChatAction::Send { target, text } => {
-                        self.do_send(target, text);
-                    }
-                    ChatAction::React {
-                        target,
-                        msgid,
-                        emoji,
-                    } => {
-                        self.do_toggle_react(target, msgid, emoji);
-                    }
-                    ChatAction::Edit {
-                        target,
-                        msgid,
-                        text,
-                    } => {
-                        self.do_edit(target, msgid, text);
-                    }
-                    ChatAction::Delete { target, msgid } => {
-                        self.do_delete(target, msgid);
-                    }
-                    ChatAction::Part(channel) => {
-                        self.do_part(channel);
-                    }
-                    ChatAction::OpenDm(nick) => {
-                        let key = self.state.dm_buffer_key(&nick);
-                        let need_history = self
-                            .state
-                            .channels
-                            .get(&key)
-                            .map(|b| !b.has_chat_messages())
-                            .unwrap_or(true);
-                        self.state.open_chat(&key);
-                        if need_history {
-                            self.net.send(NetCmd::HistoryLatest {
-                                target: key,
-                                count: 100,
-                            });
-                        }
-                    }
-                    ChatAction::AvStart(channel) => {
-                        self.do_av_start(channel);
-                    }
-                    ChatAction::AvJoin {
-                        channel,
-                        session_id,
-                    } => {
-                        self.do_av_join(channel, session_id);
-                    }
-                    ChatAction::AvLeave => {
-                        self.do_av_leave();
-                    }
-                    ChatAction::AvToggleMute => {
-                        self.do_av_toggle_mute();
-                    }
-                    ChatAction::AvToggleSpeakerMute => {
-                        self.do_av_toggle_speaker_mute();
-                    }
-                    ChatAction::AvToggleCamera => {
-                        self.do_av_toggle_camera();
-                    }
-                    ChatAction::AvSelectCamera(id) => {
-                        self.do_av_select_camera(id);
-                    }
-                    ChatAction::AvSelectMic(id) => {
-                        self.do_av_select_mic(id);
-                    }
-                    ChatAction::AvSelectSpeaker(id) => {
-                        self.do_av_select_speaker(id);
-                    }
-                    ChatAction::OpenCallChannel(ch) => {
-                        self.state.open_chat(&ch);
-                    }
+            // Phone / narrow: chat is a full-screen route.
+            // Wide: chat lives in the master–detail branch above; Discover /
+            // Settings keep their content even if a chat remains selected.
+            if !wide_shell {
+                if let Route::Chat(ch) = self.state.route.clone() {
+                    let act = ui::chat_screen(ui, &th, &mut self.state, &ch, false);
+                    self.handle_chat_action(ctx, act);
+                    return;
                 }
+            }
+
+            // Chats owns its own list scroll area so the join card remains
+            // pinned instead of moving with the outer page scroll.
+            if registered && self.state.tab == Tab::Chats {
+                let act = ui::chats_tab(ui, &th, &mut self.state, true);
+                self.handle_chats_action(act);
                 return;
             }
 
@@ -2213,42 +3120,30 @@ impl eframe::App for SleekApp {
                     ui.set_min_width(col_w);
 
                     // Route::Chat is rendered above without this outer scroll.
-                    if self.state.connection == ConnectionState::Registered {
+                    if registered {
                         match self.state.tab {
-                            Tab::Chats => match ui::chats_tab(ui, &th, &mut self.state) {
-                                ChatsAction::None => {}
-                                ChatsAction::Open(name) => {
-                                    let need_history = self
-                                        .state
-                                        .channels
-                                        .get(&name)
-                                        .map(|b| !b.has_chat_messages())
-                                        .unwrap_or(true);
-                                    self.state.open_chat(&name);
-                                    if need_history {
-                                        self.net.send(NetCmd::HistoryLatest {
-                                            target: name,
-                                            count: 100,
-                                        });
-                                    }
-                                }
-                                ChatsAction::Join(ch) => self.do_join(ch),
-                            },
+                            // Handled by the early return above (chats_tab has its own
+                            // scroll area); unreachable here whenever `registered`.
+                            Tab::Chats => {}
                             Tab::Discover => {
                                 match ui::discover_tab(ui, &th, &mut self.state) {
                                     DiscoverAction::None => {}
                                     DiscoverAction::Join(ch) => self.do_join(ch),
+                                    DiscoverAction::Open(name) => {
+                                        self.open_chat_with_history(name);
+                                    }
                                 }
                             }
                             Tab::Settings => {
                                 match ui::settings_tab(ui, &th, &mut self.state, self.mode) {
                                     SettingsAction::None => {}
                                     SettingsAction::Disconnect => {
-                                        self.net.send(NetCmd::Quit);
-                                        self.state.clear_session();
+                                        self.do_intentional_disconnect();
                                     }
                                     SettingsAction::Logout => {
                                         // Full clear: IRC + disk session → real guest next time.
+                                        self.state.intentional_disconnect = true;
+                                        self.state.cancel_auto_reconnect();
                                         self.net.send(NetCmd::Quit);
                                         self.state.logout();
                                     }
@@ -2264,17 +3159,29 @@ impl eframe::App for SleekApp {
                         }
                     } else if self.state.connection == ConnectionState::Connecting
                         || self.state.connection == ConnectionState::Connected
+                        || self.state.reconnect_at.is_some()
                     {
-                        // Waiting for registration
+                        // Waiting for registration / auto-reconnect backoff
                         ui.vertical_centered(|ui| {
                             ui.add_space(sp.xl * 2.0);
                             title(ui, &th, "Connecting");
                             ui.add_space(sp.md);
-                            dim_label(ui, &th, &self.state.status_line);
+                            let mut status_lines = self.state.status_line.lines();
+                            if let Some(message) = status_lines.next() {
+                                dim_label(ui, &th, message);
+                            }
+                            for line in status_lines {
+                                let url = line.trim();
+                                if url.starts_with("http://") || url.starts_with("https://") {
+                                    ui.hyperlink_to("Open login link", url);
+                                    ui.label(egui::RichText::new(url).small());
+                                } else if !url.is_empty() {
+                                    dim_label(ui, &th, url);
+                                }
+                            }
                             ui.add_space(sp.lg);
                             if button(ui, &th, "Cancel").clicked() {
-                                self.net.send(NetCmd::Quit);
-                                self.state.clear_session();
+                                self.do_intentional_disconnect();
                             }
                         });
                     } else {
@@ -2285,6 +3192,8 @@ impl eframe::App for SleekApp {
                             ConnectAction::ApplyCallback => self.do_apply_callback(),
                             ConnectAction::ReconnectSession => self.do_reconnect_session(),
                             ConnectAction::ClearAccount => {
+                                self.state.intentional_disconnect = true;
+                                self.state.cancel_auto_reconnect();
                                 self.net.send(NetCmd::Quit);
                                 self.state.logout();
                             }
@@ -2299,6 +3208,32 @@ impl eframe::App for SleekApp {
 
         // Full-screen image lightbox (above chat / tabs).
         image_lightbox_overlay(ctx, &th, &mut self.state);
+
+        let gate_act = policy_gate_overlay(ctx, &th, &mut self.state);
+        self.handle_policy_gate_action(ctx, gate_act);
+
+        let profile_act = profile_gate_overlay(ctx, &th, &mut self.state);
+        self.handle_profile_gate_action(ctx, profile_act);
+
+        // Android back gesture → Escape (egui-winit). At the root shell with
+        // nothing left to dismiss, finish the Activity (leave the app).
+        #[cfg(target_os = "android")]
+        {
+            let at_root = matches!(self.state.route, Route::Tabs)
+                || self.state.connection == ConnectionState::Disconnected;
+            let overlay_open = self.state.image_lightbox.is_some()
+                || self.state.react_picker_msg.is_some()
+                || self.state.policy_gate.channel.is_some()
+                || self.state.profile_gate.is_open();
+            if at_root
+                && !overlay_open
+                && ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                })
+            {
+                crate::android_media::finish_activity();
+            }
+        }
     }
 }
 

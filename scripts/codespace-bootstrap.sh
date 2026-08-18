@@ -24,6 +24,11 @@ log() {
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Cloud / Codespace clones only get `origin`. Patch publish needs `rad`.
+if [[ -x "$ROOT/scripts/ensure-rad-remote.sh" ]]; then
+  bash "$ROOT/scripts/ensure-rad-remote.sh" || log "ensure-rad-remote failed (non-fatal)"
+fi
+
 SOCKET="/nix/var/nix/daemon-socket/socket"
 DAEMON_LOG="/tmp/nix-daemon.log"
 BASHRC_NIX_MARKER="# sleek-nix-env"
@@ -279,8 +284,7 @@ else
 fi
 # flakes / nix-command without CLI flags
 export NIX_CONFIG="experimental-features = nix-command flakes
-extra-experimental-features = nix-command flakes
-accept-flake-config = true"
+extra-experimental-features = nix-command flakes"
 if [ -f "$ROOT/scripts/ensure-nix-flakes.sh" ]; then
   . "$ROOT/scripts/ensure-nix-flakes.sh"
   ensure_nix_flakes 2>/dev/null || true
@@ -358,54 +362,130 @@ CACHIX_PUBKEY="codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVt
 ensure_nix_conf_kv() {
   # ensure_nix_conf_kv FILE KEY VALUE
   # Appends or merges space-separated values for KEY without duplicating VALUE.
+  # FILE may be root-owned (uses run_root when not writable).
   local file="$1" key="$2" value="$3"
-  local line cur
-  touch "$file"
-  if grep -qE "^${key}[[:space:]]*=" "$file" 2>/dev/null; then
-    line="$(grep -E "^${key}[[:space:]]*=" "$file" | tail -1)"
+  local line cur tmp dir as_root=0
+  dir="$(dirname "$file")"
+
+  if [[ ! -w "$dir" ]] || { [[ -e "$file" ]] && [[ ! -w "$file" ]]; }; then
+    as_root=1
+    run_root mkdir -p "$dir" || return 1
+    run_root touch "$file" || return 1
+  else
+    mkdir -p "$dir" || return 1
+    touch "$file" || return 1
+  fi
+
+  # Work on a user-writable copy, then install back.
+  tmp="$(mktemp)" || return 1
+  if [[ "$as_root" -eq 1 ]]; then
+    run_root cat "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    cat "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+
+  if grep -qE "^${key}[[:space:]]*=" "$tmp" 2>/dev/null; then
+    line="$(grep -E "^${key}[[:space:]]*=" "$tmp" | tail -1)"
     cur="${line#*=}"
     cur="${cur#"${cur%%[![:space:]]*}"}"
     case " $cur " in
-      *" $value "*) ;;
+      *" $value "*)
+        rm -f "$tmp"
+        return 0
+        ;;
       *)
-        # Rewrite last occurrence of key with value appended.
-        local tmp
-        tmp="$(mktemp)"
-        # Drop all lines for this key, re-add merged once.
-        grep -vE "^${key}[[:space:]]*=" "$file" >"$tmp" || true
-        echo "${key} = ${cur} ${value}" >>"$tmp"
-        mv "$tmp" "$file"
+        grep -vE "^${key}[[:space:]]*=" "$tmp" >"${tmp}.new" || true
+        echo "${key} = ${cur} ${value}" >>"${tmp}.new"
+        mv "${tmp}.new" "$tmp"
         ;;
     esac
   else
-    echo "${key} = ${value}" >>"$file"
+    echo "${key} = ${value}" >>"$tmp"
   fi
+
+  if [[ "$as_root" -eq 1 ]]; then
+    run_root cp "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+    run_root chmod 644 "$file" || true
+  else
+    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  fi
+  rm -f "$tmp"
+}
+
+# Restart nix-daemon so trusted-substituters / public-keys take effect.
+reload_nix_daemon_if_needed() {
+  if ! have_sudo && [[ "$(id -u)" -ne 0 ]]; then
+    return 0
+  fi
+  log "reloading nix-daemon to pick up substituter trust…"
+  if command -v systemctl >/dev/null 2>&1; then
+    if run_root systemctl restart nix-daemon.service 2>/dev/null \
+      || run_root systemctl restart nix-daemon 2>/dev/null; then
+      sleep 1
+      load_nix_env
+      return 0
+    fi
+  fi
+  # No systemd (Cursor cloud / Codespaces with --init none): kill + relaunch.
+  run_root pkill -x nix-daemon 2>/dev/null || true
+  sleep 0.5
+  run_root rm -f "$SOCKET" 2>/dev/null || true
+  start_daemon_manual || true
+  load_nix_env
 }
 
 configure_cachix_pull() {
-  # User-level conf works for single-user Codespace installs.
+  # User-level conf works for single-user installs and as a client hint.
   NIX_USER_CONF="${NIX_USER_CONF:-$HOME/.config/nix/nix.conf}"
   mkdir -p "$(dirname "$NIX_USER_CONF")"
   ensure_nix_conf_kv "$NIX_USER_CONF" "extra-substituters" "$CACHIX_SUBSTITUTER"
-  ensure_nix_conf_kv "$NIX_USER_CONF" "extra-trusted-public-keys" "$CACHIX_PUBKEY"
-  # Also accept flake-provided nixConfig without prompting.
-  if ! grep -qE '^accept-flake-config' "$NIX_USER_CONF" 2>/dev/null; then
-    echo "accept-flake-config = true" >>"$NIX_USER_CONF"
+
+  # Multi-user / Determinate: non-trusted users (trusted-users = root only) may
+  # only use substituters listed in trusted-substituters. Flake nixConfig
+  # extra-substituters alone is ignored with:
+  #   warning: ignoring untrusted substituter '…cachix.org'…
+  # Determinate overwrites /etc/nix/nix.conf — put durable settings in
+  # nix.custom.conf (included via !include).
+  #
+  # Do NOT put extra-trusted-public-keys in the user conf on multi-user Nix:
+  # that setting is restricted and yields noisy warnings for non-trusted users.
+  # Also leave accept-flake-config off once the daemon trusts the cache — accepting
+  # flake nixConfig would re-apply restricted trusted-public-keys and warn.
+  local multi_user=0
+  if [[ -S "$SOCKET" ]] || grep -qE '^trusted-users' /etc/nix/nix.conf 2>/dev/null; then
+    multi_user=1
   fi
 
-  # System conf when we have root (multi-user / Determinate) so the daemon
-  # trusts the cache too.
   if have_sudo || [[ "$(id -u)" -eq 0 ]]; then
-    if [[ -f /etc/nix/nix.conf ]] || run_root mkdir -p /etc/nix 2>/dev/null; then
-      run_root touch /etc/nix/nix.conf 2>/dev/null || true
-      # Best-effort: append if missing (avoid complex in-place merge as root).
-      if ! grep -qF "$CACHIX_SUBSTITUTER" /etc/nix/nix.conf 2>/dev/null; then
-        {
-          echo "extra-substituters = $CACHIX_SUBSTITUTER"
-          echo "extra-trusted-public-keys = $CACHIX_PUBKEY"
-        } | run_root tee -a /etc/nix/nix.conf >/dev/null || true
-        log "added $CACHIX_CACHE substituter to /etc/nix/nix.conf"
-      fi
+    run_root mkdir -p /etc/nix 2>/dev/null || true
+    local sys_conf="/etc/nix/nix.conf"
+    # Prefer Determinate's custom conf when the main conf includes it.
+    if [[ -f /etc/nix/nix.custom.conf ]] \
+      || grep -qF 'nix.custom.conf' /etc/nix/nix.conf 2>/dev/null; then
+      sys_conf="/etc/nix/nix.custom.conf"
+      run_root touch "$sys_conf" 2>/dev/null || true
+    else
+      run_root touch "$sys_conf" 2>/dev/null || true
+    fi
+
+    ensure_nix_conf_kv "$sys_conf" "extra-substituters" "$CACHIX_SUBSTITUTER" || true
+    # Critical: allow non-trusted users to pull from this cache.
+    ensure_nix_conf_kv "$sys_conf" "extra-trusted-substituters" "$CACHIX_SUBSTITUTER" || true
+    ensure_nix_conf_kv "$sys_conf" "extra-trusted-public-keys" "$CACHIX_PUBKEY" || true
+    log "added $CACHIX_CACHE as trusted substituter in $sys_conf"
+    # Drop legacy user-conf public key / flake-accept (causes restricted-setting warnings).
+    if [[ -f "$NIX_USER_CONF" ]]; then
+      local tmp
+      tmp="$(mktemp)"
+      grep -vE '^(extra-trusted-public-keys|accept-flake-config)[[:space:]]*=' "$NIX_USER_CONF" >"$tmp" || true
+      mv "$tmp" "$NIX_USER_CONF"
+    fi
+    reload_nix_daemon_if_needed || true
+  elif [[ "$multi_user" -eq 0 ]]; then
+    # Single-user: client conf can hold the public key + accept flake nixConfig.
+    ensure_nix_conf_kv "$NIX_USER_CONF" "extra-trusted-public-keys" "$CACHIX_PUBKEY"
+    if ! grep -qE '^accept-flake-config' "$NIX_USER_CONF" 2>/dev/null; then
+      echo "accept-flake-config = true" >>"$NIX_USER_CONF"
     fi
   fi
   log "nix pull configured: $CACHIX_SUBSTITUTER"
@@ -508,6 +588,50 @@ if ! command -v direnv >/dev/null 2>&1; then
     log "skipping direnv install (nix store not ready)"
   fi
 fi
+
+# ── starship prompt ──────────────────────────────────────────────────
+if ! command -v starship >/dev/null 2>&1; then
+  if nix_store_ok; then
+    log "installing starship via nix profile…"
+    if nix profile add nixpkgs#starship 2>/dev/null \
+      || nix profile install nixpkgs#starship 2>/dev/null \
+      || nix-env -iA nixpkgs.starship 2>/dev/null; then
+      load_nix_env
+      log "starship installed"
+    else
+      log "could not install starship (optional)"
+    fi
+  else
+    log "skipping starship install (nix store not ready)"
+  fi
+fi
+
+install_bashrc_starship() {
+  local marker="# sleek-starship"
+  touch "$HOME/.bashrc"
+  if grep -qF "$marker" "$HOME/.bashrc" 2>/dev/null; then
+    return 0
+  fi
+  # Drop the codespace default PS1 so it does not fight starship.
+  if grep -qE '^export PS1=' "$HOME/.bashrc" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    grep -vE '^export PS1=' "$HOME/.bashrc" >"$tmp" || true
+    mv "$tmp" "$HOME/.bashrc"
+  fi
+  {
+    echo ""
+    echo "# nix profile (starship, direnv, …)"
+    echo 'export PATH="${HOME}/.nix-profile/bin:/nix/var/nix/profiles/default/bin:${PATH}"'
+    echo ""
+    echo "$marker"
+    echo 'if command -v starship >/dev/null 2>&1; then'
+    echo '  eval "$(starship init bash)"'
+    echo 'fi'
+  } >>"$HOME/.bashrc"
+  log "wrote starship init to ~/.bashrc"
+}
+install_bashrc_starship
 
 # ── bashrc hook (codespace ssh / interactive login) ──────────────────
 HOOK_LINE="[ -f \"$ROOT/scripts/codespace-env.sh\" ] && . \"$ROOT/scripts/codespace-env.sh\""

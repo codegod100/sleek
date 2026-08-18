@@ -1,6 +1,6 @@
 # Sleek
 
-Mobile **freeq** client built with **[Vidya](https://tangled.org/nandi.uk/vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](../freeq/freeq-sdk)**.
+Mobile **freeq** client built with **[Vidya](https://tangled.org/nandi.uk/vidya)** (GNOME/HIG-inspired egui theme) and **[freeq-sdk](https://github.com/codegod100/freeq/tree/main/freeq-sdk)**.
 
 Layout and flows take cues from the freeq Android app: connect (guest), chats list, chat detail, discover, and settings — with a portrait bottom-tab shell.
 
@@ -25,23 +25,40 @@ Sleek on Waydroid (chat + in-call video):
 ## Stack
 
 - **UI**: [egui](https://github.com/emilk/egui) + [vidya](https://tangled.org/nandi.uk/vidya) theme/widgets + Android safe chrome
-- **Network**: [freeq-sdk](../freeq/freeq-sdk) (guest IRC, TLS / WebSocket)
+- **Network**: [freeq-sdk](https://github.com/codegod100/freeq/tree/main/freeq-sdk) (guest IRC, TLS / WebSocket)
 - **Targets**: desktop host (Wayland/X11) and Android NativeActivity (`cargo-apk` / Waydroid)
 
 ## Run
 
+Dev shell + desktop host build work via either **pixi** or **Nix** — pick one.
+Android/Waydroid/Flatpak packaging, Buck2, and Cachix pushes below are still
+Nix-only (`flake.nix`); `pixi.toml` only replaces `devenv.nix`'s job.
+
 ```bash
+# pixi (conda-forge toolchain — no /nix/store, works on any Linux box):
+pixi install        # once, materializes .pixi/envs/default from pixi.lock
+pixi shell           # or: pixi run <task>
+just host            # desktop window (cargo run) — same recipe either shell
+just lib             # build android package as rlib (desktop target)
+```
+
+```bash
+just host          # desktop window — buck2 build + run (see BUCK, cargo.bzl)
+just lib           # build android package as rlib (desktop target, via buck2)
+just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
+# `host` / `lib` re-enter the flake shell themselves — nix develop below is
+# only needed for recipes that still call cargo directly (gleam-slash) or
+# for an interactive shell:
 nix develop        # or: direnv allow  (after .envrc)
 # or: ./scripts/enter
-just host          # desktop window (cargo run)
-just lib           # build android package as rlib (desktop target)
-just waydroid      # cargo-apk → install → launch on Waydroid (x86_64)
 
 # Or via the flake:
-nix run            # in-tree cargo run --release (default app; needs sibling vidya/freeq)
+nix run            # flake devShell + just host --release (needs sibling vidya/freeq)
 nix run .#host     # same as nix run
 nix run .#sleek    # pure Nix store binary (hermetic)
 nix build .#sleek  # → ./result/bin/sleek
+nix build .#flatpak  # → ./result/uk.nandi.sleek.flatpak (GNOME Platform 49)
+# flatpak install --user ./result/uk.nandi.sleek.flatpak && flatpak run uk.nandi.sleek
 
 # Waydroid (x86_64 cargo-apk + install/launch + full UI window):
 nix run .#waydroid                 # debug: build + install + launch + show-full-ui
@@ -62,20 +79,116 @@ nix run .#install-android -- --launch
 
 # Manual push of an existing out-link:
 just push ./result-android
+
+# Desktop Flatpak bundle (from hermetic .#sleek via nix2flatpak):
+just flatpak                   # → result-flatpak/*.flatpak
+nix build .#flatpak
+# Install: flatpak install --user ./result-flatpak/*.flatpak
+
+# `just host` / `just lib` are buck2 under the hood; the raw targets also
+# work directly (e.g. for `--show-output`, CI compile-checks with no DISPLAY):
+buck2 build //:sleek-host          # → buck-out/…/sleek       (build only, no run)
+buck2 build //:sleek-android-lib   # → buck-out/…/libsleek.so
+buck2 run //:sleek-host            # same as `just host` minus the DISPLAY/VNC setup
+# BuildBuddy remote caching is on by default (shares cargo's output across
+# machines/CI when inputs match — see .buckconfig). Needs an API key:
+export BUILDBUDDY_API_KEY=…   # org key from https://app.buildbuddy.io/
+# No BuildBuddy account? Every build hard-fails without a key — opt out:
+cp .buckconfig.local.no-buildbuddy-example .buckconfig.local
+# Verbose by default (buck2 -v=2,stderr,full_failed_command); override:
+BUCK_VERBOSITY=1 just host
+```
+
+### CI artifacts
+
+Merge / PR CI (check + APK + Flatpak) runs on **boxci** — see [`.boxci/pipeline.yml`](.boxci/pipeline.yml) and https://boxci.boxd.sh.
+
+| Path | What |
+|------|------|
+| [`.github/workflows/boxci-check.yml`](.github/workflows/boxci-check.yml) | PR bridge: trigger `check`, poll, post GitHub `boxci` commit status |
+| [`.github/workflows/boxci-merge.yml`](.github/workflows/boxci-merge.yml) | On push to `main`, trigger boxci merge pipeline |
+| `./scripts/boxci/dispatch-check.sh` | Manual check dispatch (+ optional `--wait`) |
+| `./scripts/boxci/dispatch-merge.sh` | Manual merge dispatch |
+
+| Job | Flake attr | Artifact |
+|-----|------------|----------|
+| APK | `.#android` | `sleek.apk` |
+| Flatpak | `.#flatpak` | `uk.nandi.sleek.flatpak` |
+
+CI APKs are signed with the committed `android/ci.keystore` (password `android`, alias `androiddebugkey`) so successive installs upgrade cleanly. If you previously installed a build signed with a different key (e.g. an older CI artifact or a local `deploy-android` keystore), uninstall Sleek first — Android shows that as “Something went wrong / App not installed”.
+
+### Spindle (Tangled CI)
+
+[`.tangled/workflows/packages.yml`](.tangled/workflows/packages.yml) builds `.#android` and `.#flatpak` on pushes/PRs to `main` (and manual runs), preferring a hit in the `codegod100` Cachix cache but compiling in-pipeline on a miss (`just android` / `just flatpak && cachix push codegod100 ./result-flatpak` locally still saves Spindle the work). On `main` pushes it force-moves annotated tag `dev` and republishes Tangled assets (`sleek.apk`, `uk.nandi.sleek.flatpak`) onto that tag.
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_KEY` | Write SSH deploy key — push/move tag `dev` |
+| `ATP_APP_PASSWORD` | ATProto app password — upload Tangled assets |
+
+Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm** engine.
+
+### Tagged releases
+
+Version tags (`v0.1.5`, …) on [tangled.org/nandi.uk/sleek](https://tangled.org/nandi.uk/sleek) carry release
+artifacts as `sh.tangled.repo.artifact` records — visible under **Artifacts** on each tag's page, e.g.
+https://tangled.org/nandi.uk/sleek/tags/v0.1.5. Tangled serves each one at a plain download URL:
+
+```
+https://tangled.org/nandi.uk/sleek/tags/<tag>/download/<filename>
+```
+
+**Single-command install** (real hosted OSTree repo on `artifacts.latha.org`, backed by R2 — built from
+the tagged `.flatpak` bundle via `flatpak build-import-bundle`, `flatpak/uk.nandi.sleek.flatpakref`
+points at it):
+
+```bash
+flatpak install --user https://artifacts.latha.org/artifacts/sleek/uk.nandi.sleek.flatpakref
+flatpak run uk.nandi.sleek
+```
+
+`artifacts.latha.org` is a multi-app build-artifact clearing house
+([codegod100/artifacts](https://github.com/codegod100/artifacts)) — sleek's artifacts live under the
+`sleek/` key prefix there. It replaces the old sleek-only Worker at `proxy.latha.org`
+(this repo's `cloudflare/proxy-latha-org/`), which is still live for now but no longer the canonical
+install path.
+
+The repo lives at `https://artifacts.latha.org/artifacts/sleek/repo/` (ref
+`app/uk.nandi.sleek/x86_64/master`); the runtime (`org.gnome.Platform`//49) comes from Flathub via the
+`.flatpakref`'s `RuntimeRepo=`. This repo currently tracks whatever bundle was last pushed there
+manually — it is **not** yet wired into CI/the tag-artifact publish flow, so it can lag behind the
+latest tag.
+
+Alternatively, the `.flatpak` bundle itself is attached to each tag as a downloadable asset — but
+`flatpak install` flatly refuses a remote URL for a bundle (`error: Remote bundles are not supported`,
+confirmed live against flatpak 1.18), `--bundle` or not, so that path needs a local download first:
+
+```bash
+curl -LO https://tangled.org/nandi.uk/sleek/tags/v0.1.5/download/uk.nandi.sleek.flatpak
+flatpak install --user ./uk.nandi.sleek.flatpak
+flatpak run uk.nandi.sleek
 ```
 
 ### Cachix
 
 Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
 
+On multi-user Determinate Nix, pull only works when the cache is a **trusted
+substituter** (not merely listed in the flake `nixConfig`). Bootstrap writes
+`extra-substituters`, `extra-trusted-substituters`, and
+`extra-trusted-public-keys` to `/etc/nix/nix.custom.conf` (Determinate’s durable
+include) and reloads `nix-daemon`. Without that, `nix run` / `nix build` print
+`ignoring untrusted substituter` and compile toolchain deps from source.
+
 With `CACHIX_AUTH_TOKEN` set, **`just android` auto-pushes** via `cachix watch-exec` (every new store path from that build, including SDK/NDK on cold builds).
 
-On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` and pushes store paths to the same cache. CI pulls `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
+On every push to `main`, [`.github/workflows/cachix.yml`](.github/workflows/cachix.yml) builds `.#sleek` and `.#android` on nixbuild.net and pushes store paths to the same cache. CI pulls `NIXBUILD_TOKEN` and `CACHIX_AUTH_TOKEN` from **OpenBao** (`https://openbao.boxd.sh`, KV paths `secret/data/ai-api-keys` then `secret/data/cachix`) via `scripts/fetch-openbao-env.sh`.
 
 | Secret / env | Purpose |
 |--------------|---------|
-| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch Cachix credentials |
+| `OPENBAO_TOKEN` | OpenBao token — Cursor env + **GitHub Actions** secret; CI uses it to fetch nixbuild + Cachix credentials |
 | `GH_TOKEN` | GitHub PAT in OpenBao (`ai-api-keys`) — bootstrap reconfigures `gh` so agents can manage Actions secrets |
+| `NIXBUILD_TOKEN` | nixbuild.net auth token in OpenBao — remote CI builds |
 | `CACHIX_AUTH_TOKEN` | Write token in OpenBao / Codespaces ([cachix.org](https://app.cachix.org) → codegod100) |
 | `CACHIX_CACHE` | Cache name (default `codegod100`) |
 | `SLEEK_CACHIX_PUSH=0` | Disable auto-push for one build |
@@ -226,11 +339,14 @@ create a new one from `main` after the Ubuntu+bootstrap config is pushed.
 sleek/
   android/          # shared lib: UI + freeq-sdk bridge (cdylib for APK)
   host/             # desktop binary
+  assets/           # desktop entry + icons (Flatpak / host)
+  .tangled/         # Spindle CI (Tangled)
   scripts/          # enter, codespace shim, flakes ensure, Waydroid
+  .github/workflows # CI: APK + Flatpak artifacts
   .devcontainer/    # GitHub Codespaces (nix feature + flakes)
   .envrc            # direnv → flake
   justfile
-  flake.nix
+  flake.nix         # .#sleek, .#android, .#flatpak, …
 ```
 
 ## License

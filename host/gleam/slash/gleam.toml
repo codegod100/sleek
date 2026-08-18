@@ -1,0 +1,4 @@
+name = "gleam_slash"
+version = "0.1.0"
+description = "Compose-box slash parser (Gleam → Wasm) for sleek desktop host"
+target = "wasm"

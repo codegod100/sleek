@@ -1,0 +1,75 @@
+# Deploys cloudflare/proxy-latha-org/worker.js via its own deploy.sh —
+# manual only (workflow_dispatch), same rationale as rbe-image.yml: this
+# only needs re-running when worker.js/deploy.sh actually change, not on
+# every push, and this sandbox/dev machine has no Cloudflare credentials
+# of its own — OpenBao (same secret store cachix.yml already pulls from)
+# is the only place they live outside a human's own machine.
+#
+# Expects CLOUDFLARE_API_TOKEN under OpenBao's secret/data/ai-api-keys (or
+# wherever OPENBAO_SECRET_PATH points). If missing, fetch-openbao-env.sh
+# fails loudly (no partial/silent deploy).
+#
+# CLOUDFLARE_ACCOUNT_ID isn't a secret in the same sense — not stored in
+# OpenBao, just resolved live from the API token itself (GET /accounts).
+#
+# TANGLED_WEBHOOK_SECRET / BUILDBUDDY_API_KEY / UPLOAD_TOKEN are
+# deliberately *not* provisioned here at all: deploy.sh (see its own
+# header comment) now sends `inherit`-type bindings for any of these 3
+# secret_text values it isn't given, which tells Cloudflare to carry the
+# live Worker's already-configured values forward unchanged. This
+# workflow only ever needs to update worker.js's code, never these
+# secrets' values — so it never needs to know them, matching the
+# constraint that this key material only ever lives in a human's own
+# machine or wherever it was originally deployed from. If any of these
+# 3 secrets ever needs to be rotated, that's a separate, deliberate
+# `./deploy.sh` run (by a human, with the new value exported locally) —
+# not something this workflow does.
+name: Deploy proxy.latha.org
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch secrets from OpenBao
+        env:
+          OPENBAO_ADDR: https://openbao.boxd.sh
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+          OPENBAO_SECRET_PATH: secret/data/ai-api-keys
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPENBAO_TOKEN:-}" ]]; then
+            echo "OPENBAO_TOKEN repository secret is not set" >&2
+            exit 1
+          fi
+          chmod +x scripts/fetch-openbao-env.sh
+          ./scripts/fetch-openbao-env.sh --github-env --keys \
+            CLOUDFLARE_API_TOKEN
+
+      - name: Resolve CLOUDFLARE_ACCOUNT_ID from the API token
+        run: |
+          set -euo pipefail
+          id="$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            https://api.cloudflare.com/client/v4/accounts | jq -r '.result[0].id')"
+          if [[ -z "$id" || "$id" == "null" ]]; then
+            echo "could not resolve an account id from this API token" >&2
+            exit 1
+          fi
+          echo "::add-mask::$id"
+          echo "CLOUDFLARE_ACCOUNT_ID=$id" >>"$GITHUB_ENV"
+
+      - name: Run worker test suite
+        run: node cloudflare/proxy-latha-org/test_worker.mjs
+
+      - name: ./deploy.sh
+        working-directory: cloudflare/proxy-latha-org
+        run: ./deploy.sh

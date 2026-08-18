@@ -82,6 +82,17 @@ pub struct SavedPrefs {
     /// Most recently used Bluesky handle (survives logout, pre-filled on connect).
     #[serde(default)]
     pub last_bsky_handle: Option<String>,
+    /// Previously used Bluesky handles — MRU, shown on the connect screen.
+    /// `last_bsky_handle` stays as the primary prefill (first entry when present).
+    #[serde(default)]
+    pub recent_handles: Vec<String>,
+    /// Previously used guest nicknames — MRU, shown on the guest connect screen.
+    #[serde(default)]
+    pub recent_nicks: Vec<String>,
+    /// When false, JOIN / PART / QUIT presence lines are not appended to chat.
+    /// Member lists still update. Defaults to true (show).
+    #[serde(default = "default_true")]
+    pub show_join_part: bool,
 }
 
 impl Default for SavedPrefs {
@@ -95,19 +106,99 @@ impl Default for SavedPrefs {
             av_pref_speaker_id: None,
             recent_channels: default_recent_channels(),
             last_bsky_handle: None,
+            recent_handles: Vec::new(),
+            recent_nicks: Vec::new(),
+            show_join_part: true,
+        }
+    }
+}
+
+/// Writable app config directory (`~/.config/sleek` on desktop; app files on Android).
+pub(crate) fn storage_dir() -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = crate::android_media::app_storage_dir() {
+            return dir;
+        }
+        log::warn!("android: app storage dir unavailable; prefs may not persist");
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("sleek")
+}
+
+#[cfg(target_os = "android")]
+fn android_legacy_storage_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from(".").join("sleek")];
+    if let Some(app) = crate::android_media::android_app_handle() {
+        if let Some(ext) = app.external_data_path() {
+            let ext_root = ext.join("sleek");
+            if !roots.iter().any(|r| r == &ext_root) {
+                roots.push(ext_root);
+            }
+        }
+    }
+    roots
+}
+
+/// Before #42, Android wrote prefs/session to the process cwd (`./sleek/`) because
+/// `dirs::config_dir()` is unavailable. Migrate those files into the app files dir.
+#[cfg(target_os = "android")]
+fn migrate_legacy_android_file(legacy: &Path, target: &Path) -> bool {
+    migrate_storage_file(legacy, target)
+}
+
+/// Move or copy `legacy` to `target` when the target does not exist yet.
+fn migrate_storage_file(legacy: &Path, target: &Path) -> bool {
+    if target.exists() || !legacy.exists() {
+        return false;
+    }
+    if let Some(parent) = target.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+    match std::fs::rename(legacy, target) {
+        Ok(()) => true,
+        Err(_) => {
+            if std::fs::copy(legacy, target).is_ok() {
+                let _ = std::fs::remove_file(legacy);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn ensure_android_storage_migrated(file_name: &str) {
+    let target = storage_dir().join(file_name);
+    for root in android_legacy_storage_roots() {
+        let legacy = root.join(file_name);
+        if legacy == target {
+            continue;
+        }
+        if migrate_legacy_android_file(&legacy, &target) {
+            log::info!(
+                "android: migrated {} -> {}",
+                legacy.display(),
+                target.display()
+            );
+            break;
         }
     }
 }
 
 impl SavedPrefs {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleek")
-            .join("prefs.json")
+        storage_dir().join("prefs.json")
     }
 
     pub fn load() -> Self {
+        #[cfg(target_os = "android")]
+        ensure_android_storage_migrated("prefs.json");
+
         let mut prefs = load_prefs(&Self::path()).unwrap_or_default();
         // Drop virtual camera prefs by name/id substring (OBS / loopback).
         // Device paths like `/dev/video10` are scrubbed at dial time once we
@@ -123,6 +214,19 @@ impl SavedPrefs {
                 prefs.av_pref_camera_id = None;
                 let _ = prefs.save();
             }
+        }
+        // Migrate singular last_bsky_handle into the MRU list when needed.
+        if let Some(handle) = prefs.last_bsky_handle.clone() {
+            if !handle.is_empty()
+                && !prefs
+                    .recent_handles
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&handle))
+            {
+                prefs.recent_handles.insert(0, handle);
+            }
+        } else if let Some(first) = prefs.recent_handles.first().cloned() {
+            prefs.last_bsky_handle = Some(first);
         }
         prefs
     }
@@ -177,13 +281,13 @@ pub struct SavedSession {
 
 impl SavedSession {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("sleek")
-            .join("session.json")
+        storage_dir().join("session.json")
     }
 
     pub fn load() -> Option<Self> {
+        #[cfg(target_os = "android")]
+        ensure_android_storage_migrated("session.json");
+
         load_session(&Self::path())
     }
 
@@ -435,7 +539,7 @@ fn open_system_browser(url: &str) -> Result<()> {
     }
 }
 
-/// Desktop open: prefer `$BROWSER`, then Chromium (Codespace VNC), then `open`.
+/// Desktop open: prefer `$BROWSER`, then the configured URL handler, then Chromium.
 ///
 /// Codespace / desktop-lite has no default browser; Chromium from nix needs
 /// `--no-sandbox` because user namespaces are blocked.
@@ -454,7 +558,25 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 2) Chromium / Chrome with container-friendly flags (VNC / Docker).
+    // 2) Prefer the desktop URL handler. This uses the user's configured
+    // browser (for example the installed Chrome Flatpak), whereas probing
+    // Chromium binaries first can select a browser that is unavailable or
+    // cannot start in restricted VM environments.
+    if let Ok(opener) = std::env::var("SLEEK_XDG_OPEN") {
+        if !opener.is_empty() {
+            match Command::new(&opener).arg(url).spawn() {
+                Ok(_) => return Ok(()),
+                Err(e) => log::warn!("SLEEK_XDG_OPEN={opener} failed: {e}"),
+            }
+        }
+    } else if which_bin("xdg-open").is_some() {
+        match Command::new("xdg-open").arg(url).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => log::debug!("xdg-open failed: {e}"),
+        }
+    }
+
+    // 3) Chromium / Chrome with container-friendly flags (VNC / Docker).
     let chromes = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"];
     for bin in chromes {
         if which_bin(bin).is_some() {
@@ -478,7 +600,7 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 3) Firefox (nix profile); sandbox often fails in Codespaces.
+    // 4) Firefox (nix profile); sandbox often fails in Codespaces.
     if which_bin("firefox").is_some() {
         match Command::new("firefox")
             .env("MOZ_DISABLE_CONTENT_SANDBOX", "1")
@@ -491,7 +613,7 @@ fn open_desktop_browser(url: &str) -> Result<()> {
         }
     }
 
-    // 4) Generic opener (xdg-open / open).
+    // 5) Generic opener (xdg-open / open).
     open::that(url).context("open browser")
 }
 
@@ -519,9 +641,9 @@ pub async fn bluesky_login_mobile(
     let url = login_url(auth_broker, handle, None);
     log::info!("bluesky mobile login url: {url}");
     match open_system_browser(&url) {
-        Ok(()) => on_status(
-            "Browser opened — complete Bluesky sign-in; Sleek will resume via freeq://".into(),
-        ),
+        Ok(()) => on_status(format!(
+            "Browser opened — complete Bluesky sign-in; Sleek will resume via freeq://\n{url}"
+        )),
         Err(e) => {
             log::warn!("failed to open browser: {e}; url={url}");
             on_status(format!(
@@ -560,7 +682,7 @@ pub async fn bluesky_login_loopback(
     // backend and used to leave the UI stuck on "Opening browser…".
     log::info!("bluesky login url: {url}");
     match open_system_browser(&url) {
-        Ok(()) => on_status("Browser opened — complete sign-in, then return here".into()),
+        Ok(()) => on_status(format!("Browser opened — complete sign-in, then return here\n{url}")),
         Err(e) => {
             log::warn!("failed to open browser: {e}; url={url}");
             on_status(format!(
@@ -677,6 +799,7 @@ mod tests {
         assert!(!d.av_pref_muted);
         assert!(!d.av_pref_speaker_muted);
         assert!(d.av_pref_camera);
+        assert!(d.show_join_part);
         assert_eq!(
             d.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]
@@ -686,6 +809,7 @@ mod tests {
         assert!(partial.av_pref_muted);
         assert!(!partial.av_pref_speaker_muted);
         assert!(partial.av_pref_camera);
+        assert!(partial.show_join_part);
         assert_eq!(
             partial.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]
@@ -694,6 +818,10 @@ mod tests {
         assert!(!empty.av_pref_muted);
         assert!(!empty.av_pref_speaker_muted);
         assert!(empty.av_pref_camera);
+        assert!(empty.show_join_part);
+        let hide_jp: SavedPrefs =
+            serde_json::from_str(r#"{"show_join_part":false}"#).unwrap();
+        assert!(!hide_jp.show_join_part);
         assert_eq!(
             empty.recent_channels,
             vec!["#general".to_string(), "#test".to_string()]
@@ -707,5 +835,95 @@ mod tests {
             with_ch.recent_channels,
             vec!["#test".to_string(), "#general".to_string()]
         );
+
+        let with_hist: SavedPrefs = serde_json::from_str(
+            r#"{"recent_nicks":["alice","bob"],"recent_handles":["a.bsky.social"],"last_bsky_handle":"a.bsky.social"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_hist.recent_nicks, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(
+            with_hist.recent_handles,
+            vec!["a.bsky.social".to_string()]
+        );
+        assert_eq!(
+            with_hist.last_bsky_handle.as_deref(),
+            Some("a.bsky.social")
+        );
+    }
+
+    #[test]
+    fn prefs_save_load_roundtrip_preserves_handle_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "sleek-prefs-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prefs.json");
+
+        let mut prefs = SavedPrefs::default();
+        prefs.last_bsky_handle = Some("alice.bsky.social".into());
+        prefs.recent_handles = vec![
+            "alice.bsky.social".into(),
+            "bob.bsky.social".into(),
+        ];
+        save_prefs(&path, &prefs).unwrap();
+
+        let loaded = load_prefs(&path).expect("prefs.json should parse");
+        assert_eq!(
+            loaded.recent_handles,
+            vec![
+                "alice.bsky.social".to_string(),
+                "bob.bsky.social".to_string(),
+            ]
+        );
+        assert_eq!(
+            loaded.last_bsky_handle.as_deref(),
+            Some("alice.bsky.social")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_storage_file_moves_legacy_prefs() {
+        let dir = std::env::temp_dir().join(format!(
+            "sleek-migrate-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let legacy_dir = dir.join("legacy");
+        let target_dir = dir.join("target");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join("prefs.json");
+        let target = target_dir.join("prefs.json");
+        std::fs::write(&legacy, r#"{"recent_handles":["a.bsky.social"]}"#).unwrap();
+
+        assert!(migrate_storage_file(&legacy, &target));
+        assert!(!legacy.exists());
+        assert!(target.exists());
+        let loaded = load_prefs(&target).unwrap();
+        assert_eq!(loaded.recent_handles, vec!["a.bsky.social".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_storage_file_skips_when_target_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "sleek-migrate-skip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("legacy.json");
+        let target = dir.join("target.json");
+        std::fs::write(&legacy, "{}").unwrap();
+        std::fs::write(&target, "{}").unwrap();
+
+        assert!(!migrate_storage_file(&legacy, &target));
+        assert!(legacy.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

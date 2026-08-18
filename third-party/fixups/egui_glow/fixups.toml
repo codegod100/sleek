@@ -1,0 +1,6 @@
+extra_srcs = [
+    # painter.rs pulls these in via include_str!, but reindeer only globs
+    # for .rs files when computing srcs — without this the build fails
+    # with "couldn't read shader/vertex.glsl: No such file or directory".
+    "src/shader/*.glsl",
+]

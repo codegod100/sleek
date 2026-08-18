@@ -1,0 +1,12 @@
+# Build-time defaults for local / nix-develop builds.
+# Do NOT set `linker = "clang"`: android workflows put the NDK llvm prebuilt
+# first on PATH, and host build-scripts (x86_64-unknown-linux-gnu) would then
+# invoke NDK clang and fail to find host CRT/libs. Keep the default `cc`
+# driver and only request mold as the ld implementation.
+# Override per-invocation with RUSTFLAGS / CARGO_PROFILE_* as needed.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

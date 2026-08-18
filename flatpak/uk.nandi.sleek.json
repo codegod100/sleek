@@ -1,0 +1,51 @@
+{
+    "app-id": "uk.nandi.sleek",
+    "runtime": "org.freedesktop.Platform",
+    "runtime-version": "25.08",
+    "sdk": "org.freedesktop.Sdk",
+    "command": "sleek",
+    "appstream-compose": false,
+    "finish-args": [
+        "--share=network",
+        "--share=ipc",
+        "--socket=fallback-x11",
+        "--socket=wayland",
+        "--socket=pulseaudio",
+        "--device=dri",
+        "--device=all",
+        "--filesystem=xdg-run/pipewire-0",
+        "--filesystem=xdg-download",
+        "--talk-name=org.freedesktop.Notifications",
+        "--talk-name=org.freedesktop.portal.Desktop"
+    ],
+    "modules": [
+        {
+            "name": "sleek",
+            "buildsystem": "simple",
+            "build-commands": [
+                "install -Dm755 sleek /app/bin/sleek",
+                "install -Dm644 uk.nandi.sleek.desktop /app/share/applications/uk.nandi.sleek.desktop",
+                "install -Dm644 uk.nandi.sleek.metainfo.xml /app/share/metainfo/uk.nandi.sleek.metainfo.xml",
+                "install -Dm644 uk.nandi.sleek.svg /app/share/icons/hicolor/scalable/apps/uk.nandi.sleek.svg"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "path": "../host/target/release/sleek"
+                },
+                {
+                    "type": "file",
+                    "path": "../assets/uk.nandi.sleek.desktop"
+                },
+                {
+                    "type": "file",
+                    "path": "../assets/uk.nandi.sleek.metainfo.xml"
+                },
+                {
+                    "type": "file",
+                    "path": "../assets/uk.nandi.sleek.svg"
+                }
+            ]
+        }
+    ]
+}

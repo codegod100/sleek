@@ -1,0 +1,57 @@
+[package]
+name = "vidya-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Vidya aesthetic showcase (Android NativeActivity + shared UI lib)"
+license = "MIT"
+publish = false
+
+# Own workspace root so cargo-apk builds in-tree.
+[workspace]
+
+[lib]
+name = "vidya_demo"
+path = "src/lib.rs"
+# lib-only: cargo-apk panics if this package also has [[bin]] targets
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vidya = { path = ".." }
+# Shared glow + fonts only — do NOT enable wayland/x11 here (feature unification
+# would pull them into the Android build and can make the activity exit immediately).
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "android-native-activity",
+] }
+android_logger = "0.14"
+log = "0.4"
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+
+[package.metadata.android]
+package = "uk.nandi.vidya.demo"
+apk_name = "vidya-demo"
+build_targets = ["x86_64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "Vidya"
+orientations = ["Portrait", "Landscape"]

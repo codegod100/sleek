@@ -1,0 +1,5 @@
+{
+  "name": "sleek-nix",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/install.sh ensure-nix"
+}

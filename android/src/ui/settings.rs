@@ -1,9 +1,9 @@
-//! Settings tab — account, theme, disconnect.
+//! Settings tab — account, theme, chat prefs, disconnect.
 
 use eframe::egui::{self, Align, Layout, RichText};
 use vidya::{
-    body, button, destructive_button, dim_label, primary_button, status_dot, title, title_2, Mode,
-    Theme,
+    body, button, checkbox, destructive_button, dim_label, primary_button, status_dot, title,
+    title_2, Mode, Theme,
 };
 
 use crate::state::{AppState, ConnectionState};
@@ -95,6 +95,30 @@ pub fn settings_tab(
             ui.add_space(sp.sm);
             dim_label(ui, th, &state.status_line);
         }
+    });
+
+    ui.add_space(sp.md);
+
+    // Chat
+    card(ui, th, |ui| {
+        section_label(ui, th, "CHAT");
+        ui.add_space(sp.md);
+        let prev = state.show_join_part;
+        checkbox(
+            ui,
+            th,
+            &mut state.show_join_part,
+            "Show join/part/quit messages",
+        );
+        if state.show_join_part != prev {
+            state.persist_prefs();
+        }
+        ui.add_space(sp.sm);
+        dim_label(
+            ui,
+            th,
+            "When off, presence lines stay out of the buffer. Member lists still update.",
+        );
     });
 
     ui.add_space(sp.md);

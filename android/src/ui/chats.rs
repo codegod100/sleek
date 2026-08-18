@@ -1,10 +1,10 @@
 //! Chats tab — conversation list (freeq-android ChatsTab inspired).
 
-use eframe::egui::{self, Align, Layout};
-use vidya::{button, dim_label, primary_button, text_field_singleline, title, title_2, Theme};
+use eframe::egui;
+use vidya::{button, primary_button, title_2, Theme};
 
 use crate::state::AppState;
-use crate::ui::widgets::{card, conversation_row, empty_state};
+use crate::ui::widgets::{card, conversation_row, empty_state, text_edit_clipboard_menu};
 
 pub enum ChatsAction {
     None,
@@ -12,33 +12,14 @@ pub enum ChatsAction {
     Join(String),
 }
 
-pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAction {
+pub fn chats_tab(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    state: &mut AppState,
+    pinned_join: bool,
+) -> ChatsAction {
     let mut action = ChatsAction::None;
     let sp = &th.spacing;
-    let p = &th.palette;
-
-    // Header row
-    ui.horizontal(|ui| {
-        title(ui, th, "Chats");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            dim_label(ui, th, state.connection.label());
-        });
-    });
-    ui.add_space(sp.md);
-
-    // Search
-    ui.horizontal(|ui| {
-        ui.set_width(ui.available_width());
-        let _ = text_field_singleline(ui, th, &mut state.search);
-    });
-    if state.search.is_empty() {
-        // Hint sits above; field itself has no placeholder API on helper —
-        // show dim hint when empty via overlaid caption.
-    }
-    ui.add_space(sp.xs);
-    dim_label(ui, th, "Search chats");
-    ui.add_space(sp.md);
-
     // Quick join
     card(ui, th, |ui| {
         title_2(ui, th, "Join channel");
@@ -53,6 +34,7 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            text_edit_clipboard_menu(ui, th, &resp);
             // singleline TextEdit surrenders focus on Enter — join when that happens.
             let enter = resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -69,6 +51,25 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     });
     ui.add_space(sp.md);
 
+    if pinned_join {
+        // In the wide master panel, keep the join controls pinned and scroll
+        // only the conversation list. The narrow layout already has one
+        // outer scroll area, so do not nest another scrollbar there.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .id_salt("chats_conversation_scroll")
+            .show(ui, |ui| action = chats_list(ui, th, state));
+    } else {
+        action = chats_list(ui, th, state);
+    }
+
+    action
+}
+
+pub fn chats_list(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAction {
+    let mut action = ChatsAction::None;
+    let sp = &th.spacing;
+    let p = &th.palette;
     let conversations: Vec<(String, String, bool, u32, String, String, i64)> = state
         .sorted_conversations()
         .into_iter()
@@ -136,4 +137,14 @@ pub fn chats_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsAc
     }
 
     action
+}
+
+/// Empty detail pane for the wide master–detail shell (no chat selected).
+pub fn chat_detail_placeholder(ui: &mut egui::Ui, th: &Theme) {
+    empty_state(
+        ui,
+        th,
+        "Select a chat",
+        "Pick a conversation from the list, or join a channel above.",
+    );
 }

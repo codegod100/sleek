@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use freeq_sdk::av::{AvAction, AvState};
@@ -30,15 +30,28 @@ pub struct LocalCall {
     pub muted: bool,
     /// Local speaker / remote-audio mute (deafen). Peers still hear you if mic is open.
     pub speaker_muted: bool,
-    /// Camera publish enabled (desktop MoQ). False when no camera / toggled off.
+    /// Camera publish enabled (MoQ). False when no camera / toggled off.
     pub camera: bool,
-    /// True when the media plane opened a capture device (desktop).
+    /// True when a capture device is available for this call (may be closed
+    /// while `camera` is false — hardware is only held while publishing).
     pub has_camera: bool,
     /// True when a real mic is feeding outbound Opus. False = silence/listen-only.
     pub has_mic: bool,
     pub media: MediaStatus,
     /// True after we sent av-start and are waiting for av-state=started.
     pub awaiting_start: bool,
+    /// Android: user wants camera, but CAMERA runtime permission is not granted
+    /// yet. Media dials audio-first; we enable publish once the grant lands.
+    pub camera_awaiting_permission: bool,
+}
+
+/// Whether to claim camera hardware when dialing the media plane.
+///
+/// `permission_granted` is the Android runtime CAMERA check (pass `true` on
+/// desktop). Opening Camera2 before the system dialog is answered always fails
+/// and used to stick the call in audio-only with "camera unavailable".
+pub fn camera_publish_at_dial(intent: bool, permission_granted: bool) -> bool {
+    intent && permission_granted
 }
 
 /// Frame-store key for the local self-view tile (capture tee / preview pump).
@@ -50,6 +63,8 @@ pub struct RgbaVideoFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<[u8]>,
+    /// Monotonic id for this key — UI skips texture upload when unchanged.
+    pub gen: u64,
 }
 
 impl fmt::Debug for RgbaVideoFrame {
@@ -58,6 +73,7 @@ impl fmt::Debug for RgbaVideoFrame {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("rgba_len", &self.rgba.len())
+            .field("gen", &self.gen)
             .finish()
     }
 }
@@ -69,6 +85,7 @@ impl fmt::Debug for RgbaVideoFrame {
 #[derive(Clone, Default)]
 pub struct VideoFrameStore {
     frames: Arc<Mutex<HashMap<String, RgbaVideoFrame>>>,
+    next_gen: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for VideoFrameStore {
@@ -96,6 +113,7 @@ impl VideoFrameStore {
         // Camera / decoder paths sometimes leave alpha at 0 (OBS virtual cam,
         // some MJPEG converters). egui then draws a fully transparent tile.
         let rgba = force_opaque_rgba(rgba);
+        let gen = self.next_gen.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         if let Ok(mut g) = self.frames.lock() {
             g.insert(
                 nick.into(),
@@ -103,6 +121,7 @@ impl VideoFrameStore {
                     width,
                     height,
                     rgba,
+                    gen,
                 },
             );
         }
@@ -120,6 +139,29 @@ impl VideoFrameStore {
         }
     }
 
+    /// Copy frames from `other` for keys we do not already hold.
+    ///
+    /// Used when MoQ re-dials: the new session store starts empty, but the UI
+    /// still has last-good tiles. Seeding then attaching the new store keeps
+    /// stale pixels visible until live frames overwrite them — and ensures new
+    /// decoder writes land in the store the UI is painting (no orphan Arc).
+    pub fn seed_missing_from(&self, other: &Self) {
+        // Same Arc — nothing to copy.
+        if Arc::ptr_eq(&self.frames, &other.frames) {
+            return;
+        }
+        for (key, frame) in other.snapshot() {
+            let missing = self
+                .frames
+                .lock()
+                .map(|g| !g.contains_key(&key))
+                .unwrap_or(true);
+            if missing {
+                self.set(key, frame.width, frame.height, frame.rgba);
+            }
+        }
+    }
+
     /// Snapshot of all latest frames (for UI paint).
     pub fn snapshot(&self) -> Vec<(String, RgbaVideoFrame)> {
         self.frames
@@ -130,6 +172,10 @@ impl VideoFrameStore {
 
     pub fn is_empty(&self) -> bool {
         self.frames.lock().map(|g| g.is_empty()).unwrap_or(true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.lock().map(|g| g.len()).unwrap_or(0)
     }
 }
 
@@ -492,9 +538,10 @@ pub fn should_tap(path: &str, session_id: &str, our_broadcast: &str, my_nick: &s
 #[cfg(test)]
 mod tests {
     use super::{
-        broadcast_path, can_dial_sfu, channel_from_collision_reason, opaque_rgba_bytes, path_key,
-        path_nick, prepare_opaque_rgba_for_upload, session_id_from_collision_reason,
-        sfu_moq_dial_url, sfu_moq_url, VideoFrameStore, LOCAL_PREVIEW_KEY,
+        broadcast_path, camera_publish_at_dial, can_dial_sfu, channel_from_collision_reason,
+        opaque_rgba_bytes, path_key, path_nick, prepare_opaque_rgba_for_upload,
+        session_id_from_collision_reason, sfu_moq_dial_url, sfu_moq_url, VideoFrameStore,
+        LOCAL_PREVIEW_KEY,
     };
     use std::sync::Arc;
 
@@ -553,6 +600,28 @@ mod tests {
         }
         // RGB preserved from input (first pixel was 0,80,120,0 → A forced).
         assert_eq!(&frame.rgba[0..4], &[0, 80, 120, 255]);
+    }
+
+    #[test]
+    fn video_frame_store_seed_missing_from_copies_only_absent_keys() {
+        let old = VideoFrameStore::new();
+        let rgba: Arc<[u8]> = Arc::from([10u8, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 1, 2, 3, 255]);
+        old.set("eve", 2, 2, rgba.clone());
+        old.set(LOCAL_PREVIEW_KEY, 2, 2, rgba);
+
+        let new = VideoFrameStore::new();
+        // Live key already present — must not be overwritten by seed.
+        let live: Arc<[u8]> = Arc::from([
+            9u8, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255,
+        ]);
+        new.set("eve", 2, 2, live.clone());
+
+        new.seed_missing_from(&old);
+        let snap = new.snapshot();
+        assert_eq!(snap.len(), 2);
+        let eve = snap.iter().find(|(k, _)| k == "eve").unwrap();
+        assert_eq!(eve.1.rgba.as_ref(), live.as_ref());
+        assert!(snap.iter().any(|(k, _)| k == LOCAL_PREVIEW_KEY));
     }
 
     #[test]
@@ -698,5 +767,30 @@ mod tests {
         assert!(can_dial_sfu("https://remote.example", Some("tok")));
         assert!(can_dial_sfu("ws://localhost:4443", Some("tok")));
         assert!(can_dial_sfu("127.0.0.1", Some("tok")));
+    }
+
+    #[test]
+    fn camera_publish_at_dial_requires_permission() {
+        assert!(!camera_publish_at_dial(true, false));
+        assert!(camera_publish_at_dial(true, true));
+        assert!(!camera_publish_at_dial(false, true));
+        assert!(!camera_publish_at_dial(false, false));
+    }
+
+    /// Contract for Android JNI: CameraCapture lives in APK classes.dex and
+    /// must be loaded with Activity ClassLoader + Java binary name (dots).
+    /// `FindClass("uk/nandi/sleek/CameraCapture")` from a native worker thread
+    /// uses the system loader and returns ClassNotFound — which made AV report
+    /// "camera unavailable" even with CAMERA granted and dex injected.
+    #[test]
+    fn android_camera_capture_class_binary_name() {
+        assert_eq!(
+            "uk.nandi.sleek.CameraCapture",
+            "uk.nandi.sleek.CameraCapture"
+        );
+        assert!(
+            !"uk.nandi.sleek.CameraCapture".contains('/'),
+            "ClassLoader.loadClass wants dots, not JNI slashes"
+        );
     }
 }

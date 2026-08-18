@@ -19,7 +19,7 @@ WORKSPACES="$(cd "$ROOT/.." && pwd)"
 LOG_DIR="${SLEEK_HOST_LOG_DIR:-/tmp/sleek-logs}"
 LOG="$LOG_DIR/host.log"
 FREEQ_URL="${SLEEK_FREEQ_URL:-https://github.com/codegod100/freeq.git}"
-VIDYA_URL="${SLEEK_VIDYA_URL:-https://tangled.org/nandi.uk/vidya}"
+VIDYA_URL="${SLEEK_VIDYA_URL:-https://nandi.radicle.garden/z2UqGTRH21s3pHnJgSuMwRaPPNNcW.git}"
 
 MODE=fg
 for arg in "$@"; do
@@ -105,6 +105,13 @@ ensure_clone() {
 
 ensure_deps() {
   mkdir -p "$WORKSPACES"
+  # Prefer flake.lock inputs (Radicle vidya + GitHub freeq) for path deps.
+  if [[ -x "$ROOT/scripts/sync-flake-path-deps.sh" ]] && command -v nix >/dev/null 2>&1; then
+    if bash "$ROOT/scripts/sync-flake-path-deps.sh"; then
+      return 0
+    fi
+    log "flake sync failed; falling back to git clone"
+  fi
   ensure_clone "$WORKSPACES/freeq" "$FREEQ_URL" freeq
   ensure_clone "$WORKSPACES/vidya" "$VIDYA_URL" vidya
   if [[ ! -f "$WORKSPACES/freeq/freeq-sdk/Cargo.toml" ]]; then

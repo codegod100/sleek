@@ -1,0 +1,47 @@
+[cells]
+    root = .
+    prelude = prelude
+    toolchains = toolchains
+    none = none
+
+[cell_aliases]
+    config = prelude
+    ovr_config = prelude
+    fbcode = none
+    fbsource = none
+    buck = none
+
+# Use the prelude bundled in the buck2 binary itself — no submodule to pin/update.
+[external_cells]
+    prelude = bundled
+
+[parser]
+    target_platform_detector_spec = target:root//...->prelude//platforms:default \
+      target:toolchains//...->prelude//platforms:default
+
+[buck2]
+    digest_algorithms = SHA256
+
+# BuildBuddy remote cache, on by default (see platforms/defs.bzl for how
+# `buildbuddy.enabled` gates `remote_cache_enabled` on the execution
+# platform — remote *execution* stays off always, see that file).
+#
+# Needs BUILDBUDDY_API_KEY in the environment (an org key from
+# https://app.buildbuddy.io/ → Settings). Without it, buck2 hard-fails
+# every build the moment it tries to reach the cache — there's no graceful
+# "key missing, skip caching" fallback in buck2 itself. No BuildBuddy
+# account yet? Opt out locally (git-ignored, not this file):
+#   printf '[buildbuddy]\n    enabled = false\n' > .buckconfig.local
+[buildbuddy]
+    enabled = true
+
+# engine/CAS/action-cache all live on BuildBuddy's single SaaS endpoint —
+# only the API key (a secret) needs to come from the environment.
+[buck2_re_client]
+    engine_address = remote.buildbuddy.io:443
+    action_cache_address = remote.buildbuddy.io:443
+    cas_address = remote.buildbuddy.io:443
+    http_headers = x-buildbuddy-api-key:$BUILDBUDDY_API_KEY
+
+[build]
+    execution_platforms = root//platforms:platforms

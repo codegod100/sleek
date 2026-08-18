@@ -1,12 +1,14 @@
 //! Shared Vidya-styled widgets.
 
 use eframe::egui::{
-    self, text::LayoutJob, text::TextFormat, Align, Color32, CursorIcon, FontId, Layout, Rect,
-    RichText, ScrollArea, Sense, Stroke, Vec2,
+    self, text::LayoutJob, text::TextFormat, Align, Align2, Color32, CursorIcon, FontId, Id, Key,
+    Layout, Order, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2,
 };
-use vidya::{dim_label, icon_colored, paint_emoji_in, title_2, Icon, Theme};
+use vidya::{
+    dim_label, icon_colored, paint_emoji_in, paint_icon_in, system_chrome, title_2, Icon, Theme,
+};
 
-use crate::preview::{self, Embed, UrlSpan};
+use crate::preview::{self, Embed, MessageLinkSpan};
 use crate::state::{
     display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
     ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
@@ -28,8 +30,16 @@ pub enum MessageBubbleAction {
     OpenImage { url: String },
     /// Begin editing this message in the compose bar.
     Edit { msgid: String, text: String },
+    /// Begin replying to this message in the compose bar.
+    Reply { msgid: String },
     /// Soft-delete this message (`+draft/delete`).
     Delete { msgid: String },
+    /// Open / join an IRC channel mentioned in the message body.
+    OpenChannel { channel: String },
+    /// Open the peer profile modal for this nick.
+    OpenProfile { nick: String },
+    /// Scroll/highlight the message this reply references.
+    NavigateTo { msgid: String },
 }
 
 /// Card frame filling parent width.
@@ -53,8 +63,64 @@ pub fn section_label(ui: &mut egui::Ui, th: &Theme, text: &str) {
     );
 }
 
+/// Local-calendar day label for chat stream separators (freeq-android `formatDate`).
+pub fn format_day_separator(ts: chrono::DateTime<chrono::Local>) -> String {
+    let today = chrono::Local::now().date_naive();
+    let day = ts.date_naive();
+    if day == today {
+        "Today".into()
+    } else if day + chrono::Duration::days(1) == today {
+        "Yesterday".into()
+    } else {
+        ts.format("%B %-d, %Y").to_string()
+    }
+}
+
+/// Centered day divider between messages when the calendar day changes.
+pub fn date_separator(ui: &mut egui::Ui, th: &Theme, label: &str) {
+    let sp = &th.spacing;
+    let p = &th.palette;
+    ui.add_space(sp.md);
+    let full = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(full, th.type_scale.caption + sp.sm),
+        Sense::hover(),
+    );
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(th.type_scale.caption),
+        p.text_secondary.gamma_multiply(0.85),
+    );
+    let text_w = galley.size().x;
+    let gap = sp.md;
+    let line_y = rect.center().y;
+    let mid = rect.center().x;
+    let left_end = (mid - text_w * 0.5 - gap).max(rect.left());
+    let right_start = (mid + text_w * 0.5 + gap).min(rect.right());
+    let stroke = Stroke::new(1.0_f32, p.border_soft.gamma_multiply(0.7));
+    if left_end > rect.left() + 1.0 {
+        ui.painter()
+            .hline(rect.left()..=left_end, line_y, stroke);
+    }
+    if right_start + 1.0 < rect.right() {
+        ui.painter()
+            .hline(right_start..=rect.right(), line_y, stroke);
+    }
+    ui.painter().galley(
+        egui::pos2(mid - text_w * 0.5, rect.center().y - galley.size().y * 0.5),
+        galley,
+        p.text_secondary,
+    );
+    ui.add_space(sp.sm);
+}
+
 /// Colored initial circle (freeq-style avatar stand-in).
 pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    paint_avatar_initial(ui, th, name, size, rect);
+}
+
+fn paint_avatar_initial(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32, rect: Rect) {
     let letter = name
         .trim_start_matches(['#', '&', '@', '+', '%'])
         .chars()
@@ -69,7 +135,6 @@ pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
         ((200.0 - hue * 0.3) as u8).max(80),
     );
 
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     ui.painter()
         .circle_filled(rect.center(), size * 0.5, fill);
     ui.painter().text(
@@ -79,6 +144,38 @@ pub fn avatar_circle(ui: &mut egui::Ui, th: &Theme, name: &str, size: f32) {
         egui::FontId::proportional((size * 0.42).max(10.0)),
         th.palette.accent_fg,
     );
+}
+
+/// Circular user avatar: Bluesky image when `avatar_url` is ready, else initial circle.
+///
+/// Clickable (opens profile when the caller handles the response). Touches
+/// [`MediaCache`] so the image fetch is queued for the net layer.
+pub fn user_avatar(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    nick: &str,
+    avatar_url: Option<&str>,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if let Some(url) = avatar_url {
+        media.touch_image(url);
+        if let Some(ImageState::Ready(pixels)) = media.images.get_mut(url) {
+            let tex = pixels.texture(ui.ctx(), url).clone();
+            egui::Image::new((tex.id(), Vec2::splat(size)))
+                .fit_to_exact_size(Vec2::splat(size))
+                .corner_radius(size * 0.5)
+                .paint_at(ui, rect);
+            return response
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("View profile");
+        }
+    }
+    paint_avatar_initial(ui, th, nick, size, rect);
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("View profile")
 }
 
 fn hash_hue(s: &str) -> f32 {
@@ -142,7 +239,7 @@ pub fn conversation_row(
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if buf.unread > 0 {
-                                badge(ui, th, &format!("{}", buf.unread.min(99)));
+                                badge(ui, th, &crate::message_store::unread_label(buf.unread));
                             } else if buf.call.is_some() {
                                 ui.label(
                                     RichText::new("📞")
@@ -189,16 +286,989 @@ fn badge(ui: &mut egui::Ui, th: &Theme, text: &str) {
         });
 }
 
+/// Compact icon button for message action toolbars / menus.
+fn message_action_icon_btn(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    glyph: MessageActionGlyph,
+    tip: &str,
+    accent: bool,
+) -> egui::Response {
+    let p = &th.palette;
+    let size = (th.type_scale.body * 1.35).max(22.0);
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    response = response
+        .on_hover_text(tip)
+        .on_hover_cursor(CursorIcon::PointingHand);
+
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered() && ui.is_enabled();
+        let active = response.is_pointer_button_down_on();
+        let fill = if active {
+            p.button_active
+        } else if hovered || accent {
+            p.button_hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect(
+                rect,
+                th.spacing.radius_sm,
+                fill,
+                Stroke::NONE,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let icon_rect = rect.shrink(size * 0.18);
+        let color = if accent { p.accent } else { p.text };
+        match glyph {
+            MessageActionGlyph::Icon(icon) => paint_icon_in(ui, icon_rect, icon, color),
+            MessageActionGlyph::Emoji(emoji) => paint_emoji_in(ui, icon_rect, emoji, color),
+        }
+    }
+
+    response
+}
+
+#[derive(Clone, Copy)]
+enum MessageActionGlyph {
+    Icon(Icon),
+    Emoji(&'static str),
+}
+
+const SWIPE_REPLY_THRESHOLD: f32 = 60.0;
+
+#[derive(Clone, Default)]
+struct SwipeReplyState {
+    offset: f32,
+    press_origin: Option<Pos2>,
+    armed: bool,
+    triggered: bool,
+}
+
+/// Touch swipe-right on a message bubble (APK). Returns the visual offset and
+/// whether the gesture just crossed the reply threshold.
+fn touch_swipe_reply(
+    ui: &mut egui::Ui,
+    msg_id: &str,
+    bubble_rect: Rect,
+    can_reply: bool,
+) -> (f32, bool) {
+    if !can_reply {
+        return (0.0, false);
+    }
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen());
+    if !touch_ui {
+        return (0.0, false);
+    }
+
+    let id = Id::new(("swipe_reply", msg_id));
+    let max_off = SWIPE_REPLY_THRESHOLD * 1.2;
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let primary_released = ui.input(|i| i.pointer.primary_released());
+    let pos = ui.ctx().pointer_interact_pos();
+    let over = pos.is_some_and(|p| bubble_rect.contains(p));
+
+    let mut st = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<SwipeReplyState>(id).unwrap_or_default());
+
+    if primary_pressed && over {
+        st.press_origin = pos;
+        st.armed = false;
+        st.triggered = false;
+    }
+
+    if primary_down {
+        if let (Some(origin), Some(cur)) = (st.press_origin, pos) {
+            let dx = cur.x - origin.x;
+            let dy = (cur.y - origin.y).abs();
+            if !st.armed && dx > 8.0 && dx > dy {
+                st.armed = true;
+            }
+            if st.armed {
+                st.offset = dx.clamp(0.0, max_off);
+            }
+        }
+    }
+
+    let mut just_triggered = false;
+    if primary_released {
+        if st.armed && st.offset >= SWIPE_REPLY_THRESHOLD {
+            just_triggered = true;
+        }
+        st.offset = 0.0;
+        st.press_origin = None;
+        st.armed = false;
+        st.triggered = false;
+    } else if st.armed && !st.triggered && st.offset >= SWIPE_REPLY_THRESHOLD {
+        st.triggered = true;
+        just_triggered = true;
+    }
+
+    ui.ctx().data_mut(|d| d.insert_temp(id, st.clone()));
+    (st.offset, just_triggered)
+}
+
+/// Reply original preview above a bubble. Clicking jumps to that message.
+fn reply_context_preview(ui: &mut egui::Ui, th: &Theme, parent: &ChatMessage) -> bool {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    // Scope under the child bubble's `push_id` — never key only on the parent
+    // msgid. Absolute `Id::new(("reply_preview", parent))` collides when two
+    // visible messages reply to the same original (egui: "Second use of widget ID").
+    let row_id = ui.id().with("reply_preview");
+    // Fill the bubble width so empty space beside short previews is still a hit target.
+    let row_w = ui.available_width().max(1.0);
+    let mut label_clicked = false;
+    let inner = ui.horizontal(|ui| {
+        ui.set_min_width(row_w);
+        ui.set_max_width(row_w);
+        ui.add_space(sp.md);
+        let bar_h = (th.type_scale.caption * 1.2).max(14.0);
+        let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(2.0, bar_h), Sense::hover());
+        ui.painter().rect_filled(bar_rect, 1.0, p.accent);
+        ui.add_space(4.0);
+        // `ChatMessage::preview()` already prefixes the sender nick.
+        // Click sense + pointing hand on the label itself — a later row
+        // `interact` sits under the text and does not win hover cursor.
+        let label_resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(parent.preview())
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary),
+                )
+                .wrap()
+                .selectable(false)
+                .sense(Sense::click()),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Go to message");
+        label_clicked = label_resp.clicked();
+    });
+    let mut rect = inner.response.rect;
+    rect.set_width(row_w.max(rect.width()));
+    let resp = ui
+        .interact(rect, row_id, Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Go to message");
+    ui.add_space(sp.xs);
+    label_clicked || resp.clicked()
+}
+
+/// Width / height for the shared hover + context icon bar.
+#[derive(Clone, Copy)]
+struct MessageActionBarMetrics {
+    pad: f32,
+    btn: f32,
+    row_w: f32,
+    bar_w: f32,
+}
+
+fn message_action_bar_metrics(
+    th: &Theme,
+    can_react: bool,
+    can_reply: bool,
+    can_edit: bool,
+    can_delete: bool,
+) -> MessageActionBarMetrics {
+    let pad = 4.0;
+    let btn = (th.type_scale.body * 1.35).max(22.0);
+    let n = [can_react, can_reply, can_edit, can_delete]
+        .into_iter()
+        .filter(|v| *v)
+        .count() as f32;
+    let row_w = n * btn + (n - 1.0).max(0.0) * 2.0;
+    MessageActionBarMetrics {
+        pad,
+        btn,
+        row_w,
+        bar_w: row_w + pad * 2.0,
+    }
+}
+
+fn message_action_bar_frame(th: &Theme, pad: f32) -> egui::Frame {
+    let p = &th.palette;
+    egui::Frame::new()
+        .fill(p.card_bg)
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(th.spacing.radius_md)
+        .inner_margin(egui::Margin::same(pad as i8))
+}
+
+/// Pointer must stay on the bubble this long before the inline actions fade in.
+const MESSAGE_HOVER_DWELL_SECS: f64 = 0.30;
+
+/// Fade duration for the per-message inline action chip.
+const MESSAGE_HOVER_FADE_SECS: f32 = 0.18;
+
+/// Keep actions visible briefly after leave so a small pointer slip doesn't flash.
+const MESSAGE_HOVER_GRACE_SECS: f64 = 0.20;
+
+fn message_hover_enter_id(hover_id: Id) -> Id {
+    hover_id.with("enter")
+}
+
+fn message_hover_seen_id(hover_id: Id) -> Id {
+    hover_id.with("seen")
+}
+
+fn message_hover_rect_id(hover_id: Id) -> Id {
+    hover_id.with("rect")
+}
+
+fn message_hover_fade_id(hover_id: Id) -> Id {
+    hover_id.with("fade")
+}
+
+/// Shared React / Edit / Delete icon actions (inline hover chip + context menu).
+fn message_action_icons(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    metrics: MessageActionBarMetrics,
+    can_react: bool,
+    can_reply: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    let mut action = None;
+    ui.allocate_ui_with_layout(
+        Vec2::new(metrics.row_w, metrics.btn),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if can_reply
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("↩"),
+                    "Reply",
+                    false,
+                )
+                .clicked()
+            {
+                action = Some(MessageBubbleAction::Reply {
+                    msgid: msg.id.clone(),
+                });
+            }
+            if can_react
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Icon(Icon::Laugh),
+                    "Add reaction",
+                    react_picker_open,
+                )
+                .clicked()
+            {
+                action = Some(if react_picker_open {
+                    MessageBubbleAction::CloseReactPicker
+                } else {
+                    MessageBubbleAction::OpenReactPicker {
+                        msgid: msg.id.clone(),
+                    }
+                });
+            }
+            if can_edit
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("✏️"),
+                    "Edit message",
+                    false,
+                )
+                .clicked()
+            {
+                action = Some(MessageBubbleAction::Edit {
+                    msgid: msg.id.clone(),
+                    text: msg.text.clone(),
+                });
+            }
+            if can_delete
+                && message_action_icon_btn(
+                    ui,
+                    th,
+                    MessageActionGlyph::Emoji("🗑️"),
+                    "Delete message",
+                    false,
+                )
+                .clicked()
+            {
+                // Server `+draft/delete` names the edit-chain root.
+                let delete_id = msg.edit_of.clone().unwrap_or_else(|| msg.id.clone());
+                action = Some(MessageBubbleAction::Delete { msgid: delete_id });
+            }
+        },
+    );
+    action
+}
+
+/// Fade opacity for the inline action chip (0 = reserved but invisible, 1 = shown).
+///
+/// Hit-tests last frame's bubble rect so the chip can live inside the message
+/// frame without a floating overlay. Space stays reserved; only opacity changes.
+fn message_inline_hover_opacity(ui: &egui::Ui, hover_id: Id, force_show: bool) -> f32 {
+    // APK / touch: no hover chip; long-press opens the icon context menu.
+    if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+        return if force_show { 1.0 } else { 0.0 };
+    }
+
+    let time = ui.input(|i| i.time);
+    let prev_rect: Option<Rect> = ui
+        .ctx()
+        .data(|d| d.get_temp(message_hover_rect_id(hover_id)));
+    let in_hit_zone = prev_rect.is_some_and(|r| {
+        let clipped = r.intersect(ui.clip_rect());
+        clipped.is_positive()
+            && ui
+                .ctx()
+                .pointer_interact_pos()
+                .is_some_and(|p| clipped.expand(4.0).contains(p))
+    });
+
+    let enter_id = message_hover_enter_id(hover_id);
+    let last_seen_id = message_hover_seen_id(hover_id);
+
+    if in_hit_zone {
+        ui.ctx().data_mut(|d| {
+            if d.get_temp::<f64>(enter_id).is_none() {
+                d.insert_temp(enter_id, time);
+            }
+        });
+    }
+
+    let (entered_at, last_seen) = ui.ctx().data(|d| {
+        (
+            d.get_temp::<f64>(enter_id).unwrap_or(0.0),
+            d.get_temp::<f64>(last_seen_id).unwrap_or(0.0),
+        )
+    });
+
+    let dwell_ok = entered_at > 0.0 && time - entered_at >= MESSAGE_HOVER_DWELL_SECS;
+    if in_hit_zone && !dwell_ok && entered_at > 0.0 {
+        let remaining_ms =
+            ((MESSAGE_HOVER_DWELL_SECS - (time - entered_at)).max(0.0) * 1000.0).ceil() as u64;
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(remaining_ms.max(16)));
+    }
+    if in_hit_zone && dwell_ok {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(last_seen_id, time));
+    }
+
+    let within_grace = last_seen > 0.0 && time - last_seen < MESSAGE_HOVER_GRACE_SECS;
+    let want_show = force_show || (in_hit_zone && dwell_ok) || within_grace;
+
+    if !in_hit_zone && !within_grace && !force_show {
+        // Drop enter only after grace ends. Clearing it while grace is active
+        // would force a full re-dwell on a brief slip + re-enter, so the chip
+        // could start fading out while the pointer is already back on the bubble.
+        ui.ctx().data_mut(|d| {
+            d.remove::<f64>(enter_id);
+            d.remove::<f64>(last_seen_id);
+        });
+    }
+
+    ui.ctx().animate_bool_with_time(
+        message_hover_fade_id(hover_id),
+        want_show,
+        MESSAGE_HOVER_FADE_SECS,
+    )
+}
+
+/// Reserve header space for React / Edit / Delete; fade icons in on hover.
+fn message_inline_action_chip(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    metrics: MessageActionBarMetrics,
+    opacity: f32,
+    can_react: bool,
+    can_reply: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    let size = Vec2::new(metrics.row_w, metrics.btn);
+    if opacity <= 0.001 {
+        // Keep layout stable — bubble shape does not jump when actions appear.
+        ui.allocate_exact_size(size, Sense::hover());
+        return None;
+    }
+
+    let interactive = opacity > 0.85;
+    let mut action = None;
+    ui.scope(|ui| {
+        ui.multiply_opacity(opacity);
+        ui.add_enabled_ui(interactive, |ui| {
+            action = message_action_icons(
+                ui,
+                th,
+                metrics,
+                can_react,
+                can_reply,
+                can_edit,
+                can_delete,
+                react_picker_open,
+                msg,
+            );
+        });
+    });
+    action
+}
+
+/// Where to pin the menu. `above_finger` uses a bottom-center pivot so the
+/// whole popup sits above the contact point (not under the fingertip).
+#[derive(Clone, Copy)]
+struct MenuAnchor {
+    pos: Pos2,
+    above_finger: bool,
+}
+
+/// Track a press that started over a widget so long-press works without
+/// stealing click sense.
+#[derive(Clone, Copy)]
+struct PressHold {
+    t0: f64,
+    pos: Pos2,
+    long_fired: bool,
+}
+
+/// Edge-trigger long-press over `rect` (APK / touch). Returns
+/// `(long_press_this_frame, suppress_short_click)` — the latter stays true from
+/// the long-press frame until the primary button is released.
+fn touch_long_press(ui: &mut egui::Ui, press_id: Id, rect: Rect) -> (bool, bool) {
+    let clipped = rect.intersect(ui.clip_rect());
+    let over = clipped.is_positive() && ui.rect_contains_pointer(clipped);
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let time = ui.input(|i| i.time);
+    let max_dur = ui.ctx().options(|o| o.input_options.max_click_duration);
+    let max_slide = ui
+        .ctx()
+        .options(|o| o.input_options.max_click_dist as f32)
+        .max(8.0);
+    let pos = ui.ctx().pointer_interact_pos();
+
+    if primary_pressed && over {
+        if let Some(pos) = pos {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(press_id, PressHold {
+                    t0: time,
+                    pos,
+                    long_fired: false,
+                }));
+        }
+    }
+
+    let mut long_this_frame = false;
+    let mut suppress_click = false;
+    if primary_down {
+        if let Some(mut start) = ui.ctx().data(|d| d.get_temp::<PressHold>(press_id)) {
+            suppress_click = start.long_fired;
+            let moved = pos
+                .map(|p| (p - start.pos).length() > max_slide)
+                .unwrap_or(false);
+            if moved {
+                ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+                suppress_click = false;
+            } else if !start.long_fired && time - start.t0 >= max_dur {
+                long_this_frame = true;
+                start.long_fired = true;
+                suppress_click = true;
+                ui.ctx().data_mut(|d| d.insert_temp(press_id, start));
+            }
+        }
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<PressHold>(press_id));
+    }
+    (long_this_frame, suppress_click)
+}
+
+/// Cut / Copy / Paste for a `TextEdit`: right-click on desktop, press-and-hold on APK.
+///
+/// egui does not ship a built-in TextEdit clipboard menu. Stock
+/// [`Response::context_menu`] also closes on the next frame while the finger is
+/// still down after a long-press (`hovered && primary_down`), so we use the same
+/// touch-safe popup pattern as message bubbles (finger clearance + close on new
+/// press, not release). Selecting **Paste** sends [`ViewportCommand::RequestPaste`],
+/// which eframe turns into `Event::Paste` via the Android system clipboard hooks.
+pub fn text_edit_clipboard_menu(ui: &mut egui::Ui, th: &Theme, response: &egui::Response) {
+    if !response.enabled() {
+        return;
+    }
+
+    let menu_id = response.id.with("text_clipboard_menu");
+    let press_id = menu_id.with("press");
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    // egui maps press-and-hold → `secondary_clicked` / `long_touched`. Also run
+    // our own hold tracker so the menu still opens if TextEdit click-sense is
+    // contested (same approach as message bubbles).
+    let (long_press_anywhere, _) = touch_long_press(ui, press_id, response.rect);
+    let opening = response.secondary_clicked() || long_press_anywhere;
+
+    if opening {
+        response.request_focus();
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui || long_press_anywhere || response.long_touched() {
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else {
+            MenuAnchor {
+                pos: Pos2::new(response.rect.center().x, response.rect.top() - 8.0),
+                above_finger: true,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(menu_id));
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(menu_id)) {
+        return;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(menu_id))
+        .unwrap_or(MenuAnchor {
+            pos: response.rect.left_top(),
+            above_finger: touch_ui,
+        });
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let mut close = false;
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+
+    let popup = egui::Area::new(menu_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            message_action_bar_frame(th, sp.sm).shadow(ui.style().visuals.popup_shadow).show(
+                ui,
+                |ui| {
+                    ui.set_min_width(128.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (label, cmd) in [
+                        ("Cut", egui::ViewportCommand::RequestCut),
+                        ("Copy", egui::ViewportCommand::RequestCopy),
+                        ("Paste", egui::ViewportCommand::RequestPaste),
+                    ] {
+                        let clicked = ui
+                            .add_sized(
+                                Vec2::new(ui.available_width().max(120.0), sp.control_height.min(40.0)),
+                                egui::Button::new(
+                                    RichText::new(label)
+                                        .size(th.type_scale.body)
+                                        .color(p.text),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::NONE)
+                                .corner_radius(sp.radius_sm),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked();
+                        if clicked {
+                            response.request_focus();
+                            ui.ctx().send_viewport_cmd(cmd);
+                            close = true;
+                        }
+                    }
+                },
+            );
+        });
+
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    menu_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    if close || escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| {
+            d.remove::<MenuAnchor>(menu_id);
+            d.remove::<PressHold>(press_id);
+        });
+    }
+}
+
+/// Long-press (APK) popup listing nicknames who used one reaction emoji.
+fn reaction_reactors_popup(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    popup_id: Id,
+    chip_rect: Rect,
+    emoji: &str,
+    nicks: &[String],
+    opening: bool,
+) {
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    if opening {
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui {
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else {
+            MenuAnchor {
+                pos: Pos2::new(chip_rect.center().x, chip_rect.top() - 8.0),
+                above_finger: true,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(popup_id));
+        ui.ctx().data_mut(|d| d.insert_temp(popup_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(popup_id)) {
+        return;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(popup_id))
+        .unwrap_or(MenuAnchor {
+            pos: chip_rect.left_top(),
+            above_finger: touch_ui,
+        });
+
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let shown_emoji = display_emoji(emoji);
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+
+    let popup = egui::Area::new(popup_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .default_width(200.0)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(p.card_bg)
+                .stroke(Stroke::new(1.0_f32, p.border_soft))
+                .corner_radius(sp.radius_md)
+                .inner_margin(egui::Margin::same(8))
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let icon_size = (th.type_scale.caption * 1.15).max(14.0);
+                        let (ir, _) =
+                            ui.allocate_exact_size(Vec2::splat(icon_size), Sense::hover());
+                        paint_emoji_in(ui, ir, emoji, p.text);
+                        ui.label(
+                            RichText::new(format!("{shown_emoji} · {}", nicks.len()))
+                                .size(th.type_scale.caption)
+                                .color(p.text_secondary)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for nick in nicks {
+                                ui.label(
+                                    RichText::new(nick)
+                                        .size(th.type_scale.body)
+                                        .color(p.text),
+                                );
+                            }
+                        });
+                });
+        });
+
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    popup_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    if escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| d.remove::<MenuAnchor>(popup_id));
+    }
+}
+
+/// Right-click / long-press menu for a message bubble: React, Edit, Delete icons.
+///
+/// Uses raw secondary-button clicks (not [`Response::context_menu`]) so
+/// selectable body text's drag-sense cannot swallow the right-click. On touch /
+/// APK, a press-and-hold anywhere on the bubble opens the same icon menu.
+fn message_context_menu(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    bubble_rect: Rect,
+    menu_id: Id,
+    body_long_touched: bool,
+    can_react: bool,
+    can_reply: bool,
+    can_edit: bool,
+    can_delete: bool,
+    react_picker_open: bool,
+    msg: &ChatMessage,
+) -> Option<MessageBubbleAction> {
+    if !can_react && !can_reply && !can_edit && !can_delete {
+        return None;
+    }
+
+    let press_id = menu_id.with("press");
+    let clipped = bubble_rect.intersect(ui.clip_rect());
+    let over_bubble = clipped.is_positive() && ui.rect_contains_pointer(clipped);
+    let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.any_touches() || i.has_touch_screen());
+
+    let (long_press_anywhere, _) = touch_long_press(ui, press_id, bubble_rect);
+
+    let long_press = body_long_touched || long_press_anywhere;
+    let opening = over_bubble && (secondary || long_press);
+
+    if opening {
+        let anchor = if let Some(finger) = ui.ctx().pointer_interact_pos() {
+            if touch_ui || long_press {
+                // Bottom-center of the menu sits above the contact point with
+                // enough clearance that the icons are not under the fingertip.
+                const FINGER_CLEARANCE: f32 = 72.0;
+                MenuAnchor {
+                    pos: Pos2::new(finger.x, finger.y - FINGER_CLEARANCE),
+                    above_finger: true,
+                }
+            } else {
+                MenuAnchor {
+                    pos: finger,
+                    above_finger: false,
+                }
+            }
+        } else if long_press {
+            // Touch can briefly clear interact_pos; fall back above the bubble.
+            MenuAnchor {
+                pos: Pos2::new(bubble_rect.center().x, bubble_rect.top() - 8.0),
+                above_finger: true,
+            }
+        } else {
+            MenuAnchor {
+                pos: bubble_rect.left_top(),
+                above_finger: false,
+            }
+        };
+        ui.memory_mut(|m| m.open_popup(menu_id));
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, anchor));
+    }
+
+    if !ui.memory(|m| m.is_popup_open(menu_id)) {
+        return None;
+    }
+
+    let anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<MenuAnchor>(menu_id))
+        .unwrap_or(MenuAnchor {
+            pos: bubble_rect.left_top(),
+            above_finger: false,
+        });
+
+    let mut action = None;
+    let mut close = false;
+    let metrics = message_action_bar_metrics(th, can_react, can_reply, can_edit, can_delete);
+
+    let pivot = if anchor.above_finger {
+        Align2::CENTER_BOTTOM
+    } else {
+        Align2::LEFT_TOP
+    };
+    let popup = egui::Area::new(menu_id.with("area"))
+        .kind(egui::UiKind::Popup)
+        .order(Order::Foreground)
+        .fixed_pos(anchor.pos)
+        .pivot(pivot)
+        .default_width(metrics.bar_w)
+        .sense(Sense::click())
+        .show(ui.ctx(), |ui| {
+            message_action_bar_frame(th, metrics.pad)
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    if let Some(a) = message_action_icons(
+                        ui,
+                        th,
+                        metrics,
+                        can_react,
+                        can_reply,
+                        can_edit,
+                        can_delete,
+                        react_picker_open,
+                        msg,
+                    ) {
+                        action = Some(a);
+                        close = true;
+                    }
+                });
+        });
+
+    // Keep a touch menu on-screen after the first layout (it grows upward).
+    if anchor.above_finger {
+        let screen = ui.ctx().screen_rect();
+        let r = popup.response.rect;
+        let mut pos = anchor.pos;
+        let mut moved = false;
+        if r.left() < screen.left() + 4.0 {
+            pos.x += (screen.left() + 4.0) - r.left();
+            moved = true;
+        } else if r.right() > screen.right() - 4.0 {
+            pos.x -= r.right() - (screen.right() - 4.0);
+            moved = true;
+        }
+        if r.top() < screen.top() + 4.0 {
+            pos.y += (screen.top() + 4.0) - r.top();
+            moved = true;
+        }
+        if moved {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    menu_id,
+                    MenuAnchor {
+                        pos,
+                        above_finger: true,
+                    },
+                )
+            });
+        }
+    }
+
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    // Close on a new press outside the menu (egui context-menu style). Prefer
+    // `any_pressed` over `any_click` so the finger-*up* after a long-press open
+    // does not immediately dismiss the menu on APK.
+    let press_outside = ui.input(|i| i.pointer.any_pressed())
+        && !popup.response.contains_pointer()
+        && ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| !popup.response.rect.contains(p));
+    // Don't close on the same secondary / long-press that opened the menu.
+    if close || escape || (press_outside && !opening) {
+        ui.memory_mut(|m| m.close_popup());
+        ui.ctx().data_mut(|d| {
+            d.remove::<MenuAnchor>(menu_id);
+            d.remove::<PressHold>(press_id);
+        });
+    }
+
+    action
+}
+
 /// Message bubble / row in chat detail (with optional image / OG link embed).
 ///
-/// `react_picker_open` highlights the react control while the modal picker
-/// ([`react_picker_overlay`]) is open for this message.
+/// `react_picker_open` highlights the hover / menu react control while the
+/// modal picker ([`react_picker_overlay`]) is open for this message.
 pub fn message_bubble(
     ui: &mut egui::Ui,
     th: &Theme,
     msg: &ChatMessage,
+    reply_parent: Option<&ChatMessage>,
     own_nick: &str,
     media: &mut MediaCache,
+    avatar_url: Option<&str>,
     react_picker_open: bool,
     highlighted: bool,
 ) -> MessageBubbleAction {
@@ -220,6 +1290,8 @@ pub fn message_bubble(
         return action;
     }
 
+    const AVATAR_SIZE: f32 = 36.0;
+
     let body_text = if msg.is_action {
         format!("* {} {}", msg.from, msg.text)
     } else {
@@ -240,62 +1312,112 @@ pub fn message_bubble(
     };
 
     let embed = msg.resolved_embed();
+    let body_line = message_body_line(&body_text, embed.as_ref());
+    let media_caption = media_embed_caption(&body_text, embed.as_ref());
     let can_mutate =
         !msg.id.is_empty() && !msg.id.starts_with("local-") && !msg.id.starts_with("sys-");
     let can_react = can_mutate;
+    let can_reply = can_mutate;
     let can_edit = can_mutate && is_own;
     let can_delete = can_mutate && is_own;
+    let mut body_long_touched = false;
+    let hover_id = Id::new(("msg_hover", msg.id.as_str()));
+    let menu_id = Id::new(("msg_ctx", msg.id.as_str()));
+    let swipe_rect_id = Id::new(("msg_swipe_rect", msg.id.as_str()));
+    let menu_open = ui.memory(|m| m.is_popup_open(menu_id));
+    let show_actions = can_react || can_reply || can_edit || can_delete;
+    let touch_ui =
+        cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen());
+    let prev_swipe_rect = ui.ctx().data(|d| d.get_temp::<Rect>(swipe_rect_id));
+    let (swipe_offset, swipe_reply) = prev_swipe_rect
+        .map(|r| touch_swipe_reply(ui, &msg.id, r, can_reply))
+        .unwrap_or((0.0, false));
+    if swipe_reply {
+        action = MessageBubbleAction::Reply {
+            msgid: msg.id.clone(),
+        };
+    }
+    // Desktop: reserve header space for the fade-in chip. Touch uses long-press
+    // menu only — don't leave a permanent empty gap beside the timestamp.
+    let action_metrics = if show_actions && !touch_ui && !menu_open {
+        Some(message_action_bar_metrics(
+            th,
+            can_react,
+            can_reply,
+            can_edit,
+            can_delete,
+        ))
+    } else {
+        None
+    };
+    let hover_opacity = if action_metrics.is_some() {
+        message_inline_hover_opacity(ui, hover_id, react_picker_open)
+    } else {
+        0.0
+    };
+
+    let mut bubble_rect = Rect::NOTHING;
+    let mut row_resp_rect = Rect::NOTHING;
 
     // Body frame only — reaction chips live *below* so bubble gestures can't
     // steal their clicks (later full-rect interacts would otherwise win).
+    if let Some(parent) = reply_parent {
+        if reply_context_preview(ui, th, parent)
+            && matches!(action, MessageBubbleAction::None)
+        {
+            action = MessageBubbleAction::NavigateTo {
+                msgid: parent.id.clone(),
+            };
+        }
+    }
+
+    if swipe_offset > 0.0 {
+        ui.add_space(swipe_offset);
+    }
     let frame_resp = egui::Frame::new()
         .fill(bg)
         .stroke(stroke)
         .corner_radius(sp.radius_md)
         .inner_margin(egui::Margin::symmetric(sp.md as i8, sp.sm as i8 + 2))
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+            // Use the frame's inner width only — outer width overflows margins and
+            // clips wrapped text on narrow APK screens (same as compose bar).
+            let inner_w = ui.available_width().max(1.0);
+            ui.set_max_width(inner_w);
+            ui.set_min_width(inner_w);
             ui.horizontal(|ui| {
-                if !is_own {
-                    ui.label(
-                        RichText::new(&msg.from)
-                            .size(th.type_scale.caption)
-                            .color(p.accent)
-                            .strong(),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new("You")
-                            .size(th.type_scale.caption)
-                            .color(p.accent)
-                            .strong(),
-                    );
+                ui.spacing_mut().item_spacing.x = sp.sm;
+                // Avatar lives inside the bubble header (next to nick).
+                let av = user_avatar(ui, th, media, &msg.from, avatar_url, AVATAR_SIZE);
+                if av.clicked() {
+                    action = MessageBubbleAction::OpenProfile {
+                        nick: msg.from.clone(),
+                    };
+                }
+                // Button (not Label) so the hit target is reliable on software
+                // GL / remote desktop where Label click sense is easy to miss.
+                let nick_resp = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(&msg.from)
+                                .size(th.type_scale.caption)
+                                .color(p.accent)
+                                .strong(),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::NONE)
+                        .frame(false)
+                        .min_size(Vec2::new(0.0, th.type_scale.caption + 10.0)),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("View profile");
+                if nick_resp.clicked() {
+                    action = MessageBubbleAction::OpenProfile {
+                        nick: msg.from.clone(),
+                    };
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if can_react {
-                        let react_size = (th.type_scale.caption * 1.2).max(16.0);
-                        let react_color = if react_picker_open {
-                            p.accent
-                        } else {
-                            p.text_secondary
-                        };
-                        let (r, react_resp) =
-                            ui.allocate_exact_size(Vec2::splat(react_size + 4.0), Sense::click());
-                        paint_emoji_in(ui, r.shrink(2.0), "😂", react_color);
-                        let react_btn = react_resp
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text("Add reaction");
-                        if react_btn.clicked() {
-                            action = if react_picker_open {
-                                MessageBubbleAction::CloseReactPicker
-                            } else {
-                                MessageBubbleAction::OpenReactPicker {
-                                    msgid: msg.id.clone(),
-                                }
-                            };
-                        }
-                        ui.add_space(sp.xs);
-                    }
+                    // Meta first in RTL → far right; action chip sits to its left.
                     let mut meta = msg.time_label();
                     if msg.is_edited {
                         meta = format!("edited · {meta}");
@@ -304,117 +1426,182 @@ pub fn message_bubble(
                         meta = format!("✓ {meta}");
                     }
                     dim_label(ui, th, &meta);
+                    // Inline action chip: always reserves space inside the bubble
+                    // so hover fades in rather than shifting layout.
+                    if let Some(metrics) = action_metrics {
+                        ui.add_space(4.0);
+                        if let Some(a) = message_inline_action_chip(
+                            ui,
+                            th,
+                            metrics,
+                            hover_opacity,
+                            can_react,
+                            can_reply,
+                            can_edit,
+                            can_delete,
+                            react_picker_open,
+                            msg,
+                        ) {
+                            action = a;
+                        }
+                    }
                 });
             });
             ui.add_space(sp.xs);
-            // Sense on the body — URL tap opens browser; double-click heart;
-            // right-click / long-press opens the context menu.
-            let url_spans = preview::extract_url_spans(&body_text);
-            let mut job = linkify_layout_job(&body_text, &url_spans, th);
-            job.wrap.max_width = ui.available_width();
-            let galley = ui.fonts(|f| f.layout_job(job));
-            let body_resp = ui.add(
-                egui::Label::new(egui::WidgetText::Galley(galley.clone()))
-                    .sense(Sense::click())
-                    .selectable(false),
-            );
-            let galley_origin = body_resp.rect.min;
-            let hovered_url = body_resp.hover_pos().and_then(|pos| {
-                url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
-            });
-            let tip = if let Some(url) = hovered_url.as_deref() {
-                url.to_string()
-            } else if can_edit || can_delete {
-                "Right-click / long-press for edit, delete, react".to_string()
-            } else if can_react {
-                let heart = display_emoji(DEFAULT_REACT_EMOJI);
-                format!("Double-click {heart} · right-click / long-press for more")
+            // Sense on the body — URL tap opens browser; double-click heart.
+            // Hover / right-click action icons are handled on the whole bubble
+            // (below) so selectable text drag-sense can't swallow the clicks.
+            let mut body_resp = None;
+            let mut galley = None;
+            let mut galley_origin = egui::Pos2::ZERO;
+            let mut link_spans = Vec::new();
+            if let MessageBodyLine::Skip = body_line {
+                // URL-only link — OG card below carries the content.
             } else {
-                "Right-click / long-press to copy".into()
-            };
-            let mut body_resp = body_resp.on_hover_text(tip);
-            if hovered_url.is_some() {
-                body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
-            }
-            let mut opened_link = false;
-            if body_resp.clicked() {
-                if let Some(pos) = body_resp.interact_pointer_pos() {
-                    if let Some(url) =
-                        url_at_galley_pos(&galley, galley_origin, &body_text, &url_spans, pos)
-                    {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                        opened_link = true;
-                    }
-                }
-            }
-            if can_react
-                && !opened_link
-                && matches!(action, MessageBubbleAction::None)
-                && body_resp.double_clicked()
-            {
-                action = MessageBubbleAction::ToggleReaction {
-                    msgid: msg.id.clone(),
-                    emoji: DEFAULT_REACT_EMOJI.to_string(),
+                let (visible, cleared) = match &body_line {
+                    MessageBodyLine::Text(t) => (t.as_str(), false),
+                    MessageBodyLine::Cleared => ("[message cleared]", true),
+                    MessageBodyLine::Skip => unreachable!(),
                 };
+                link_spans = preview::extract_message_link_spans(visible);
+                let (resp, laid_out, origin) =
+                    render_message_body(ui, th, visible, cleared, inner_w, &link_spans);
+                body_long_touched = resp.long_touched();
+                galley_origin = origin;
+                galley = laid_out;
+                body_resp = Some(resp);
             }
-            body_resp.context_menu(|ui| {
-                if can_react {
-                    if ui.button("React…").clicked() {
-                        action = if react_picker_open {
-                            MessageBubbleAction::CloseReactPicker
-                        } else {
-                            MessageBubbleAction::OpenReactPicker {
-                                msgid: msg.id.clone(),
-                            }
+            let hovered_link = body_resp.as_ref().and_then(|body_resp| {
+                body_resp.hover_pos().and_then(|pos| {
+                    link_at_galley_pos(
+                        galley.as_ref()?,
+                        galley_origin,
+                        match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => return None,
+                        },
+                        &link_spans,
+                        pos,
+                    )
+                })
+            });
+            if let Some(mut body_resp) = body_resp {
+                let tip = if let Some(link) = hovered_link.as_ref() {
+                    match link {
+                        MessageLinkTarget::Url(url) => url.clone(),
+                        MessageLinkTarget::Channel(ch) => format!("Open {ch}"),
+                    }
+                } else if cfg!(target_os = "android") || ui.input(|i| i.has_touch_screen()) {
+                    if can_edit || can_delete {
+                        "Long-press for React, Reply, Edit, Delete · swipe right to reply".to_string()
+                    } else if can_react {
+                        "Long-press for React, Reply · swipe right to reply".to_string()
+                    } else if can_reply {
+                        "Swipe right to reply".to_string()
+                    } else {
+                        String::new()
+                    }
+                } else if can_edit || can_delete {
+                    "Hover or right-click for React, Edit, Delete".to_string()
+                } else if can_react {
+                    let heart = display_emoji(DEFAULT_REACT_EMOJI);
+                    format!("Double-click {heart} · hover or right-click for React")
+                } else {
+                    String::new()
+                };
+                body_resp = body_resp.on_hover_text(tip);
+                if hovered_link.is_some() {
+                    body_resp = body_resp.on_hover_cursor(CursorIcon::PointingHand);
+                }
+                let mut opened_link = false;
+                if body_resp.clicked() {
+                    if let (Some(pos), Some(galley)) =
+                        (body_resp.interact_pointer_pos(), galley.as_ref())
+                    {
+                        let visible = match &body_line {
+                            MessageBodyLine::Text(t) => t.as_str(),
+                            MessageBodyLine::Cleared => "[message cleared]",
+                            MessageBodyLine::Skip => "",
                         };
-                        ui.close_menu();
+                        if let Some(link) =
+                            link_at_galley_pos(galley, galley_origin, visible, &link_spans, pos)
+                        {
+                            match link {
+                                MessageLinkTarget::Url(url) => {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                }
+                                MessageLinkTarget::Channel(channel) => {
+                                    action = MessageBubbleAction::OpenChannel { channel };
+                                }
+                            }
+                            opened_link = true;
+                        }
                     }
                 }
-                if !msg.text.is_empty() && ui.button("Copy text").clicked() {
-                    ui.ctx().copy_text(msg.text.clone());
-                    ui.close_menu();
-                }
-                if can_edit || can_delete {
-                    ui.separator();
-                }
-                if can_edit && ui.button("Edit").clicked() {
-                    action = MessageBubbleAction::Edit {
+                if can_react
+                    && !opened_link
+                    && matches!(action, MessageBubbleAction::None)
+                    && body_resp.double_clicked()
+                {
+                    action = MessageBubbleAction::ToggleReaction {
                         msgid: msg.id.clone(),
-                        text: msg.text.clone(),
+                        emoji: DEFAULT_REACT_EMOJI.to_string(),
                     };
-                    ui.close_menu();
                 }
-                if can_delete && ui.button("Delete").clicked() {
-                    // Server `+draft/delete` names the edit-chain root.
-                    let delete_id = msg
-                        .edit_of
-                        .clone()
-                        .unwrap_or_else(|| msg.id.clone());
-                    action = MessageBubbleAction::Delete {
-                        msgid: delete_id,
-                    };
-                    ui.close_menu();
-                }
-            });
+            }
 
-            if let Some(embed) = embed {
-                ui.add_space(sp.sm);
+            if let Some(embed) = embed.as_ref() {
                 match embed {
+                    Embed::Video { url } => {
+                        ui.add_space(sp.sm);
+                        inline_video_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        );
+                    }
                     Embed::Image { url } => {
-                        if inline_image_preview(ui, th, media, &url) {
-                            action = MessageBubbleAction::OpenImage { url };
+                        ui.add_space(sp.sm);
+                        if inline_image_preview(
+                            ui,
+                            th,
+                            media,
+                            url,
+                            &msg.id,
+                            media_caption.as_deref(),
+                        ) {
+                            action = MessageBubbleAction::OpenImage {
+                                url: url.clone(),
+                            };
                         }
                     }
                     Embed::Link { url } => {
+                        ui.add_space(sp.sm);
                         let seed = msg.link_meta.clone();
                         // Salt with message id so two bubbles with the same URL
                         // never share an interact / hover widget id.
-                        og_link_preview(ui, th, media, &url, seed.as_ref(), &msg.id);
+                        og_link_preview(ui, th, media, url, seed.as_ref(), &msg.id);
                     }
                 }
             }
-        });
-    let _ = frame_resp;
+                });
+    bubble_rect = frame_resp.response.rect;
+    row_resp_rect = frame_resp.response.rect;
+
+    if swipe_offset > 0.0 {
+        let alpha = (swipe_offset / SWIPE_REPLY_THRESHOLD).clamp(0.0, 1.0);
+        ui.painter().text(
+            Pos2::new(row_resp_rect.left() + 12.0, row_resp_rect.center().y),
+            Align2::LEFT_CENTER,
+            "↩",
+            FontId::proportional(18.0),
+            p.accent.gamma_multiply(alpha),
+        );
+    }
 
     // Reaction tallies (outside body hit-target) — Vidya Lucide icons when mapped.
     if !msg.reactions.is_empty() {
@@ -438,10 +1625,10 @@ pub fn message_bubble(
                     Stroke::new(1.0_f32, p.border_soft)
                 };
                 let shown_emoji = display_emoji(emoji);
+                let mut names: Vec<_> = nicks.iter().cloned().collect();
+                names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                 let tip = {
-                    let mut names: Vec<_> = nicks.iter().cloned().collect();
-                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-                    let shown: Vec<_> = names.into_iter().take(12).collect();
+                    let shown: Vec<_> = names.iter().take(12).cloned().collect();
                     let extra = count.saturating_sub(shown.len());
                     let mut s = format!("reacted with {shown_emoji}: {}", shown.join(", "));
                     if extra > 0 {
@@ -449,6 +1636,7 @@ pub fn message_bubble(
                     }
                     s
                 };
+                let chip_id = ui.id().with("react_chip").with(&msg.id).with(emoji.as_str());
                 let chip = egui::Frame::new()
                     .fill(fill)
                     .stroke(stroke)
@@ -469,15 +1657,26 @@ pub fn message_bubble(
                             }
                         });
                     });
+                let (long_press, suppress_click) = if touch_ui {
+                    touch_long_press(ui, chip_id.with("press"), chip.response.rect)
+                } else {
+                    (false, false)
+                };
+                let popup_id = chip_id.with("reactors");
+                reaction_reactors_popup(
+                    ui,
+                    th,
+                    popup_id,
+                    chip.response.rect,
+                    emoji,
+                    &names,
+                    long_press,
+                );
                 let resp = ui
-                    .interact(
-                        chip.response.rect,
-                        ui.id().with("react_chip").with(&msg.id).with(emoji.as_str()),
-                        Sense::click(),
-                    )
+                    .interact(chip.response.rect, chip_id, Sense::click())
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text(tip);
-                if can_react && resp.clicked() {
+                if can_react && resp.clicked() && !suppress_click && !long_press {
                     action = MessageBubbleAction::ToggleReaction {
                         msgid: msg.id.clone(),
                         emoji: emoji.clone(),
@@ -509,6 +1708,34 @@ pub fn message_bubble(
                 }
             }
         });
+    }
+
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(swipe_rect_id, row_resp_rect));
+
+    // Store bubble rect for next-frame hover hit-testing (inline chip fade).
+    if action_metrics.is_some() {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(message_hover_rect_id(hover_id), bubble_rect);
+        });
+    }
+
+    // Right-click / long-press icon menu (React / Reply / Edit / Delete). Uses raw
+    // secondary clicks so selectable body text doesn't eat the right-click.
+    if let Some(menu_action) = message_context_menu(
+        ui,
+        th,
+        bubble_rect,
+        menu_id,
+        body_long_touched,
+        can_react,
+        can_reply,
+        can_edit,
+        can_delete,
+        react_picker_open,
+        msg,
+    ) {
+        action = menu_action;
     }
 
     action
@@ -590,13 +1817,15 @@ pub fn react_picker_overlay(
                         close = true;
                     }
                     let search_w = (ui.available_width() - 8.0).clamp(100.0, 200.0);
-                    ui.add(
+                    let search_resp = ui.add(
                         egui::TextEdit::singleline(&mut state.react_picker_search)
                             .id_salt(("react_emoji_search", msgid.as_str()))
                             .desired_width(search_w)
                             .hint_text("Search emoji…")
-                            .font(egui::TextStyle::Body),
+                            .font(egui::TextStyle::Body)
+                            .margin(th.text_edit_margin()),
                     );
+                    text_edit_clipboard_menu(ui, th, &search_resp);
                 });
             });
 
@@ -810,12 +2039,146 @@ fn emoji_pick_cell(
     btn.clicked()
 }
 
-/// Max width for inline image / link cards inside a bubble.
-const EMBED_MAX_W: f32 = 280.0;
-const EMBED_MAX_H: f32 = 220.0;
+/// Inline video card width (message bubble is full-width; player stays compact).
+const EMBED_VIDEO_MAX_W: f32 = 280.0;
+/// Cap image height when filling the bubble; video uses 16:9 within its max W.
+const EMBED_MEDIA_MAX_H: f32 = 420.0;
+const EMBED_VIDEO_MAX_H: f32 = 220.0;
 
-/// LayoutJob with http(s) spans styled as accent underlines.
-fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
+/// Letterbox size for an inline chat image (contain — never crop).
+///
+/// Sizes are in egui points: texel counts are divided by `pixels_per_point`
+/// so high-DPI Android layouts match the lightbox viewer.
+fn embed_image_display_size(
+    width: usize,
+    height: usize,
+    max_w: f32,
+    max_h: f32,
+    pixels_per_point: f32,
+) -> Vec2 {
+    let ppp = pixels_per_point.max(1.0);
+    let native_w = (width.max(1) as f32 / ppp).max(1.0);
+    let native_h = (height.max(1) as f32 / ppp).max(1.0);
+    let scale = (max_w / native_w).min(max_h / native_h);
+    Vec2::new(
+        (native_w * scale).max(1.0),
+        (native_h * scale).max(1.0),
+    )
+}
+
+/// Resolved message body line for bubble rendering.
+enum MessageBodyLine {
+    /// Visible text (caption-only for image/video when prose exists).
+    Text(String),
+    /// Whitespace-only / cleared message.
+    Cleared,
+    /// URL-only link message — OG card carries the content.
+    Skip,
+}
+
+/// Caption text for image/video embeds (URL stripped). `None` when URL-only.
+fn media_embed_caption(text: &str, embed: Option<&Embed>) -> Option<String> {
+    let embed = embed?;
+    let url = match embed {
+        Embed::Image { url } | Embed::Video { url } => url.as_str(),
+        Embed::Link { .. } => return None,
+    };
+    let caption = preview::caption_without_embed_url(text, url);
+    if caption.is_empty() {
+        None
+    } else {
+        Some(caption)
+    }
+}
+
+/// Choose visible bubble body text (strip bare media URLs; flag cleared bodies).
+fn message_body_line(text: &str, embed: Option<&Embed>) -> MessageBodyLine {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return MessageBodyLine::Cleared;
+    }
+    if let Some(embed) = embed {
+        if preview::is_embed_only_message(trimmed, Some(embed)) {
+            MessageBodyLine::Skip
+        } else {
+            match embed {
+                Embed::Image { url } | Embed::Video { url } => {
+                    MessageBodyLine::Text(preview::caption_without_embed_url(trimmed, url))
+                }
+                Embed::Link { .. } => MessageBodyLine::Text(trimmed.to_string()),
+            }
+        }
+    } else {
+        MessageBodyLine::Text(trimmed.to_string())
+    }
+}
+
+/// Render a message body line. Plain text uses `RichText` (reliable on GLES);
+/// linkified bodies use `Label::wrap()` (same as search hits) with a separate
+/// galley for URL hit-testing.
+fn render_message_body(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    visible: &str,
+    cleared: bool,
+    wrap_w: f32,
+    link_spans: &[MessageLinkSpan],
+) -> (egui::Response, Option<std::sync::Arc<egui::Galley>>, egui::Pos2) {
+    let p = &th.palette;
+    if link_spans.is_empty() {
+        let resp = if cleared {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.caption)
+                        .color(p.text_secondary)
+                        .italics(),
+                )
+                .wrap(),
+            )
+        } else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(visible)
+                        .size(th.type_scale.body)
+                        .color(p.text),
+                )
+                .wrap(),
+            )
+        };
+        let origin = resp.rect.min;
+        return (resp, None, origin);
+    }
+
+    let mut job = linkify_layout_job(visible, link_spans, th);
+    if cleared {
+        if let Some(section) = job.sections.first_mut() {
+            section.format.color = p.text_secondary;
+            section.format.italics = true;
+        }
+    }
+    let resp = ui.add(
+        egui::Label::new(job)
+            .wrap()
+            .sense(Sense::click())
+            .selectable(false),
+    );
+    let origin = resp.rect.min;
+    // Pre-layout galley at the bubble's inner width for URL tap hit-testing.
+    let mut hit_job = linkify_layout_job(visible, link_spans, th);
+    if cleared {
+        if let Some(section) = hit_job.sections.first_mut() {
+            section.format.color = p.text_secondary;
+            section.format.italics = true;
+        }
+    }
+    hit_job.wrap.max_width = wrap_w;
+    let galley = ui.fonts(|f| f.layout_job(hit_job));
+    (resp, Some(galley), origin)
+}
+
+/// LayoutJob with http(s) and channel spans styled as accent underlines.
+fn linkify_layout_job(text: &str, spans: &[MessageLinkSpan], th: &Theme) -> LayoutJob {
     let p = &th.palette;
     let size = th.type_scale.body;
     let base = TextFormat {
@@ -838,12 +2201,13 @@ fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
 
     let mut cursor = 0usize;
     for span in spans {
-        if span.start > cursor && span.start <= text.len() {
-            job.append(&text[cursor..span.start], 0.0, base.clone());
+        let start = span.start();
+        if start > cursor && start <= text.len() {
+            job.append(&text[cursor..start], 0.0, base.clone());
         }
-        let end = span.end.min(text.len());
-        if span.start < end {
-            job.append(&text[span.start..end], 0.0, link.clone());
+        let end = span.end().min(text.len());
+        if start < end {
+            job.append(&text[start..end], 0.0, link.clone());
         }
         cursor = end;
     }
@@ -855,14 +2219,21 @@ fn linkify_layout_job(text: &str, spans: &[UrlSpan], th: &Theme) -> LayoutJob {
     job
 }
 
-/// URL under a pointer position within a laid-out message body galley, if any.
-fn url_at_galley_pos(
+/// Click target under a pointer position within a laid-out message body galley.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MessageLinkTarget {
+    Url(String),
+    Channel(String),
+}
+
+/// URL or channel under a pointer position within a laid-out message body galley.
+fn link_at_galley_pos(
     galley: &egui::Galley,
     galley_origin: egui::Pos2,
     text: &str,
-    spans: &[UrlSpan],
+    spans: &[MessageLinkSpan],
     pos: egui::Pos2,
-) -> Option<String> {
+) -> Option<MessageLinkTarget> {
     if spans.is_empty() {
         return None;
     }
@@ -874,21 +2245,30 @@ fn url_at_galley_pos(
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(text.len());
-    spans
+    let hit = spans
         .iter()
-        .find(|s| byte_idx >= s.start && byte_idx < s.end)
+        .find(|s| byte_idx >= s.start() && byte_idx < s.end())
         .or_else(|| {
-            // Cursor often lands just after the last glyph of a link.
             let prev = byte_idx.saturating_sub(1);
             spans
                 .iter()
-                .find(|s| byte_idx == s.end && prev >= s.start && prev < s.end)
-        })
-        .map(|s| s.url.clone())
+                .find(|s| byte_idx == s.end() && prev >= s.start() && prev < s.end())
+        });
+    hit.map(|s| match s {
+        MessageLinkSpan::Url(u) => MessageLinkTarget::Url(u.url.clone()),
+        MessageLinkSpan::Channel(c) => MessageLinkTarget::Channel(c.channel.clone()),
+    })
 }
 
 /// Inline chat image. Returns `true` when the user taps to open the lightbox.
-fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, url: &str) -> bool {
+fn inline_image_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) -> bool {
     let p = &th.palette;
     let sp = &th.spacing;
     media.touch_image(url);
@@ -921,28 +2301,260 @@ fn inline_image_preview(ui: &mut egui::Ui, th: &Theme, media: &mut MediaCache, u
                         dim_label(ui, th, "Loading image…");
                     });
                 });
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             false
         }
         Some((tex, width, height)) => {
-            let max_w = ui.available_width().min(EMBED_MAX_W).max(80.0);
-            let scale = (max_w / width.max(1) as f32)
-                .min(EMBED_MAX_H / height.max(1) as f32)
-                .min(1.0);
-            let size = Vec2::new(
-                (width as f32 * scale).max(1.0),
-                (height as f32 * scale).max(1.0),
+            let max_w = ui.available_width().max(80.0);
+            let display = embed_image_display_size(
+                width,
+                height,
+                max_w,
+                EMBED_MEDIA_MAX_H,
+                ui.ctx().pixels_per_point(),
             );
-            let resp = ui
-                .add(
-                    egui::Image::new((tex.id(), size))
-                        .corner_radius(sp.radius_sm)
-                        .sense(Sense::click()),
-                )
+            // Paint like the lightbox: full UV, letterboxed rect. `egui::Image` +
+            // `fit_to_exact_size` with a synthetic `SizedTexture` size can stretch
+            // tall screenshots on high-DPI Android so only a horizontal slice shows.
+            let mut resp = None;
+            ui.horizontal(|ui| {
+                let pad = (ui.available_width() - display.x).max(0.0) * 0.5;
+                if pad > 0.0 {
+                    ui.add_space(pad);
+                }
+                let (rect, r) = ui.allocate_exact_size(display, Sense::click());
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().add(
+                    egui::epaint::RectShape::filled(rect, sp.radius_sm, Color32::WHITE)
+                        .with_texture(tex.id(), uv),
+                );
+                resp = Some(r);
+            });
+            let resp = resp
+                .expect("inline image row")
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Tap to enlarge");
+            media_embed_link_footer(ui, th, url, id_salt, caption);
             resp.clicked()
         }
     }
+}
+
+/// Inline video card via [`vidya::video_player`] (muted H.264-in-MP4).
+///
+/// Unsupported formats (WebM, etc.) keep the play-card look and open externally.
+/// Without the `video-previews` feature (Radicle tip of vidya may lack `video`),
+/// falls back to the open-in-browser card.
+fn inline_video_preview(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    media: &mut MediaCache,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) {
+    #[cfg(not(feature = "video-previews"))]
+    {
+        let _ = media;
+        video_open_fallback(ui, th, url, id_salt);
+        media_embed_link_footer(ui, th, url, id_salt, caption);
+        return;
+    }
+
+    #[cfg(feature = "video-previews")]
+    {
+        use vidya::{video_player, VideoPlayerAction, VideoPlayerOpts, VideoPlayerState};
+
+        media.touch_video(url);
+
+        let sp = &th.spacing;
+        // Compact player — bubble is full-width; don't stretch the video surface.
+        let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+        let max_h = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+
+        match media.videos.get(url) {
+            Some(crate::state::VideoState::Loading) | None => {
+                egui::Frame::new()
+                    .fill(th.palette.headerbar_bg)
+                    .corner_radius(sp.radius_sm)
+                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(max_w);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(sp.sm);
+                            dim_label(ui, th, "Loading video…");
+                        });
+                    });
+                media_embed_link_footer(ui, th, url, id_salt, caption);
+                return;
+            }
+            Some(crate::state::VideoState::Failed) => {
+                // Fall back to the open-in-browser card without bytes.
+                video_open_fallback(ui, th, url, id_salt);
+                return;
+            }
+            Some(crate::state::VideoState::Ready(_)) => {}
+        }
+
+        // Clone Arc so we can mutably borrow the player map separately.
+        let bytes = match media.videos.get(url) {
+            Some(crate::state::VideoState::Ready(b)) => b.clone(),
+            _ => return,
+        };
+
+        // Per-bubble player state — same URL in two messages must not share playhead.
+        let player_key = format!("{url}\0{id_salt}");
+        let player = media
+            .video_players
+            .entry(player_key)
+            .or_insert_with(VideoPlayerState::new);
+        player.load_bytes(ui.ctx(), (url, id_salt), bytes);
+
+        let opts = VideoPlayerOpts {
+            max_width: max_w,
+            max_height: max_h,
+            title: caption
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            open_url_on_unsupported: Some(url.to_string()),
+        };
+        let playing = player.is_playing();
+        let (resp, action) = video_player(ui, th, player, &opts);
+        // High-contrast play affordance — theme accent blends into solid-blue
+        // first frames; paint a dark circle + white triangle on top.
+        if !playing {
+            paint_video_play_affordance(ui, resp.rect);
+        }
+        if action == VideoPlayerAction::OpenExternally {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+        media_embed_link_footer(ui, th, url, id_salt, caption);
+    }
+}
+
+/// Dark play circle that stays visible on blue / accent-tinted video frames.
+fn paint_video_play_affordance(ui: &egui::Ui, rect: Rect) {
+    if !rect.is_positive() {
+        return;
+    }
+    let play_r = (rect.height() * 0.18).clamp(18.0, 32.0);
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.circle_filled(
+        center,
+        play_r,
+        Color32::from_rgba_unmultiplied(20, 20, 24, 220),
+    );
+    painter.circle_stroke(
+        center,
+        play_r,
+        Stroke::new(1.5_f32, Color32::from_rgb(245, 245, 250)),
+    );
+    let tri_w = play_r * 0.7;
+    let tri_h = play_r * 0.85;
+    let tip = Pos2::new(center.x + tri_w * 0.55, center.y);
+    let top = Pos2::new(center.x - tri_w * 0.45, center.y - tri_h * 0.5);
+    let bot = Pos2::new(center.x - tri_w * 0.45, center.y + tri_h * 0.5);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, bot, top],
+        Color32::from_rgb(255, 255, 255),
+        Stroke::NONE,
+    ));
+}
+
+/// Play-card that only opens the URL (fetch/decode failed).
+fn video_open_fallback(ui: &mut egui::Ui, th: &Theme, url: &str, id_salt: &str) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+
+    let max_w = ui.available_width().min(EMBED_VIDEO_MAX_W).max(120.0);
+    let height = (max_w * 9.0 / 16.0).min(EMBED_VIDEO_MAX_H).max(72.0);
+    let size = Vec2::new(max_w, height);
+    let card_id = ui.id().with("video_fallback").with(id_salt);
+
+    let frame_resp = egui::Frame::new()
+        .fill(Color32::from_rgb(12, 12, 14))
+        .stroke(Stroke::new(1.0_f32, p.border_soft))
+        .corner_radius(sp.radius_sm)
+        .show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            ui.painter()
+                .rect_filled(rect, sp.radius_sm, Color32::from_rgb(18, 18, 22));
+            paint_video_play_affordance(ui, rect);
+            let name = preview::display_filename(url);
+            let foot_h = (th.type_scale.caption + 10.0).min(height * 0.28);
+            let foot = Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - foot_h),
+                rect.right_bottom(),
+            );
+            let r = sp.radius_sm as u8;
+            ui.painter().rect_filled(
+                foot,
+                egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: r,
+                    se: r,
+                },
+                Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+            );
+            ui.painter().text(
+                Pos2::new(foot.left() + 8.0, foot.center().y),
+                Align2::LEFT_CENTER,
+                name,
+                FontId::proportional(th.type_scale.caption),
+                Color32::from_rgb(230, 230, 235),
+            );
+        });
+
+    let resp = ui
+        .interact(frame_resp.response.rect, card_id, Sense::click())
+        .on_hover_text("Open video")
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if resp.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+}
+
+/// Clickable full URL under inline image/video embeds (optional caption above).
+fn media_embed_link_footer(
+    ui: &mut egui::Ui,
+    th: &Theme,
+    url: &str,
+    id_salt: &str,
+    caption: Option<&str>,
+) {
+    let p = &th.palette;
+    let sp = &th.spacing;
+    let link_line = url.trim();
+
+    ui.add_space(sp.xs);
+    ui.push_id(id_salt, |ui| {
+        if let Some(caption) = caption.filter(|s| !s.is_empty()) {
+            ui.label(
+                RichText::new(caption)
+                    .size(th.type_scale.caption)
+                    .color(p.text)
+                    .strong(),
+            );
+        }
+        let resp = ui
+            .add(
+                egui::Label::new(
+                    RichText::new(link_line)
+                        .size(th.type_scale.caption)
+                        .color(p.accent),
+                )
+                .wrap()
+                .sense(Sense::click()),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Open in browser");
+        if resp.clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    });
 }
 
 fn og_link_preview(
@@ -1139,7 +2751,8 @@ fn link_fallback_row(ui: &mut egui::Ui, th: &Theme, url: &str, note: &str) {
 /// Full-screen image lightbox: large preview + link to open the original on the web.
 ///
 /// Call once per frame while `state.image_lightbox` is set. Handles Esc, backdrop
-/// tap, and Close. "View original" opens the URL in the system browser.
+/// tap, and Close. Clicking the large image (or "View original") opens the URL in
+/// the system browser.
 pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppState) {
     let Some(url) = state.image_lightbox.clone() else {
         return;
@@ -1156,16 +2769,30 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
         close = true;
     }
 
-    // Keep the decoded image warm while the lightbox is open.
+    // Keep the decoded images warm while the lightbox is open.
     state.media.touch_image(&url);
+    state.media.touch_image_full(&url);
 
-    let ready = match state.media.images.get_mut(url.as_str()) {
+    // Prefer the full-resolution fetch; fall back to the (downscaled) inline
+    // thumb while it is still loading or if it failed.
+    let ready = match state.media.full_images.get_mut(url.as_str()) {
         Some(ImageState::Ready(pixels)) => {
             let tex = pixels.texture(ctx, &url).clone();
             Some((tex, pixels.width, pixels.height))
         }
-        _ => None,
+        _ => match state.media.images.get_mut(url.as_str()) {
+            Some(ImageState::Ready(pixels)) => {
+                let tex = pixels.texture(ctx, &url).clone();
+                Some((tex, pixels.width, pixels.height))
+            }
+            _ => None,
+        },
     };
+
+    // Area paints over the full screen (including under system bars). Pad
+    // chrome / image by measured status + nav insets so Close / View original
+    // clear the Android clock / cutout and the image clears the gesture bar.
+    let safe = system_chrome(ctx);
 
     egui::Area::new(egui::Id::new("image_lightbox"))
         .order(egui::Order::Foreground)
@@ -1176,18 +2803,21 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
             ui.painter()
                 .rect_filled(full, 0.0, Color32::from_black_alpha(220));
 
-            // Top chrome: Close (left) + View original (right).
+            // Top chrome: Close (left) + View original (right), below status bar.
             let chrome_h = (sp.control_height + sp.md * 2.0).max(48.0);
             let chrome = egui::Rect::from_min_size(
-                full.min + Vec2::new(sp.md, sp.md),
+                full.min + Vec2::new(sp.md, safe.top + sp.md),
                 Vec2::new((full.width() - sp.md * 2.0).max(1.0), chrome_h),
             );
 
-            // Image area: remaining viewport below chrome, with padding.
+            // Image area: remaining viewport below chrome, with padding + nav inset.
             let img_pad = sp.md;
             let img_area = egui::Rect::from_min_max(
                 egui::pos2(full.left() + img_pad, chrome.bottom() + sp.sm),
-                egui::pos2(full.right() - img_pad, full.bottom() - img_pad),
+                egui::pos2(
+                    full.right() - img_pad,
+                    full.bottom() - img_pad - safe.bottom,
+                ),
             );
 
             let mut hit_chrome = false;
@@ -1247,12 +2877,20 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 Some((tex, width, height)) => {
                     // Letterbox into img_area — never stretch. (`ui.put` uses a
                     // justified layout that expands the widget to the full rect.)
+                    //
+                    // Size in *points* from texel count ÷ pixels_per_point so a
+                    // high-DPI screen doesn't implicitly upscale (and blur) a
+                    // texture that already fills the physical viewport.
+                    let ppp = ui.ctx().pixels_per_point().max(1.0);
                     let max_w = img_area.width().max(1.0);
                     let max_h = img_area.height().max(1.0);
                     let nw = width.max(1) as f32;
                     let nh = height.max(1) as f32;
-                    let scale = (max_w / nw).min(max_h / nh).min(3.0);
-                    let size = Vec2::new((nw * scale).max(1.0), (nh * scale).max(1.0));
+                    let native_w = (nw / ppp).max(1.0);
+                    let native_h = (nh / ppp).max(1.0);
+                    // Fit to the viewer; allow modest upscale for tiny embeds only.
+                    let scale = (max_w / native_w).min(max_h / native_h).min(1.5);
+                    let size = Vec2::new((native_w * scale).max(1.0), (native_h * scale).max(1.0));
                     img_rect = egui::Rect::from_center_size(img_area.center(), size);
                     let uv = egui::Rect::from_min_max(
                         egui::pos2(0.0, 0.0),
@@ -1279,13 +2917,24 @@ pub fn image_lightbox_overlay(ctx: &egui::Context, th: &Theme, state: &mut AppSt
                 }
             }
 
-            // Backdrop tap (outside chrome / image) dismisses.
-            if backdrop.clicked() && !hit_chrome {
-                let on_image = backdrop
-                    .interact_pointer_pos()
+            // Image tap opens the original in the browser; tap outside chrome /
+            // image dismisses the lightbox.
+            if !hit_chrome {
+                let on_image = ui
+                    .input(|i| i.pointer.hover_pos())
                     .is_some_and(|pos| img_rect.contains(pos));
-                if !on_image {
-                    close = true;
+                if on_image {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                if backdrop.clicked() {
+                    let clicked_image = backdrop
+                        .interact_pointer_pos()
+                        .is_some_and(|pos| img_rect.contains(pos));
+                    if clicked_image {
+                        open_web = true;
+                    } else {
+                        close = true;
+                    }
                 }
             }
         });
@@ -1307,4 +2956,88 @@ pub fn empty_state(ui: &mut egui::Ui, th: &Theme, title: &str, blurb: &str) {
         ui.set_max_width((ui.available_width() - 24.0).max(120.0));
         dim_label(ui, th, blurb);
     });
+}
+
+#[cfg(test)]
+mod embed_image_tests {
+    use super::*;
+
+    #[test]
+    fn tall_image_shrinks_width_instead_of_cropping() {
+        // Phone screenshot aspect — must not fill bubble width at max height.
+        let size = embed_image_display_size(1080, 5000, 360.0, 420.0, 3.0);
+        assert!(
+            size.x < 360.0,
+            "portrait preview should letterbox horizontally: {size:?}"
+        );
+        assert!((size.y - 420.0).abs() < 0.01, "height should hit cap: {size:?}");
+        let aspect = size.x / size.y;
+        let native_aspect = (1080.0 / 3.0) / (5000.0 / 3.0);
+        assert!((aspect - native_aspect).abs() < 0.001, "aspect preserved");
+    }
+
+    #[test]
+    fn wide_image_fills_width() {
+        let size = embed_image_display_size(1600, 900, 360.0, 420.0, 2.0);
+        assert!((size.x - 360.0).abs() < 0.01);
+        assert!(size.y < 420.0);
+    }
+
+    #[test]
+    fn pixels_per_point_does_not_change_aspect() {
+        let a = embed_image_display_size(800, 2400, 320.0, 420.0, 1.0);
+        let b = embed_image_display_size(800, 2400, 320.0, 420.0, 3.0);
+        assert!((a.x / a.y - b.x / b.y).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod day_separator_tests {
+    use super::format_day_separator;
+    use chrono::{Duration, Local, TimeZone};
+
+    #[test]
+    fn today_and_yesterday_labels() {
+        let now = Local::now();
+        assert_eq!(format_day_separator(now), "Today");
+        assert_eq!(format_day_separator(now - Duration::days(1)), "Yesterday");
+    }
+
+    #[test]
+    fn older_day_uses_month_day_year() {
+        let ts = Local
+            .with_ymd_and_hms(2024, 3, 5, 14, 30, 0)
+            .single()
+            .expect("valid local datetime");
+        let label = format_day_separator(ts);
+        assert_eq!(label, "March 5, 2024");
+        assert!(!label.contains("Today"));
+        assert!(!label.contains("Yesterday"));
+    }
+}
+
+#[cfg(test)]
+mod text_edit_clipboard_menu_tests {
+    /// Hold-to-paste on APK needs these viewport commands so eframe emits
+    /// Cut/Copy/`Event::Paste` after the JNI clipboard hooks run.
+    #[test]
+    fn clipboard_menu_viewport_commands_match_eframe_actions() {
+        use eframe::egui::ViewportCommand;
+        let cmds = [
+            ViewportCommand::RequestCut,
+            ViewportCommand::RequestCopy,
+            ViewportCommand::RequestPaste,
+        ];
+        // Discriminants must stay distinct — a typo collapsing Paste→Copy would
+        // silently break APK hold-to-paste while still compiling.
+        assert_ne!(
+            std::mem::discriminant(&cmds[0]),
+            std::mem::discriminant(&cmds[2])
+        );
+        assert_ne!(
+            std::mem::discriminant(&cmds[1]),
+            std::mem::discriminant(&cmds[2])
+        );
+        assert!(matches!(cmds[2], ViewportCommand::RequestPaste));
+    }
 }

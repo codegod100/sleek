@@ -60,7 +60,12 @@ ensure_nix_flakes() {
   # Process env — works even if conf files are unwritable this session.
   # Stock Nix reads experimental-features; Determinate also honors
   # extra-experimental-features. Set both so neither needs CLI flags.
-  local _want=$'experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes\naccept-flake-config = true'
+  #
+  # Do not force accept-flake-config=true here: on multi-user Determinate Nix
+  # (trusted-users = root), accepting flake nixConfig re-applies restricted
+  # trusted-public-keys and prints warnings. Cachix pull is configured via
+  # trusted-substituters in nix.custom.conf (codespace-bootstrap.sh).
+  local _want=$'experimental-features = nix-command flakes\nextra-experimental-features = nix-command flakes'
   if [[ -z "${NIX_CONFIG:-}" ]]; then
     export NIX_CONFIG="$_want"
   else
@@ -73,13 +78,11 @@ ensure_nix_flakes() {
   # User conf
   _sleek_upsert_nix_conf "${HOME}/.config/nix/nix.conf" "experimental-features" "nix-command flakes" || true
   _sleek_upsert_nix_conf "${HOME}/.config/nix/nix.conf" "extra-experimental-features" "nix-command flakes" || true
-  _sleek_upsert_nix_conf "${HOME}/.config/nix/nix.conf" "accept-flake-config" "true" || true
 
   # System conf (Codespaces with passwordless sudo)
   if [[ -w /etc/nix/nix.conf ]] || _sleek_have_sudo || [[ "$(id -u)" -eq 0 ]]; then
     _sleek_upsert_nix_conf /etc/nix/nix.conf "experimental-features" "nix-command flakes" || true
     _sleek_upsert_nix_conf /etc/nix/nix.conf "extra-experimental-features" "nix-command flakes" || true
-    _sleek_upsert_nix_conf /etc/nix/nix.conf "accept-flake-config" "true" || true
   fi
 }
 
