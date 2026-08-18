@@ -24,6 +24,11 @@ result-*
 /flatpak/export-repo/
 /flatpak/.flatpak-builder/
 /flatpak/*.flatpak
+# flatpak.bzl's flatpak_genrule scratch state — repo_relative_root = True
+# means a local `buck2 build //:sleek-flatpak` writes these directly into
+# the repo root, not an isolated sandbox dir.
+/flatpak-work/
+/sleek-host-bin
 # Singularity/Apptainer image output of `nix build .#sif` (flake.nix's
 # sleek-sif target) — 600MB+, a local build artifact, never committed.
 /sleek.sif
