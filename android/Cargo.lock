@@ -8180,6 +8180,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vidya"
 version = "0.1.0"
+source = "git+https://github.com/codegod100/vidya?rev=1959e30#1959e3009b0d1b902e8f61787b9e1b0b8c5909e8"
 dependencies = [
  "egui",
  "png 0.17.16",

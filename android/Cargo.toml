@@ -43,7 +43,7 @@ default = []
 #   default = ["video-previews"]
 
 [dependencies]
-vidya = { path = "../patched-crates/vidya" }
+vidya = { git = "https://github.com/codegod100/vidya", rev = "1959e30" }
 # Guest IRC + freeq events. Prefer aws-lc-rs to match moq-native / iroh
 # (aws-lc-sys is already required). Note: `ring` still builds via quinn /
 # rustls-webpki defaults — this only avoids enabling rustls' ring *provider*
