@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -55,6 +56,22 @@ public class SleekActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         applyEdgeToEdge();
         captureIntent(getIntent());
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // NativeActivity receives hardware / adb keyevents; the hidden IME EditText
+        // does not. Forward DEL so compose backspace works outside Gboard IC.
+        if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+            int code = event.getKeyCode();
+            if (code == KeyEvent.KEYCODE_DEL || code == KeyEvent.KEYCODE_FORWARD_DEL) {
+                android.util.Log.i("SleekIme", "SleekActivity dispatchKeyEvent code=" + code);
+                if (SleekIme.onHostKeyDelete()) {
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override

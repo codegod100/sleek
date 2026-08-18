@@ -1,0 +1,10 @@
+# system-deps (pkg_config) wiring — see libspa/fixups.toml's comment for
+# the shared explanation. Also needs LIBCLANG_PATH and
+# BINDGEN_EXTRA_CLANG_ARGS: this crate's build.rs generates FFI bindings
+# via `bindgen`, which dlopens libclang.so at runtime (LIBCLANG_PATH) but
+# doesn't auto-detect its own resource-dir the way a real `clang` binary
+# would, so headers using stdbool.h/stddef.h/etc fail to parse without an
+# explicit -I (BINDGEN_EXTRA_CLANG_ARGS) — see toolchains/BUCK's
+# `libclang`/`clang-resource-dir` targets for where both come from.
+[buildscript.run]
+env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:pipewire)/lib/pkgconfig", LIBCLANG_PATH = "$(location toolchains//:libclang)", BINDGEN_EXTRA_CLANG_ARGS = "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include" }

@@ -2,5 +2,35 @@
 **/target/
 *.apk
 .direnv/
+.radicle/
 result
 result-*
+.buildkite/.issue-poll-state
+/host/gleam/slash/build/
+# Staging tree used by scripts/sync-flake-path-deps.sh
+/.deps-sync/
+/host/target/
+/buck-out/
+/host/cargo-build.log
+/android/cargo-build.log
+/.buckconfig.local
+# pixi dev-shell env (pixi.toml) — reproduced from pixi.lock, not committed
+.pixi/
+# devenv's local nix-eval cache/state (devenv.nix) — same role as .direnv/
+.devenv/
+# flatpak-builder scratch state + bundle output (flatpak/uk.nandi.sleek.json
+# is the only committed file in flatpak/)
+/flatpak/build-dir/
+/flatpak/export-repo/
+/flatpak/.flatpak-builder/
+/flatpak/*.flatpak
+# flatpak.bzl's flatpak_genrule scratch state — repo_relative_root = True
+# means a local `buck2 build //:sleek-flatpak` writes these directly into
+# the repo root, not an isolated sandbox dir.
+/flatpak-work/
+/sleek-host-bin
+# Singularity/Apptainer image output of `nix build .#sif` (flake.nix's
+# sleek-sif target) — 600MB+, a local build artifact, never committed.
+/sleek.sif
+/result-sif
+.wrangler/

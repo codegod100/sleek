@@ -1,12 +1,13 @@
 //! Native MoQ media plane for freeq AV calls.
 //!
-//! Publishes mic Opus (+ optional camera H.264 on desktop) to the SFU and
-//! plays remote audio/video via `iroh-live` + `moq-native` — same stack as
-//! freeq-av / freeq-sdk-ffi.
+//! Publishes mic Opus (+ optional camera H.264) to the SFU and plays remote
+//! audio/video via `iroh-live` + `moq-native` — same stack as freeq-av /
+//! freeq-sdk-ffi.
 //!
-//! Android: mic/speaker via cpal aaudio; local camera publish is not wired
-//! yet (needs CameraX / MediaCodec JNI, not cargo-apk NativeActivity). Remote
-//! H.264 still decodes in-software when peers publish video.
+//! Android: mic/speaker via cpal aaudio; local camera via Camera2
+//! (`CameraCapture` Java helper in APK `classes.dex`) pushing NV12 into a
+//! [`VideoSource`]. Remote H.264 decodes in-software (or MediaCodec when
+//! available) when peers publish video.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,10 +15,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use iroh_live::media::{
     audio_backend::AudioBackend,
-    codec::AudioCodec,
-    format::AudioPreset,
+    codec::{AudioCodec, VideoCodec},
+    format::{AudioPreset, VideoPreset},
     publish::LocalBroadcast,
     subscribe::RemoteBroadcast,
+    traits::VideoSource,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -29,9 +31,6 @@ use crate::av::{
 use iroh_live::media::{
     audio_backend::{AudioBackendOpts, DeviceId},
     capture::{CameraCapturer, CameraConfig, CameraSelector},
-    codec::VideoCodec,
-    format::VideoPreset,
-    traits::VideoSource,
 };
 
 // ── Device enumeration (desktop) ───────────────────────────────────────────
@@ -56,8 +55,8 @@ fn is_virtual_camera(name: &str, id: &str) -> bool {
         || s.contains("v4l2loopback")
 }
 
-/// List cameras (desktop). Empty on Android / when capture is unavailable.
-/// Hardware cameras first; virtual (OBS/loopback) last. Labels include device id.
+/// List cameras. Hardware first; virtual (OBS/loopback) last on desktop.
+/// On Android, front-facing cameras are listed first.
 pub fn list_cameras() -> Vec<MediaDevice> {
     #[cfg(not(target_os = "android"))]
     {
@@ -92,7 +91,15 @@ pub fn list_cameras() -> Vec<MediaDevice> {
     }
     #[cfg(target_os = "android")]
     {
-        Vec::new()
+        crate::android_camera::list_cameras()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, name))| MediaDevice {
+                id,
+                name,
+                is_default: i == 0,
+            })
+            .collect()
     }
 }
 
@@ -339,7 +346,8 @@ pub enum MediaControl {
 #[derive(Debug, Clone)]
 pub enum AvMediaUpdate {
     /// MoQ connected and publishing. `has_camera` is true when a capture
-    /// device was opened and a video track is advertised.
+    /// device is available for this call (opened now, or listable so the
+    /// user can turn the camera on later without holding the device).
     Live {
         video: VideoFrameStore,
         has_camera: bool,
@@ -490,7 +498,8 @@ impl AvMediaSession {
             }
         }
         self.abort.take();
-        self.video.clear();
+        // Do not clear `video` here — the UI may still be painting the last
+        // frames from this Arc while MoQ re-dials. Call end uses clear_av_media.
         self.mic_level.clear();
     }
 
@@ -501,7 +510,7 @@ impl AvMediaSession {
             task.abort();
         }
         self.abort.take();
-        self.video.clear();
+        // Keep last frames for reconnect UI; see stop_and_wait.
         self.mic_level.clear();
     }
 }
@@ -681,92 +690,103 @@ async fn run_media(
     // Local-preview frame counter (diagnostics).
     let local_frame_count = Arc::new(AtomicU64::new(0));
 
-    // Camera: desktop only (V4L2 / platform capture). Android NativeActivity
-    // has no CameraX bridge yet — audio-only publish; remote video still works.
+    // Camera: desktop V4L2 / platform capture; Android Camera2 → NV12 push source.
+    // Only claim hardware while publish is on — soft-gating alone keeps STREAMON /
+    // Camera2 repeating and lights the privacy LED even when the UI says off.
+    let mut preferred_camera_id = config.camera_id.clone();
+    let devices_present = camera_devices_present();
     log::info!(
-        "av-media: camera_enabled={} preferred_id={:?}",
+        "av-media: camera_enabled={} preferred_id={:?} devices_present={devices_present}",
         camera_enabled.load(Ordering::Relaxed),
-        config.camera_id
+        preferred_camera_id
     );
-    #[cfg(not(target_os = "android"))]
-    let has_camera = {
-        match open_camera_with_fallback(config.camera_id.as_deref()) {
-            Ok((cam, opened_id)) => {
-                let cam_name = cam.name().to_string();
-                let gated = GatedCameraSource {
-                    inner: cam,
-                    enabled: camera_enabled.clone(),
-                    preview: video_store.clone(),
-                    frame_count: local_frame_count.clone(),
-                };
-                match broadcast
-                    .video()
-                    .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
-                {
-                    Ok(()) => {
-                        // Re-assert publish intent after a successful open. A prior
-                        // failed dial may have stored false; join prefs say on.
-                        if config.camera_enabled {
-                            camera_enabled.store(true, Ordering::Relaxed);
-                        }
-                        log::info!(
-                            "av-media: camera open id={opened_id:?} name={cam_name}, \
-                             publishing H.264 360p (publish={})",
-                            camera_enabled.load(Ordering::Relaxed)
-                        );
-                        true
+    #[cfg(target_os = "android")]
+    let mut android_camera_guard: Option<crate::android_camera::CameraCaptureGuard> = None;
+
+    let mut preview_keepalive = None;
+    let mut preview_pump: Option<std::thread::JoinHandle<()>> = None;
+    let mut camera_open = false;
+
+    let has_camera = if should_claim_camera_hardware(config.camera_enabled) {
+        #[cfg(not(target_os = "android"))]
+        {
+            match attach_desktop_camera(
+                preferred_camera_id.as_deref(),
+                &broadcast,
+                camera_enabled.clone(),
+                video_store.clone(),
+                local_frame_count.clone(),
+            ) {
+                Ok(opened_id) => {
+                    if let Some(id) = opened_id {
+                        preferred_camera_id = Some(id);
                     }
-                    Err(e) => {
-                        log::warn!("av-media: video set_source failed (audio-only): {e}");
-                        camera_enabled.store(false, Ordering::Relaxed);
-                        false
-                    }
+                    camera_enabled.store(true, Ordering::Relaxed);
+                    preview_keepalive = hold_preview_keepalive(&broadcast);
+                    preview_pump = spawn_local_preview_pump(
+                        &broadcast,
+                        video_store.clone(),
+                        camera_enabled.clone(),
+                    );
+                    camera_open = true;
+                    true
+                }
+                Err(e) => {
+                    log::warn!("av-media: no camera ({e}); audio-only");
+                    camera_enabled.store(false, Ordering::Relaxed);
+                    // Keep the in-call toggle when devices still enumerate
+                    // (busy / transient open failure).
+                    camera_devices_present()
                 }
             }
-            Err(e) => {
-                log::warn!("av-media: no camera ({e}); audio-only");
-                camera_enabled.store(false, Ordering::Relaxed);
-                false
+        }
+        #[cfg(target_os = "android")]
+        {
+            match open_android_camera(
+                preferred_camera_id.as_deref(),
+                &broadcast,
+                camera_enabled.clone(),
+                video_store.clone(),
+                local_frame_count.clone(),
+                true,
+            ) {
+                Ok(guard) => {
+                    android_camera_guard = Some(guard);
+                    preview_keepalive = hold_preview_keepalive(&broadcast);
+                    preview_pump = spawn_local_preview_pump(
+                        &broadcast,
+                        video_store.clone(),
+                        camera_enabled.clone(),
+                    );
+                    camera_open = true;
+                    true
+                }
+                Err(e) => {
+                    log::warn!("av-media: Android camera unavailable ({e}); audio-only");
+                    camera_enabled.store(false, Ordering::Relaxed);
+                    // Permission race / busy: still report devices so the
+                    // in-call toggle can retry after CAMERA is granted.
+                    camera_devices_present()
+                }
             }
         }
-    };
-    #[cfg(target_os = "android")]
-    let has_camera = {
+    } else {
+        // Pref off: leave the device closed so the privacy light stays dark.
+        // Still report availability when cameras enumerate so the in-call
+        // toggle remains usable.
         camera_enabled.store(false, Ordering::Relaxed);
-        log::info!("av-media: Android — audio-only publish (no local camera yet)");
-        false
-    };
-
-    // Hold a LocalBroadcast::preview() track so SharedVideoSource stays unparked
-    // even with no remote H.264 subscriber. GatedCameraSource also tees raw
-    // frames into `__local__` on the capture thread; we additionally pump the
-    // preview track into the store so self-view works even if the tee path
-    // misses (rgba convert panic, gated race, etc.).
-    #[cfg(not(target_os = "android"))]
-    let mut preview_keepalive = if has_camera {
-        let t = broadcast.preview();
-        if t.is_some() {
-            log::info!("av-media: local preview keepalive held (SharedVideoSource unparked)");
+        if devices_present {
+            log::info!(
+                "av-media: camera present but publish off — device left closed \
+                 (privacy light off until camera is turned on)"
+            );
         } else {
-            log::warn!("av-media: broadcast.preview() returned None after set_source");
+            log::info!("av-media: no cameras listed; audio-only");
         }
-        t
-    } else {
-        None
+        devices_present
     };
-    #[cfg(target_os = "android")]
-    let mut preview_keepalive = None::<()>;
+    let mut has_camera = has_camera;
     let _ = &mut preview_keepalive;
-
-    // Second preview handle → dedicated pump into VideoFrameStore.
-    #[cfg(not(target_os = "android"))]
-    let mut preview_pump: Option<std::thread::JoinHandle<()>> = if has_camera {
-        spawn_local_preview_pump(&broadcast, video_store.clone(), camera_enabled.clone())
-    } else {
-        None
-    };
-    #[cfg(target_os = "android")]
-    let mut preview_pump = None::<std::thread::JoinHandle<()>>;
 
     let origin = moq_lite::Origin::produce();
     origin.publish_broadcast(&our_broadcast, broadcast.consume());
@@ -848,8 +868,9 @@ async fn run_media(
                     }
                     None => {
                         let path_str = path.to_string();
-                        let key = path_key(&path_str).to_string();
-                        store_for_subs.remove(&key);
+                        // Keep last frame visible — SFU unannounce/reannounce
+                        // blips used to clear the tile and flash black. Stale
+                        // frames are wiped on call end via clear_av_media.
                         if let Some(h) = tap_keys.remove(&path_str) {
                             h.abort();
                         }
@@ -879,7 +900,117 @@ async fn run_media(
                     }
                     MediaControl::SetCameraEnabled(en) => {
                         camera_enabled.store(en, Ordering::Relaxed);
-                        if !en {
+                        if en {
+                            if camera_open {
+                                log::info!("av-media: camera already open (publish on)");
+                            } else {
+                                #[cfg(not(target_os = "android"))]
+                                {
+                                    match attach_desktop_camera(
+                                        preferred_camera_id.as_deref(),
+                                        &_broadcast,
+                                        camera_enabled.clone(),
+                                        video_store.clone(),
+                                        local_frame_count.clone(),
+                                    ) {
+                                        Ok(opened_id) => {
+                                            if let Some(id) = opened_id {
+                                                preferred_camera_id = Some(id);
+                                            }
+                                            preview_keepalive = hold_preview_keepalive(&_broadcast);
+                                            preview_pump = spawn_local_preview_pump(
+                                                &_broadcast,
+                                                video_store.clone(),
+                                                camera_enabled.clone(),
+                                            );
+                                            camera_open = true;
+                                            has_camera = true;
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera: true,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            log::warn!("av-media: enable camera failed: {e}");
+                                            camera_enabled.store(false, Ordering::Relaxed);
+                                            has_camera = camera_devices_present();
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                    }
+                                }
+                                #[cfg(target_os = "android")]
+                                {
+                                    match open_android_camera(
+                                        preferred_camera_id.as_deref(),
+                                        &_broadcast,
+                                        camera_enabled.clone(),
+                                        video_store.clone(),
+                                        local_frame_count.clone(),
+                                        true,
+                                    ) {
+                                        Ok(guard) => {
+                                            android_camera_guard = Some(guard);
+                                            preview_keepalive = hold_preview_keepalive(&_broadcast);
+                                            preview_pump = spawn_local_preview_pump(
+                                                &_broadcast,
+                                                video_store.clone(),
+                                                camera_enabled.clone(),
+                                            );
+                                            camera_open = true;
+                                            has_camera = true;
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera: true,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "av-media: enable Android camera failed: {e}"
+                                            );
+                                            camera_enabled.store(false, Ordering::Relaxed);
+                                            has_camera = camera_devices_present();
+                                            on_status(AvMediaUpdate::Live {
+                                                video: video_store.clone(),
+                                                has_camera,
+                                                mic_level: mic_level.clone(),
+                                                has_mic,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else if camera_open {
+                            release_local_camera(
+                                &_broadcast,
+                                &mut preview_keepalive,
+                                &mut preview_pump,
+                                &video_store,
+                                #[cfg(target_os = "android")]
+                                &mut android_camera_guard,
+                            );
+                            camera_open = false;
+                            local_frame_count.store(0, Ordering::Relaxed);
+                            // Keep the toggle: device is available, just not held.
+                            has_camera = camera_devices_present() || has_camera;
+                            log::info!(
+                                "av-media: camera released (publish off; privacy light off)"
+                            );
+                            on_status(AvMediaUpdate::Live {
+                                video: video_store.clone(),
+                                has_camera,
+                                mic_level: mic_level.clone(),
+                                has_mic,
+                            });
+                        } else {
                             video_store.remove(LOCAL_PREVIEW_KEY);
                         }
                     }
@@ -912,77 +1043,113 @@ async fn run_media(
                         }
                     }
                     MediaControl::SetCameraDevice(id) => {
+                        preferred_camera_id = id.clone();
+                        // Camera off: remember preference only — do not open
+                        // (would light the privacy LED while publish is off).
+                        if !camera_enabled.load(Ordering::Relaxed) {
+                            log::info!(
+                                "av-media: camera device preference set to {id:?} \
+                                 (device closed; camera off)"
+                            );
+                            has_camera = camera_devices_present() || has_camera;
+                            continue;
+                        }
+                        release_local_camera(
+                            &_broadcast,
+                            &mut preview_keepalive,
+                            &mut preview_pump,
+                            &video_store,
+                            #[cfg(target_os = "android")]
+                            &mut android_camera_guard,
+                        );
+                        camera_open = false;
+                        local_frame_count.store(0, Ordering::Relaxed);
                         #[cfg(not(target_os = "android"))]
                         {
-                            // Drop old preview keepalive + pump before replacing source.
-                            preview_keepalive = None;
-                            if let Some(h) = preview_pump.take() {
-                                // Track drop closes the pump; don't wait forever.
-                                let _ = h;
-                            }
-                            video_store.remove(LOCAL_PREVIEW_KEY);
-                            local_frame_count.store(0, Ordering::Relaxed);
-                            match open_camera(id.as_deref()) {
-                                Ok(cam) => {
-                                    let name = cam.name().to_string();
-                                    let gated = GatedCameraSource {
-                                        inner: cam,
-                                        enabled: camera_enabled.clone(),
-                                        preview: video_store.clone(),
-                                        frame_count: local_frame_count.clone(),
-                                    };
-                                    match _broadcast.video().set_source(
-                                        gated,
-                                        VideoCodec::H264,
-                                        [VideoPreset::P360],
-                                    ) {
-                                        Ok(()) => {
-                                            preview_keepalive = _broadcast.preview();
-                                            preview_pump = spawn_local_preview_pump(
-                                                &_broadcast,
-                                                video_store.clone(),
-                                                camera_enabled.clone(),
-                                            );
-                                            if is_virtual_camera(&name, id.as_deref().unwrap_or(""))
-                                            {
-                                                log::info!(
-                                                    "av-media: using virtual camera {name} — \
-                                                     in OBS: Controls → Start Virtual Camera \
-                                                     (otherwise self-view is blank)"
-                                                );
-                                            }
-                                            log::info!(
-                                                "av-media: camera device switched to {id:?} ({name})"
-                                            );
-                                            on_status(AvMediaUpdate::Live {
-                                                video: video_store.clone(),
-                                                has_camera: true,
-                                                mic_level: mic_level.clone(),
-                                                has_mic,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "av-media: set_source after camera switch: {e}"
-                                            );
-                                            camera_enabled.store(false, Ordering::Relaxed);
-                                            on_status(AvMediaUpdate::Live {
-                                                video: video_store.clone(),
-                                                has_camera: false,
-                                                mic_level: mic_level.clone(),
-                                                has_mic,
-                                            });
-                                        }
+                            match attach_desktop_camera(
+                                preferred_camera_id.as_deref(),
+                                &_broadcast,
+                                camera_enabled.clone(),
+                                video_store.clone(),
+                                local_frame_count.clone(),
+                            ) {
+                                Ok(opened_id) => {
+                                    if let Some(oid) = opened_id {
+                                        preferred_camera_id = Some(oid);
                                     }
+                                    preview_keepalive = hold_preview_keepalive(&_broadcast);
+                                    preview_pump = spawn_local_preview_pump(
+                                        &_broadcast,
+                                        video_store.clone(),
+                                        camera_enabled.clone(),
+                                    );
+                                    camera_open = true;
+                                    has_camera = true;
+                                    log::info!(
+                                        "av-media: camera device switched to {id:?}"
+                                    );
+                                    on_status(AvMediaUpdate::Live {
+                                        video: video_store.clone(),
+                                        has_camera: true,
+                                        mic_level: mic_level.clone(),
+                                        has_mic,
+                                    });
                                 }
                                 Err(e) => {
                                     log::warn!("av-media: open camera {id:?}: {e}");
+                                    camera_enabled.store(false, Ordering::Relaxed);
+                                    has_camera = camera_devices_present();
+                                    on_status(AvMediaUpdate::Live {
+                                        video: video_store.clone(),
+                                        has_camera,
+                                        mic_level: mic_level.clone(),
+                                        has_mic,
+                                    });
                                 }
                             }
                         }
                         #[cfg(target_os = "android")]
                         {
-                            let _ = id;
+                            match open_android_camera(
+                                preferred_camera_id.as_deref(),
+                                &_broadcast,
+                                camera_enabled.clone(),
+                                video_store.clone(),
+                                local_frame_count.clone(),
+                                true,
+                            ) {
+                                Ok(guard) => {
+                                    android_camera_guard = Some(guard);
+                                    preview_keepalive = hold_preview_keepalive(&_broadcast);
+                                    preview_pump = spawn_local_preview_pump(
+                                        &_broadcast,
+                                        video_store.clone(),
+                                        camera_enabled.clone(),
+                                    );
+                                    camera_open = true;
+                                    has_camera = true;
+                                    log::info!(
+                                        "av-media: Android camera switched to {id:?}"
+                                    );
+                                    on_status(AvMediaUpdate::Live {
+                                        video: video_store.clone(),
+                                        has_camera: true,
+                                        mic_level: mic_level.clone(),
+                                        has_mic,
+                                    });
+                                }
+                                Err(e) => {
+                                    log::warn!("av-media: Android camera switch {id:?}: {e}");
+                                    camera_enabled.store(false, Ordering::Relaxed);
+                                    has_camera = camera_devices_present();
+                                    on_status(AvMediaUpdate::Live {
+                                        video: video_store.clone(),
+                                        has_camera,
+                                        mic_level: mic_level.clone(),
+                                        has_mic,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -1005,7 +1172,8 @@ async fn run_media(
     }
     drop(audio_backend_ctrl);
     drop(audio_for_playback);
-    video_store.clear();
+    // Keep last frames in the shared store so the call UI can paint stale tiles
+    // across MoQ transport drops / re-dials. Call end clears via clear_av_media.
     mic_level.clear();
     // Brief yield so aborted tasks drop cpal/PW resources before the next dial.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1080,16 +1248,11 @@ async fn tap_remote(
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
                         consecutive_errs = consecutive_errs.saturating_add(1);
-                        // Permanent peer/session death — don't spam every 500ms.
-                        if msg.contains("dropped")
-                            || msg.contains("closed")
-                            || msg.contains("transport error")
-                        {
-                            log::warn!("av-media: audio sub {ps}: {e} (giving up)");
-                            break;
-                        }
+                        // Keep retrying while the remote broadcast is open — a
+                        // transient audio catalog/transport blip must not kill
+                        // the independent video pipeline (tap_remote waits on
+                        // `remote.closed()`, not this task exiting).
                         if consecutive_errs <= 3 || consecutive_errs % 10 == 0 {
                             log::warn!(
                                 "av-media: audio sub {ps}: {e} (retry {consecutive_errs})"
@@ -1122,14 +1285,6 @@ async fn tap_remote(
                         log::info!("av-media: video track ended for {path}");
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("dropped")
-                            || msg.contains("closed")
-                            || msg.contains("transport error")
-                        {
-                            log::debug!("av-media: video wait {path}: {e} (giving up)");
-                            break;
-                        }
                         log::debug!("av-media: video wait {path}: {e}");
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
@@ -1138,25 +1293,16 @@ async fn tap_remote(
         })
     };
 
-    // Keep both pipelines alive until the remote broadcast closes.
-    // Abort siblings — dropping JoinHandle alone detaches tasks and leaves
-    // audio_ready retry loops logging "dropped" forever after transport death.
-    tokio::select! {
-        err = remote.closed() => {
-            log::info!("av-media: remote closed {path}: {err}");
-            audio_task.abort();
-            video_task.abort();
-        }
-        _ = &mut audio_task => {
-            log::debug!("av-media: audio task exited for {path}");
-            video_task.abort();
-        }
-        _ = &mut video_task => {
-            log::debug!("av-media: video task exited for {path}");
-            audio_task.abort();
-        }
-    }
-    video_store.remove(&key);
+    // Audio and video are independent: keep both taps alive until the remote
+    // broadcast catalog entry closes. Do not abort one when the other retries
+    // or hits a transient transport error — that dropped video while audio
+    // (and IRC call state) continued.
+    let close_err = remote.closed().await;
+    log::info!("av-media: remote closed {path}: {close_err}");
+    audio_task.abort();
+    video_task.abort();
+    // Frame removal is driven by announce `None` (participant left). Do not
+    // clear here — tap replacement would flash black until the next frame.
 }
 
 /// Set remote track volume from speaker-mute (`0.0` silence, `1.0` full).
@@ -1268,6 +1414,106 @@ fn camera_config() -> CameraConfig {
         // CPU RGBA — safer for local preview tee + software H.264.
         zero_copy: false,
     }
+}
+
+/// Join-time policy: only claim capture hardware when publish is on.
+/// (Soft-gating an already-open device leaves STREAMON / Camera2 live and
+/// lights the privacy LED while the UI shows camera off.)
+fn should_claim_camera_hardware(publish_enabled: bool) -> bool {
+    publish_enabled
+}
+
+/// True when at least one camera enumerates (does not open / stream).
+fn camera_devices_present() -> bool {
+    !list_cameras().is_empty()
+}
+
+/// Hold a local preview track so SharedVideoSource stays unparked for self-view
+/// even with no remote H.264 subscriber.
+fn hold_preview_keepalive(
+    broadcast: &LocalBroadcast,
+) -> Option<iroh_live::media::subscribe::VideoTrack> {
+    let t = broadcast.preview();
+    if t.is_some() {
+        log::info!("av-media: local preview keepalive held (SharedVideoSource unparked)");
+    } else {
+        log::warn!("av-media: broadcast.preview() returned None after set_source");
+    }
+    t
+}
+
+/// Release capture hardware: drop preview subscribers, clear the MoQ video
+/// track (stops SharedVideoSource → streamoff / close), and stop Camera2.
+fn release_local_camera(
+    broadcast: &LocalBroadcast,
+    preview_keepalive: &mut Option<iroh_live::media::subscribe::VideoTrack>,
+    preview_pump: &mut Option<std::thread::JoinHandle<()>>,
+    video_store: &VideoFrameStore,
+    #[cfg(target_os = "android")] android_guard: &mut Option<
+        crate::android_camera::CameraCaptureGuard,
+    >,
+) {
+    *preview_keepalive = None;
+    // Pump exits when publish is off (or the preview track closes). Join briefly
+    // so we don't leave a detached thread holding a VideoTrack across clear().
+    if let Some(h) = preview_pump.take() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if h.is_finished() {
+                let _ = h.join();
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                log::warn!("av-media: local preview pump did not exit in 500ms; detaching");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    broadcast.video().clear();
+    #[cfg(target_os = "android")]
+    {
+        drop(android_guard.take());
+    }
+    video_store.remove(LOCAL_PREVIEW_KEY);
+}
+
+/// Open a desktop camera and attach it as the broadcast H.264 source.
+/// Returns the opened device id when known.
+#[cfg(not(target_os = "android"))]
+fn attach_desktop_camera(
+    preferred: Option<&str>,
+    broadcast: &LocalBroadcast,
+    camera_enabled: Arc<AtomicBool>,
+    video_store: VideoFrameStore,
+    local_frame_count: Arc<AtomicU64>,
+) -> Result<Option<String>> {
+    let (cam, opened_id) = open_camera_with_fallback(preferred)?;
+    let cam_name = cam.name().to_string();
+    let gated = GatedCameraSource {
+        inner: cam,
+        enabled: camera_enabled.clone(),
+        preview: video_store,
+        frame_count: local_frame_count,
+        streaming: false,
+    };
+    broadcast
+        .video()
+        .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
+        .context("video set_source")?;
+    if is_virtual_camera(&cam_name, opened_id.as_deref().unwrap_or("")) {
+        log::info!(
+            "av-media: using virtual camera {cam_name} — \
+             in OBS: Controls → Start Virtual Camera \
+             (otherwise self-view is blank)"
+        );
+    }
+    log::info!(
+        "av-media: camera open id={opened_id:?} name={cam_name}, \
+         publishing H.264 360p (publish={})",
+        camera_enabled.load(Ordering::Relaxed)
+    );
+    Ok(opened_id)
 }
 
 /// Open preferred camera, then fall back through the device list (hardware first).
@@ -1469,7 +1715,6 @@ fn open_camera_with_busy_retry(
 /// Luma (Rec.601 approx) min/max across RGBA bytes — used by live diagnostics
 /// and tests to detect a real camera picture vs a blank/uniform buffer.
 /// Ships with the crate (not test-only) so pump/tee logs report real content.
-#[cfg(not(target_os = "android"))]
 pub(crate) fn rgba_luma_range(rgba: &[u8]) -> (u8, u8) {
     let mut min = 255u8;
     let mut max = 0u8;
@@ -1482,7 +1727,6 @@ pub(crate) fn rgba_luma_range(rgba: &[u8]) -> (u8, u8) {
 }
 
 /// Pump `broadcast.preview()` frames into `__local__` for self-view.
-#[cfg(not(target_os = "android"))]
 fn spawn_local_preview_pump(
     broadcast: &LocalBroadcast,
     store: VideoFrameStore,
@@ -1502,10 +1746,14 @@ fn spawn_local_preview_pump(
             let mut pump_waited_ms = 0u64;
             let mut warned_no_frames = false;
             loop {
+                // Exit on mute so we drop the preview VideoTrack and let
+                // release_local_camera clear the SharedVideoSource promptly.
+                // Spinning here used to keep a subscriber alive across "camera
+                // off" and leave V4L2 STREAMON / Camera2 repeating (LED on).
                 if !enabled.load(Ordering::Relaxed) {
                     store.remove(LOCAL_PREVIEW_KEY);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    continue;
+                    log::info!("av-media: local preview pump exit (publish off)");
+                    break;
                 }
                 if let Some(frame) = track.try_recv() {
                     let (w, h) = (frame.width(), frame.height());
@@ -1572,28 +1820,81 @@ fn spawn_local_preview_pump(
 }
 
 /// Mid-call device switch uses the same fallback path.
-#[cfg(not(target_os = "android"))]
-fn open_camera(id: Option<&str>) -> Result<Box<dyn VideoSource>> {
-    open_camera_with_fallback(id).map(|(c, _)| c)
+/// Start Android Camera2, register a gated NV12 [`VideoSource`], and return a
+/// guard that stops the camera when dropped (call end or camera toggled off).
+#[cfg(target_os = "android")]
+fn open_android_camera(
+    camera_id: Option<&str>,
+    broadcast: &LocalBroadcast,
+    camera_enabled: Arc<AtomicBool>,
+    video_store: VideoFrameStore,
+    local_frame_count: Arc<AtomicU64>,
+    want_publish: bool,
+) -> Result<crate::android_camera::CameraCaptureGuard> {
+    crate::android_camera::start_capture(camera_id)
+        .context("CameraCapture.start")?;
+    // Camera2 open + session configure is async on a Java handler thread.
+    if let Err(e) = crate::android_camera::wait_until_opened(std::time::Duration::from_secs(5)) {
+        crate::android_camera::stop_capture();
+        return Err(e).context("Camera2 session");
+    }
+
+    let label = camera_id
+        .filter(|s| !s.is_empty())
+        .unwrap_or("front")
+        .to_string();
+    let cam = crate::android_camera::PushCameraSource::new(format!("android-camera:{label}"));
+    let gated = GatedCameraSource {
+        inner: Box::new(cam),
+        enabled: camera_enabled.clone(),
+        preview: video_store,
+        frame_count: local_frame_count,
+        streaming: false,
+    };
+    if let Err(e) = broadcast
+        .video()
+        .set_source(gated, VideoCodec::H264, [VideoPreset::P360])
+    {
+        // Camera2 is live but MoQ source failed — release hardware.
+        crate::android_camera::stop_capture();
+        return Err(e).context("video set_source");
+    }
+
+    if want_publish {
+        camera_enabled.store(true, Ordering::Relaxed);
+    }
+    log::info!(
+        "av-media: Android camera open id={camera_id:?}, publishing H.264 360p (publish={})",
+        camera_enabled.load(Ordering::Relaxed)
+    );
+    Ok(crate::android_camera::CameraCaptureGuard)
 }
 
-/// Wraps camera capture: when disabled, drain frames but publish none so the
-/// H.264 track stays in the catalog. Always tees enabled frames into
-/// `__local__` for self-view (requires a SharedVideoSource subscriber — we
-/// hold `broadcast.preview()` as keepalive).
+/// Wraps camera capture while hardware is held. Publish/self-view are gated by
+/// `enabled`. When publish flips off we **stop the inner capturer immediately**
+/// (V4L2 `STREAMOFF` / close) so the privacy LED goes dark without waiting for
+/// the media task's `release_local_camera` clear — the old gate still called
+/// `inner.pop_frame()` first, which kept STREAMON alive while discarding frames.
+/// `release_local_camera` remains the steady-state teardown (drop source +
+/// Camera2 guard).
+///
+/// Always tees enabled frames into `__local__` for self-view (requires a
+/// SharedVideoSource subscriber — we hold `broadcast.preview()` as keepalive).
 ///
 /// `inner` is boxed so v4l2loopback devices (OBS Virtual Camera) can use the
 /// loopback-safe [`crate::v4l2cam::V4l2MmapCapture`] instead of rusty-capture's
 /// `CameraCapturer` (whose v4l2r dqbuf leaves `memory=0` → EINVAL on loopback).
-#[cfg(not(target_os = "android"))]
+/// On Android, `inner` is the Camera2 [`PushCameraSource`].
 struct GatedCameraSource {
     inner: Box<dyn VideoSource>,
     enabled: Arc<AtomicBool>,
     preview: VideoFrameStore,
     frame_count: Arc<AtomicU64>,
+    /// Whether `inner.start()` is live. Cleared on gate-off / `stop()` so mute
+    /// can streamoff without waiting for SharedVideoSource teardown.
+    streaming: bool,
 }
 
-#[cfg(not(target_os = "android"))]
 impl VideoSource for GatedCameraSource {
     fn name(&self) -> &str {
         self.inner.name()
@@ -1604,16 +1905,59 @@ impl VideoSource for GatedCameraSource {
     }
 
     fn start(&mut self) -> anyhow::Result<()> {
-        self.inner.start()
+        let r = self.inner.start();
+        if r.is_ok() {
+            self.streaming = true;
+        }
+        r
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
+        self.streaming = false;
         self.inner.stop()
     }
 
     fn pop_frame(
         &mut self,
     ) -> anyhow::Result<Option<iroh_live::media::format::VideoFrame>> {
+        // Check publish flag *before* capturing. The previous order (dqbuf then
+        // discard) left V4L2 STREAMON / the privacy LED on for the whole mute.
+        if !self.enabled.load(Ordering::Relaxed) {
+            if self.streaming {
+                if let Err(e) = self.inner.stop() {
+                    log::warn!(
+                        "av-media: camera {} stop on mute failed: {e:#}",
+                        self.inner.name()
+                    );
+                } else {
+                    log::info!(
+                        "av-media: camera {} hardware stopped (publish off; privacy light off)",
+                        self.inner.name()
+                    );
+                }
+                self.streaming = false;
+                // Android PushCameraSource::stop only clears the frame cell —
+                // Camera2 stays open until stop_capture / guard drop.
+                #[cfg(target_os = "android")]
+                crate::android_camera::stop_capture();
+            }
+            self.preview.remove(LOCAL_PREVIEW_KEY);
+            // SharedVideoSource spins on Ok(None); back off while gated.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            return Ok(None);
+        }
+        if !self.streaming {
+            self.inner.start().map_err(|e| {
+                log::warn!(
+                    "av-media: camera {} restart after mute failed: {e:#}",
+                    self.inner.name()
+                );
+                e
+            })?;
+            self.streaming = true;
+            // Android Camera2 is restarted by open_android_camera after
+            // release_local_camera clears the guard — not from this gate.
+        }
         let frame = match self.inner.pop_frame() {
             Ok(f) => f,
             Err(e) => {
@@ -1640,20 +1984,10 @@ impl VideoSource for GatedCameraSource {
                     }
                 );
                 self.preview.remove(LOCAL_PREVIEW_KEY);
+                self.streaming = false;
                 return Err(e);
             }
         };
-        if !self.enabled.load(Ordering::Relaxed) {
-            // Drain so the capture pipeline doesn't back up; hide self-view.
-            // Peers still have the video track in the catalog but get no frames
-            // until the camera is turned back on.
-            self.preview.remove(LOCAL_PREVIEW_KEY);
-            let n = self.frame_count.load(Ordering::Relaxed);
-            if n > 0 && n % 300 == 0 {
-                log::debug!("av-media: camera gated off (publish idle), drained={n}");
-            }
-            return Ok(None);
-        }
         if let Some(ref f) = frame {
             let (w, h) = (f.width(), f.height());
             // Best-effort local preview — never fail the encode path.
@@ -2312,6 +2646,158 @@ mod tests {
         assert!(
             got > 0,
             "listen-only silence must still emit continuous frames (got 0 samples)"
+        );
+    }
+
+    #[test]
+    fn camera_hardware_claimed_only_when_publish_enabled() {
+        assert!(should_claim_camera_hardware(true));
+        assert!(!should_claim_camera_hardware(false));
+    }
+
+    /// Mute must stop the inner capturer (streamoff) — not merely discard
+    /// frames after dqbuf, which left the privacy LED on.
+    #[test]
+    fn gated_camera_stops_inner_when_publish_off() {
+        use iroh_live::media::format::{PixelFormat, VideoFormat, VideoFrame};
+        use iroh_live::media::traits::VideoSource;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingCam {
+            stops: Arc<AtomicUsize>,
+            starts: Arc<AtomicUsize>,
+            pops: Arc<AtomicUsize>,
+        }
+        impl VideoSource for CountingCam {
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn format(&self) -> VideoFormat {
+                VideoFormat {
+                    pixel_format: PixelFormat::Rgba,
+                    dimensions: [2, 2],
+                }
+            }
+            fn start(&mut self) -> anyhow::Result<()> {
+                self.starts.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn stop(&mut self) -> anyhow::Result<()> {
+                self.stops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn pop_frame(&mut self) -> anyhow::Result<Option<VideoFrame>> {
+                self.pops.fetch_add(1, Ordering::Relaxed);
+                // Frame payload unused — we only assert stop/pop ordering.
+                Ok(None)
+            }
+        }
+
+        let stops = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let pops = Arc::new(AtomicUsize::new(0));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut gated = GatedCameraSource {
+            inner: Box::new(CountingCam {
+                stops: stops.clone(),
+                starts: starts.clone(),
+                pops: pops.clone(),
+            }),
+            enabled: enabled.clone(),
+            preview: VideoFrameStore::new(),
+            frame_count: Arc::new(AtomicU64::new(0)),
+            streaming: false,
+        };
+
+        gated.start().expect("start");
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
+        assert!(gated.pop_frame().expect("pop").is_none());
+        assert_eq!(pops.load(Ordering::Relaxed), 1);
+        assert_eq!(stops.load(Ordering::Relaxed), 0);
+
+        enabled.store(false, Ordering::Relaxed);
+        assert!(gated.pop_frame().expect("gated pop").is_none());
+        assert_eq!(
+            stops.load(Ordering::Relaxed),
+            1,
+            "mute must call inner.stop() so STREAMON / privacy LED ends"
+        );
+        assert_eq!(
+            pops.load(Ordering::Relaxed),
+            1,
+            "must not dqbuf/pop after publish off"
+        );
+
+        // Further gated polls must not re-stop or capture.
+        assert!(gated.pop_frame().expect("gated pop 2").is_none());
+        assert_eq!(stops.load(Ordering::Relaxed), 1);
+        assert_eq!(pops.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn release_local_camera_clears_broadcast_video() {
+        use iroh_live::media::format::{PixelFormat, VideoFormat, VideoFrame};
+        use iroh_live::media::traits::VideoSource;
+
+        struct StubCam;
+        impl VideoSource for StubCam {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn format(&self) -> VideoFormat {
+                VideoFormat {
+                    pixel_format: PixelFormat::Rgba,
+                    dimensions: [4, 4],
+                }
+            }
+            fn start(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn stop(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn pop_frame(&mut self) -> anyhow::Result<Option<VideoFrame>> {
+                Ok(None)
+            }
+        }
+
+        let broadcast = LocalBroadcast::new();
+        broadcast
+            .video()
+            .set_source(StubCam, VideoCodec::H264, [VideoPreset::P360])
+            .expect("set stub video");
+        assert!(
+            broadcast.preview().is_some(),
+            "preview available while video source attached"
+        );
+
+        let mut keepalive = broadcast.preview();
+        let mut pump = None;
+        let store = VideoFrameStore::new();
+        store.set(LOCAL_PREVIEW_KEY, 4, 4, vec![0u8; 4 * 4 * 4].into());
+        #[cfg(target_os = "android")]
+        let mut guard = None;
+
+        release_local_camera(
+            &broadcast,
+            &mut keepalive,
+            &mut pump,
+            &store,
+            #[cfg(target_os = "android")]
+            &mut guard,
+        );
+
+        assert!(keepalive.is_none());
+        assert!(
+            broadcast.preview().is_none(),
+            "video.clear must drop the source so privacy LED can go dark"
+        );
+        assert!(
+            !store
+                .snapshot()
+                .iter()
+                .any(|(k, _)| k == LOCAL_PREVIEW_KEY),
+            "local preview frame must be cleared on release"
         );
     }
 

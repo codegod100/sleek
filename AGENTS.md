@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Code review
+
+This project does not use GitHub Copilot pull request review. The GitHub Copilot
+PR reviewer (`dynamic/agents/copilot-pull-request-reviewer`) should be disabled
+in repository Settings → Copilot → Pull request review.
+
 ## Cursor Cloud specific instructions
 
 Sleek is a Rust + egui desktop/mobile **freeq (IRC) chat client**. The runnable
@@ -7,6 +13,33 @@ product in this environment is the **desktop host** (`host/` → binary `sleek`)
 the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
+
+### Radicle patches (cloud agents — use boxci)
+**Every issue that produces commits must open a Radicle patch** (see
+`.cursor/rules/issues-require-radicle-patch.mdc`). A GitHub PR alone is not
+enough.
+
+Cloud / GitHub checkouts should **not** open Radicle patches with local
+`rad auth` / `git push rad` or radicle MCP `create_patch`. Push the commit to
+GitHub, then use the **boxci-github-patch** skill:
+
+Skill: [`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/)
+→ `POST https://boxci.boxd.sh/api/patches/from-github` with sleek RID
+`rad:z9mjPzpVK472QXaaP1picc5U9xBR` and `github_repo_url`
+`https://github.com/codegod100/sleek.git`.
+
+boxci cherry-picks the GitHub SHA onto the Garden checkout and runs
+`git push rad HEAD:refs/patches` with the CI Radicle identity.
+
+Optional local `rad` remote (Codespaces / manual rad CLI only):
+
+```bash
+bash scripts/ensure-rad-remote.sh
+# equivalent: git remote add rad rad://z9mjPzpVK472QXaaP1picc5U9xBR
+```
+
+`scripts/codespace-bootstrap.sh` and `.cursor/environment.json` (`install` +
+`start`) still ensure that remote idempotently.
 
 ### Toolchain lives in the Nix flake dev shell
 - Nix (Determinate, multi-user, installed with `--init none`) is preinstalled in
@@ -20,22 +53,31 @@ support).
   `BINDGEN_EXTRA_CLANG_ARGS` (needed by the `v4l2r` camera bindgen),
   `PKG_CONFIG_PATH`, `OPENSSL_NO_VENDOR`, and `SLEEK_LD_LIBRARY_PATH` are set.
   Use `nix develop /workspace --command <cmd>` or `./scripts/enter <cmd>`.
-- The flake's `nixConfig` advertises the optional `codegod100.cachix.org`
-  substituter. `accept-flake-config = false` is set in `/etc/nix/nix.conf` so it
-  is silently ignored (no cachix needed). If you invoke nix from an interactive
-  TTY (e.g. tmux) and still get a trust prompt, run nix with stdin from
-  `</dev/null`.
+- The flake's `nixConfig` advertises `codegod100.cachix.org` as an
+  `extra-substituter`. On multi-user Determinate Nix (`trusted-users = root`
+  only), that is **not** enough: non-trusted users get
+  `ignoring untrusted substituter` and rebuild toolchain deps from source.
+  Bootstrap writes the cache into `/etc/nix/nix.custom.conf` as
+  `extra-substituters`, `extra-trusted-substituters`, and
+  `extra-trusted-public-keys`, then reloads `nix-daemon`. If those warnings
+  appear, re-run `bash scripts/codespace-bootstrap.sh` (needs passwordless
+  sudo). Prefer `nix run --accept-flake-config` (or plain `nix run` once the
+  daemon trusts the cache); do not put the signing key in user `nix.conf`.
 
 ### Sibling path dependencies (required for working-tree builds)
 `android/Cargo.toml` uses path deps `../../vidya` and `../../freeq/freeq-sdk`.
 Because the repo root is `/workspace`, those resolve to **`/vidya`** and
-**`/freeq`** (filesystem root). Both are cloned there and persist in the VM
-image. They must track the **latest `main`** of each upstream — the committed
-`flake.lock` pins older revs that are too stale to compile the current sleek
-branch (missing `vidya::escape_label`, `command_shortcut_label`, `lead_trail`,
-etc.). Upstreams: `https://github.com/codegod100/freeq.git` and
-`https://tangled.org/nandi.uk/vidya`. Do not `git pull` them blindly if a build
-is working — the pinned checkout in the image is known-good.
+**`/freeq`** (filesystem root). Both are pinned in **`flake.lock`**: vidya from
+Radicle Garden (`rad:z2UqGTRH21s3pHnJgSuMwRaPPNNcW`) and freeq from
+`github:codegod100/freeq`. Materialize siblings from the lock with:
+
+```bash
+bash scripts/sync-flake-path-deps.sh
+```
+
+(`scripts/codespace-host.sh` runs this automatically when `nix` is available.)
+Do not `git pull` sibling checkouts blindly — use `nix flake update vidya` (or
+`freeq`) in the sleek repo, then re-sync.
 
 ### Build / lint / test / run (desktop host)
 - Build: `nix develop /workspace --command cargo build --manifest-path host/Cargo.toml`
@@ -56,3 +98,67 @@ Launch the host, click **Continue as guest** (defaults: nick `sleekXXXX`, server
 `irc.freeq.at:6697` TLS), which auto-joins `#general` and `#test`; then open a
 channel and send a message. Outbound network to `irc.freeq.at` works in this
 environment.
+
+### Secrets (OpenBao)
+Cursor env secret `OPENBAO_TOKEN` unlocks `https://openbao.boxd.sh` (KV
+`secret/data/ai-api-keys`). Bootstrap runs `scripts/configure-gh-from-openbao.sh`
+when `GH_TOKEN` is present there so `gh` uses a real PAT instead of the limited
+Cursor integration token (needed for Actions secrets, etc.).
+
+```bash
+# One-time, from a machine already logged into gh:
+export OPENBAO_TOKEN=…   # or use Cursor env
+./scripts/openbao-put-key.sh GH_TOKEN --from-gh
+./scripts/configure-gh-from-openbao.sh
+printf '%s' "$OPENBAO_TOKEN" | gh secret set OPENBAO_TOKEN -R codegod100/sleek
+```
+
+### Radicle identity (CI only)
+Dedicated CI signing keys for boxci / Buildkite issue→agent live under OpenBao
+`secret/data/radicle` (`RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` /
+`RAD_PASSPHRASE`) and matching cluster secrets. Cloud agents do **not** mint
+or reuse personal Radicle DIDs — they publish patches via
+[`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/).
+Never commit key material.
+
+### Buildkite (baogui reference)
+Org `nandi`, Default cluster, hosted queue `auto`. Reference pipeline:
+[baogui-aopjch](https://buildkite.com/nandi/baogui-aopjch). Sleek pipeline:
+[sleek-5u9xbr](https://buildkite.com/nandi/sleek-5u9xbr) (created via API; steps in
+`.buildkite/pipeline.yml`).
+
+**Clone source is Radicle Garden** (not GitHub), same shape as baogui:
+
+- RID: [`rad:z9mjPzpVK472QXaaP1picc5U9xBR`](https://nandi.radicle.garden/rad:z9mjPzpVK472QXaaP1picc5U9xBR)
+- Git URL: `https://nandi.radicle.garden/z9mjPzpVK472QXaaP1picc5U9xBR.git`
+- Provider: private (no GitHub webhooks — trigger via Buildkite API / schedule /
+  Radicle CI adapter)
+
+API token is `BUILDKITE_API_KEY` in OpenBao (same KV). Agent skill:
+`.cursor/skills/configure-buildkite/`. Radicle **CI** signing keys for
+publishing patches live under OpenBao `secret/data/radicle` (fields
+`RADICLE_SECRET_KEY`, optional `RADICLE_PUBLIC_KEY` / `RAD_PASSPHRASE`) and/or
+matching Buildkite cluster secrets — loaded by
+`scripts/buildkite/bootstrap.sh` for the issue→agent step. Bootstrap hydrates
+`$RAD_HOME/storage` from the Garden HTTPS git URL (same clone Buildkite uses),
+so agents do **not** need egress to Garden p2p `:58019`; public seeds
+(`rosa`/`iris` `:8776`) are used for connect/announce. Use a dedicated CI
+identity (not a personal DID); never commit key material.
+
+Cluster secrets (soft-loaded; artifacts skip if missing): `NIXBUILD_TOKEN`
+and/or `OPENBAO_TOKEN`. Issue agent also needs `CURSOR_API_KEY` +
+`RADICLE_SECRET_KEY`. Scope `NIXBUILD_TOKEN` to `pipeline_slug: sleek-5u9xbr` (and
+`baogui-aopjch`). Helper: `scripts/ci-nixbuild.sh`. Check materializes flake.lock–
+pinned `vidya`/`freeq` via `scripts/sync-flake-path-deps.sh` and runs `cargo`
+inside `nix develop` (mold + libs from the flake, not apt).
+
+```bash
+eval "$(./scripts/configure-buildkite-from-openbao.sh)"
+./scripts/configure-buildkite-from-openbao.sh --check
+
+# Trigger a build of the Radicle tip (or a patch commit once synced):
+# curl -X POST -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#   -H "Content-Type: application/json" \
+#   -d '{"commit":"HEAD","branch":"main"}' \
+#   https://api.buildkite.com/v2/organizations/nandi/pipelines/sleek-5u9xbr/builds
+```

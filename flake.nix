@@ -1,12 +1,12 @@
 {
   description = "Sleek — mobile freeq client (Vidya + freeq-sdk)";
 
-  # Trusted when accept-flake-config = true (bootstrap sets this on Codespaces).
+  # Pull cache URL for clients that accept flake config. The signing key and
+  # trusted-substituters entry must live in the daemon conf (bootstrap writes
+  # /etc/nix/nix.custom.conf) — non-trusted users cannot set trusted-public-keys
+  # via flake nixConfig even with --accept-flake-config.
   nixConfig = {
     extra-substituters = [ "https://codegod100.cachix.org" ];
-    extra-trusted-public-keys = [
-      "codegod100.cachix.org-1:LZFL5VrR644WUjleS3bLbVeOdzlXqzKznQWvD5MVthA="
-    ];
   };
 
   inputs = {
@@ -17,14 +17,18 @@
     };
     # Path deps in Cargo.toml are ../../vidya and ../../freeq/freeq-sdk —
     # pin them as flake inputs so `nix build` works without a monorepo checkout.
+    # Dev: scripts/sync-flake-path-deps.sh materializes siblings from these inputs.
+    # Vidya is sourced from Radicle Garden (not GitHub/Tangled).
     vidya = {
-      url = "git+https://tangled.org/nandi.uk/vidya";
+      url = "git+https://nandi.radicle.garden/z2UqGTRH21s3pHnJgSuMwRaPPNNcW.git?ref=main";
       flake = false;
     };
     freeq = {
       url = "github:codegod100/freeq";
       flake = false;
     };
+    # Convert the hermetic host package into a distributable .flatpak bundle.
+    nix2flatpak.url = "github:neobrain/nix2flatpak";
   };
 
   outputs =
@@ -34,6 +38,7 @@
       rust-overlay,
       vidya,
       freeq,
+      nix2flatpak,
     }:
     let
       systems = [
@@ -52,6 +57,9 @@
           };
         };
 
+      # Runtime libs for the desktop host (wrapped into LD_LIBRARY_PATH).
+      # Keep bindgen-only deps (libclang, linuxHeaders, pkg-config) out of this
+      # list — they bloat the closure by ~GB and are not needed at runtime.
       eguiLibs =
         pkgs:
         with pkgs;
@@ -59,7 +67,6 @@
           libxkbcommon
           libGL
           vulkan-loader
-          pkg-config
           openssl
         ]
         ++ lib.optionals stdenv.hostPlatform.isLinux [
@@ -74,7 +81,12 @@
           alsa-lib
           # Optional PipeWire backends
           pipewire
-          # v4l2r bindgen (iroh-live capture-camera) needs libclang + videodev2.h
+        ];
+
+      # Build-only extras for v4l2r bindgen (iroh-live capture-camera).
+      eguiBuildLibs =
+        pkgs: with pkgs; [
+          pkg-config
           llvmPackages.libclang
           linuxHeaders
         ];
@@ -107,18 +119,54 @@
       #   parent/freeq/freeq-sdk
       sleekSrcTree =
         pkgs:
+        let
+          # Filter before hashing so CI/docs/flake-only commits do not bust
+          # android/flatpak store paths (and thus Cachix).
+          sleekFiltered = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              let
+                base = baseNameOf path;
+              in
+              # Keep normal cleanSource exclusions, then drop non-build paths.
+              pkgs.lib.cleanSourceFilter path type
+              && !(builtins.elem base [
+                ".tangled"
+                ".github"
+                ".devcontainer"
+                ".jj"
+                ".cargo"
+                "docs"
+                "README.md"
+                "AGENTS.md"
+                "justfile"
+                "flake.nix"
+                "flake.lock"
+                "result"
+                "result-android"
+                "result-flatpak"
+                "result-sleek"
+              ]);
+          };
+        in
         pkgs.runCommand "sleek-src-tree"
           {
-            # Avoid .git / target noise from the working tree.
-            nativeBuildInputs = [ pkgs.rsync ];
+            nativeBuildInputs = [
+              pkgs.rsync
+              pkgs.patch
+            ];
           }
           ''
             mkdir -p $out/{sleek,vidya,freeq}
-            # cleanSource drops .git; keep Cargo.lock under host/
-            cp -a ${pkgs.lib.cleanSource ./.}/. $out/sleek/
+            cp -a ${sleekFiltered}/. $out/sleek/
             cp -a ${vidya}/. $out/vidya/
             cp -a ${freeq}/. $out/freeq/
             chmod -R u+w $out
+            # Older GitHub tips of vidya referenced winit on Android without
+            # declaring the dep. Radicle tip may not need this; apply if it fits.
+            patch -p1 -d $out/vidya --forward --batch \
+              < ${./patches/vidya-android-winit.patch} || true
             # Drop heavy/irrelevant freeq crates so cargo metadata stays lean
             # (path dep only needs freeq-sdk + its workspace graph).
             rm -rf $out/sleek/{.git,host/target,android/target} 2>/dev/null || true
@@ -133,14 +181,11 @@
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
-          rust = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [
-              "rust-src"
-              "rustfmt"
-              "clippy"
-            ];
-          };
+          buildLibs = eguiBuildLibs pkgs;
+          # Lean toolchain for store packages (no clippy/rustfmt — not needed to compile).
+          rustBuild = pkgs.rust-bin.stable.latest.default;
           # aarch64 for phone APK; x86_64 for Waydroid (host container).
+          # Iterative `nix run` / `.#host` uses `devShells.default` (via scripts/enter).
           rustAndroid = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
               "rust-src"
@@ -153,8 +198,8 @@
             ];
           };
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = rust;
-            rustc = rust;
+            cargo = rustBuild;
+            rustc = rustBuild;
           };
           rustPlatformAndroid = pkgs.makeRustPlatform {
             cargo = rustAndroid;
@@ -179,16 +224,29 @@
               };
 
               nativeBuildInputs = with pkgs; [
-                pkg-config
                 makeWrapper
                 copyDesktopItems
-                llvmPackages.libclang
-              ];
+                removeReferencesTo
+              ]
+              ++ buildLibs;
               buildInputs = libs;
 
               OPENSSL_NO_VENDOR = "1";
               PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
               doCheck = false;
+              # Drop symbols; panic location strings still need remove-references-to.
+              stripAll = true;
+              # Avoid embedding full DWARF from cargo's default release profile.
+              CARGO_PROFILE_RELEASE_DEBUG = "0";
+              CARGO_PROFILE_RELEASE_STRIP = "symbols";
+
+              # rustc/libclang paths get baked into the binary/wrapper; scrub so
+              # the runtime closure (and thus Cachix/CI substitutes) stay small.
+              disallowedReferences = [
+                rustBuild
+                pkgs.llvmPackages.libclang
+                pkgs.llvmPackages.libclang.lib
+              ];
 
               # Binary is named `sleek` (see host/Cargo.toml [[bin]]).
               # Desktop entry + icons for app menus / launchers.
@@ -199,7 +257,7 @@
                   genericName = "Chat";
                   comment = "Freeq chat client — channels, DMs, and calls";
                   exec = "sleek";
-                  # Name-based lookup; postInstall rewrites to an absolute PNG
+                  # Name-based initially; preFixup rewrites to an absolute PNG
                   # path so launchers that skip nix-profile hicolor still work.
                   icon = "uk.nandi.sleek";
                   categories = [
@@ -236,13 +294,34 @@
                 install -Dm644 ${./assets/icons}/uk.nandi.sleek-256.png \
                   $out/share/pixmaps/uk.nandi.sleek.png
 
-                # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
-                # and when the launcher does not merge nix-profile into the theme path.
+                # AppStream metadata (Flatpak / software centers).
+                install -Dm644 ${./assets/uk.nandi.sleek.metainfo.xml} \
+                  $out/share/metainfo/uk.nandi.sleek.metainfo.xml
+              '';
+
+              # copyDesktopItems runs as a postInstallHook *after* the postInstall
+              # body above, so the .desktop file is not present yet during
+              # postInstall. Rewrite Icon= here (preFixup) once it has been copied.
+              # Absolute Icon= path is reliable across icon themes (Papirus, etc.)
+              # and when the launcher does not merge nix-profile into the theme path
+              # — bare `Icon=uk.nandi.sleek` name lookup often fails in that case.
+              preFixup = ''
                 if [ -f $out/share/applications/uk.nandi.sleek.desktop ]; then
                   substituteInPlace $out/share/applications/uk.nandi.sleek.desktop \
                     --replace-fail 'Icon=uk.nandi.sleek' \
                     "Icon=$out/share/icons/hicolor/256x256/apps/uk.nandi.sleek.png"
+                else
+                  echo "error: uk.nandi.sleek.desktop missing; copyDesktopItems did not run" >&2
+                  exit 1
                 fi
+
+                # Drop rustc/libclang store paths leaked into the binary/wrapper
+                # (std panic locations embed rust-src paths even after strip).
+                find "$out" -type f -exec remove-references-to \
+                  -t ${rustBuild} \
+                  -t ${pkgs.llvmPackages.libclang} \
+                  -t ${pkgs.llvmPackages.libclang.lib} \
+                  {} +
               '';
 
               meta = with pkgs.lib; {
@@ -255,6 +334,67 @@
             }
             // (v4l2BindgenEnv pkgs)
           );
+
+          # Distributable Flatpak bundle of packages.sleek (no Nix required to install).
+          #   nix build .#flatpak
+          #   flatpak install --user ./result/uk.nandi.sleek.flatpak
+          #   flatpak run uk.nandi.sleek
+          sleek-flatpak = nix2flatpak.lib.${system}.mkFlatpak {
+            appId = "uk.nandi.sleek";
+            appName = "Sleek";
+            developer = "nandi";
+            package = sleek-host;
+            # GNOME Platform indexes ship with nix2flatpak; includes Freedesktop base.
+            runtime = "org.gnome.Platform/49";
+            command = "sleek";
+            appdata = ./assets/uk.nandi.sleek.metainfo.xml;
+            desktopFile = ./assets/uk.nandi.sleek.desktop;
+            permissions = {
+              share = [
+                "network"
+                "ipc"
+              ];
+              sockets = [
+                "fallback-x11"
+                "wayland"
+                "pulseaudio"
+              ];
+              # dri = GL; all = camera / mic for freeq AV calls.
+              devices = [
+                "dri"
+                "all"
+              ];
+              filesystems = [
+                "xdg-run/pipewire-0"
+                "xdg-download"
+              ];
+              talk-names = [
+                "org.freedesktop.Notifications"
+                "org.freedesktop.portal.Desktop"
+              ];
+            };
+            # nixpkgs unstable vs GNOME 49 runtime — ABI check is advisory here.
+            skipAbiChecks = true;
+          };
+
+          # Singularity/Apptainer container image of packages.sleek.
+          #   nix build .#sif
+          #   singularity run ./result           (or apptainer run ./result)
+          # Uses vmTools.runInLinuxVM under the hood — needs a builder with
+          # the `kvm` system feature (nixbuild.net's builders advertise it;
+          # see scripts/ci-nixbuild.sh's sleek-nixbuild-builders line).
+          sleek-sif = pkgs.singularity-tools.buildImage {
+            name = "sleek";
+            contents = [ sleek-host ];
+            # GUI/Wayland/GL/audio closure (mesa, wayland, pipewire, …) is
+            # much larger than the singularity-tools default (1024 MiB).
+            diskSize = 8192;
+            memSize = 2048;
+            runScript = ''
+              #!${pkgs.runtimeShell}
+              exec ${sleek-host}/bin/sleek "$@"
+            '';
+          };
 
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
@@ -290,6 +430,8 @@
             # Keep the build deterministic: no host ~/.android or ambient SDK.
             strictDeps = true;
             dontUseCmakeConfigure = true;
+            # Output is a plain APK — toolchain must not leak into the closure.
+            disallowedReferences = [ rustAndroid ];
 
             ANDROID_HOME = androidSdkRoot;
             ANDROID_SDK_ROOT = androidSdkRoot;
@@ -304,17 +446,13 @@
               mkdir -p "$HOME/.android"
 
               # cargo-apk --release requires [package.metadata.android.signing.release].
-              # Generate a local install keystore (same defaults as Android debug).
-              keystore="$HOME/.android/sleek-release.keystore"
-              if [[ ! -f "$keystore" ]]; then
-                keytool -genkeypair -v \
-                  -keystore "$keystore" \
-                  -storepass android \
-                  -alias androiddebugkey \
-                  -keypass android \
-                  -keyalg RSA -keysize 2048 -validity 10000 \
-                  -dname "CN=Sleek Local,O=Sleek,C=US"
-              fi
+              # Use the committed CI keystore so every build shares one signature
+              # (ephemeral keys break adb/phone upgrades with "App not installed").
+              keystore="$(pwd)/sleek/android/ci.keystore"
+              [[ -f "$keystore" ]] || {
+                echo "missing CI keystore at $keystore" >&2
+                exit 1
+              }
 
               ndk="$ANDROID_NDK_HOME"
               if [[ ! -d "$ndk" ]]; then
@@ -353,25 +491,27 @@
               echo "  linker=$CC_aarch64_linux_android" >&2
 
               pushd sleek/android >/dev/null
-              # cargo-apk rejects workspaces unless a package is selected (-p).
+              # cargo-apk rejects multi-member workspaces unless a package is selected (-p).
               # --release: optimized, no debuginfo — APK stays installable size.
-              # Inject release signing (path is absolute; not committed to Cargo.toml).
-              if ! grep -q 'signing.release' Cargo.toml; then
-                cat >> Cargo.toml <<EOF
-
-[package.metadata.android.signing.release]
-path = "$keystore"
-keystore_password = "android"
-key_alias = "androiddebugkey"
-key_password = "android"
-EOF
-              fi
+              # Inject release signing before [patch] (path is absolute; not committed) —
+              # shared with buck2's cargo_apk_genrule (cargo.bzl), see that script's comment.
+              python3 scripts/inject-release-signing.py Cargo.toml "$keystore"
               cargo apk build --release --target ${androidTarget} -p sleek --lib
 
               # Inject SleekActivity as classes.dex so freeq:// OAuth deep links work.
-              apk="$(find target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              # Prefer the final signed package; never inject into *-unaligned leftovers.
+              apk=""
+              for cand in \
+                target/release/apk/sleek.apk \
+                target/sleek.apk \
+                target/release/apk/sleek-release.apk; do
+                if [[ -f "$cand" ]]; then
+                  apk="$cand"
+                  break
+                fi
+              done
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find target -type f -name 'sleek.apk' -o -name '*-release.apk' | head -1 || true)"
+                apk="$(find target -type f -path '*/release/apk/*.apk' ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               [[ -n "''${apk:-}" && -f "$apk" ]] || {
                 echo "APK not found for dex inject under sleek/android/target" >&2
@@ -391,13 +531,22 @@ EOF
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              # Prefer release APK (cargo-apk writes target/*/release/apk/ or target/release/apk/).
-              apk="$(find sleek/android/target -type f -path '*/release/apk/*.apk' | head -1 || true)"
+              # Prefer the final signed package (same rules as deploy-android.sh).
+              apk=""
+              for cand in \
+                sleek/android/target/release/apk/sleek.apk \
+                sleek/android/target/sleek.apk \
+                sleek/android/target/release/apk/sleek-release.apk; do
+                if [[ -f "$cand" ]]; then
+                  apk="$cand"
+                  break
+                fi
+              done
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-release.apk' -o -name '*-debug.apk' \) | head -1 || true)"
+                apk="$(find sleek/android/target -type f -path '*/release/apk/*.apk' ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               if [[ -z "''${apk:-}" ]]; then
-                apk="$(find sleek/android/target -type f -name '*.apk' | head -1 || true)"
+                apk="$(find sleek/android/target -type f \( -name 'sleek.apk' -o -name '*-release.apk' \) ! -name '*-unaligned.apk' 2>/dev/null | head -1 || true)"
               fi
               [[ -n "''${apk:-}" && -f "$apk" ]] || {
                 echo "APK not found under sleek/android/target" >&2
@@ -405,6 +554,9 @@ EOF
                 exit 1
               }
               cp "$apk" $out/sleek.apk
+              apksigner="$(echo "$ANDROID_HOME"/build-tools/*/apksigner | awk '{print $NF}')"
+              "$apksigner" verify --verbose "$out/sleek.apk"
+              "$apksigner" verify --print-certs "$out/sleek.apk" | grep -q 'CN=Sleek CI'
               # Convenience symlink for tools that look for a generic name.
               ln -s sleek.apk $out/app.apk
               cat > $out/metadata.txt <<EOF
@@ -645,83 +797,64 @@ EOF
             release = true;
           };
 
-          # Desktop host app entry: flake toolchain + in-tree `cargo run --release`.
-          # Used by apps.default / apps.host (`nix run`, `nix run .#host`).
+          # Desktop host app entry: enter flake `devShells.default`, then
+          # `just host --release`. Used by apps.default / apps.host
+          # (`nix run`, `nix run .#host`). Reuses the same buildInputs /
+          # bindgen / SLEEK_LD_LIBRARY_PATH setup as `nix develop` so
+          # link/runtime native deps are not missing outside the shell.
           # Hermetic store binary remains packages.sleek / apps.sleek.
           # Run from the sleek repo root (needs sibling ../../vidya + ../../freeq).
-          run-host =
-            let
-              sleekLibPath = pkgs.lib.makeLibraryPath libs;
-              # pkg-config needs .dev outputs for headers + .pc files.
-              pkgConfigPath = pkgs.lib.makeSearchPath "lib/pkgconfig" (
-                map (p: p.dev or p) (
-                  libs
-                  ++ [
-                    pkgs.openssl
-                  ]
-                )
-              );
-              bindgen = v4l2BindgenEnv pkgs;
-            in
-            pkgs.writeShellApplication {
-              name = "run-host";
-              runtimeInputs = [
-                rust
-                pkgs.pkg-config
-                pkgs.llvmPackages.libclang
-              ];
-              text = ''
-                set -euo pipefail
+          run-host = pkgs.writeShellApplication {
+            name = "run-host";
+            runtimeInputs = [
+              pkgs.coreutils
+              pkgs.bash
+            ];
+            text = ''
+              set -euo pipefail
 
-                export OPENSSL_NO_VENDOR=1
-                export PKG_CONFIG_PATH="${pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-                export LD_LIBRARY_PATH="${sleekLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                export LIBCLANG_PATH="${bindgen.LIBCLANG_PATH}"
-                export SLEEK_LIBCLANG_PATH="${bindgen.SLEEK_LIBCLANG_PATH}"
-                export BINDGEN_EXTRA_CLANG_ARGS="${bindgen.BINDGEN_EXTRA_CLANG_ARGS}"
-                export V4L2R_VIDEODEV2_H_PATH="${bindgen.V4L2R_VIDEODEV2_H_PATH}"
-
-                # Codespace / desktop-lite: GUI opens on the VNC X display.
-                if [[ -n "''${SLEEK_CODESPACE:-}" ]]; then
-                  export DISPLAY="''${DISPLAY:-:1}"
-                  export LIBGL_ALWAYS_SOFTWARE="''${LIBGL_ALWAYS_SOFTWARE:-1}"
-                elif [[ -z "''${DISPLAY:-}" && -z "''${WAYLAND_DISPLAY:-}" ]]; then
-                  if [[ -S /tmp/.X11-unix/X1 ]]; then
-                    export DISPLAY=:1
-                  elif [[ -S /tmp/.X11-unix/X0 ]]; then
-                    export DISPLAY=:0
+              # Find sleek repo root (host/Cargo.toml + android path dep).
+              root=""
+              if [[ -f ./host/Cargo.toml && -f ./android/Cargo.toml ]]; then
+                root="$PWD"
+              else
+                d="$PWD"
+                for _ in 1 2 3 4 5; do
+                  if [[ -f "$d/host/Cargo.toml" && -f "$d/android/Cargo.toml" ]]; then
+                    root="$d"
+                    break
                   fi
-                fi
+                  d="$(dirname "$d")"
+                done
+              fi
+              if [[ -z "''${root:-}" ]]; then
+                echo "error: run from the sleek repo root (need host/Cargo.toml + path deps)" >&2
+                echo "  cd /path/to/sleek && nix run .#host" >&2
+                exit 1
+              fi
+              cd "$root"
 
-                # Find sleek repo root (host/Cargo.toml + android path dep).
-                root=""
-                if [[ -f ./host/Cargo.toml && -f ./android/Cargo.toml ]]; then
-                  root="$PWD"
-                else
-                  d="$PWD"
-                  for _ in 1 2 3 4 5; do
-                    if [[ -f "$d/host/Cargo.toml" && -f "$d/android/Cargo.toml" ]]; then
-                      root="$d"
-                      break
-                    fi
-                    d="$(dirname "$d")"
-                  done
-                fi
-                if [[ -z "''${root:-}" ]]; then
-                  echo "error: run from the sleek repo root (need host/Cargo.toml + path deps)" >&2
-                  echo "  cd /path/to/sleek && nix run .#host" >&2
-                  exit 1
-                fi
-                cd "$root"
-
-                exec cargo run --release --manifest-path host/Cargo.toml "$@"
-              '';
-            };
+              # Prefer scripts/enter (daemon repair + SLEEK_NIX_SHELL guard);
+              # fall back to a direct `nix develop` when the shim is absent.
+              if [[ -x ./scripts/enter ]]; then
+                exec ./scripts/enter just host --release "$@"
+              fi
+              if ! command -v nix >/dev/null 2>&1; then
+                echo "error: nix not found (need scripts/enter or nix on PATH)" >&2
+                exit 1
+              fi
+              exec nix develop "$root" --command just host --release "$@"
+            '';
+          };
         in
         {
           default = sleek-host;
           sleek = sleek-host;
           inherit sleek-host;
+          flatpak = sleek-flatpak;
+          inherit sleek-flatpak;
+          sif = sleek-sif;
+          inherit sleek-sif;
           android = sleek-android;
           inherit sleek-android;
           inherit install-android;
@@ -775,6 +908,7 @@ EOF
         let
           pkgs = pkgsFor system;
           libs = eguiLibs pkgs;
+          buildLibs = eguiBuildLibs pkgs;
           # Runtime libs for the egui host only — do NOT export as ambient
           # LD_LIBRARY_PATH. On Codespaces/Ubuntu, that makes system
           # git-remote-https load nix openssl/glibc and die with
@@ -785,6 +919,7 @@ EOF
             openssh
             curl
             cacert
+            gnused
           ];
           rust = pkgs.rust-bin.stable.latest.default.override {
             extensions = [
@@ -807,9 +942,18 @@ EOF
                 pkgs.android-tools
                 pkgs.cargo-apk
                 pkgs.cachix
-                pkgs.pkg-config
                 pkgs.openssl
+                # Faster linking for in-tree .cargo/config.toml (-fuse-ld=mold).
+                pkgs.mold
+                pkgs.starship
+                # third-party/BUCK's reindeer-vendored rust_library graph +
+                # toolchains/ (hermetic rustc/zig) — see reindeer.toml.
+                pkgs.buck2
+                # Desktop host build's dev-shell env (pixi.toml/pixi.lock) —
+                # see scripts/pixi-activate.sh.
+                pkgs.pixi
               ]
+              ++ buildLibs
               ++ cliTools;
               buildInputs = libs;
               OPENSSL_NO_VENDOR = "1";
@@ -851,7 +995,12 @@ EOF
                 export BINDGEN_EXTRA_CLANG_ARGS="${(v4l2BindgenEnv pkgs).BINDGEN_EXTRA_CLANG_ARGS}"
                 export V4L2R_VIDEODEV2_H_PATH="${(v4l2BindgenEnv pkgs).V4L2R_VIDEODEV2_H_PATH}"
                 if [[ -z "''${SLEEK_QUIET_SHELL:-}" ]]; then
-                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix run .#waydroid-release | nix run .#deploy-android | nix build .#android"
+                  echo "sleek — nix run | nix run .#host | nix run .#waydroid | nix build .#android | nix build .#flatpak | nix build .#sif"
+                fi
+                # Starship prompt for interactive shells (bashrc also inits; this
+                # covers `nix develop` / ./scripts/enter before bashrc reloads).
+                if [[ $- == *i* ]] && command -v starship >/dev/null 2>&1; then
+                  eval "$(starship init bash)"
                 fi
               '';
             }

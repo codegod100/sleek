@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>uk.nandi.sleek</id>
+  <name>Sleek</name>
+  <summary>Freeq chat client — channels, DMs, and calls</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="uk.nandi">
+    <name>nandi</name>
+  </developer>
+  <url type="homepage">https://github.com/codegod100/sleek</url>
+  <description>
+    <p>
+      Sleek is a freeq chat client with channels, direct messages, and
+      audio/video calls. It uses a GNOME/HIG-inspired egui shell with
+      connect, chats, discover, and settings screens.
+    </p>
+  </description>
+  <launchable type="desktop-id">uk.nandi.sleek.desktop</launchable>
+  <provides>
+    <binary>sleek</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <keywords>
+    <keyword>freeq</keyword>
+    <keyword>irc</keyword>
+    <keyword>chat</keyword>
+    <keyword>call</keyword>
+    <keyword>video</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-31"/>
+  </releases>
+</component>

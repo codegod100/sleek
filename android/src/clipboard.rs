@@ -1,16 +1,26 @@
-//! Clipboard + file helpers for the compose-bar image attachment.
+//! Clipboard + file helpers for the compose-bar media attachment.
 
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(not(target_os = "android"))]
 use std::sync::{Mutex, OnceLock};
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
 
-use crate::state::ComposeImage;
+use crate::state::{ComposeAttach, ComposeImage, ComposeVideo};
 
 /// Max pixel dimension after load (keeps memory / upload reasonable).
 const MAX_DIM: u32 = 4096;
 /// Refuse raw RGBA pastes larger than this (~25 MP).
 const MAX_RGBA_BYTES: usize = 100_000_000;
+/// Server + freeq-app upload cap (also used as a pick-time reject for video).
+pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+/// How long the UI thread will wait on a clipboard/image helper thread.
+/// Arboard/X11 conversion and file decode must never block egui's immediate
+/// mode loop — a stuck compositor previously froze paste for the whole app.
+#[cfg(not(target_os = "android"))]
+const CLIPBOARD_UI_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// Shared arboard handle (creating one per paste starts an X11 server thread).
 #[cfg(not(target_os = "android"))]
@@ -29,7 +39,8 @@ fn arboard_clipboard() -> Option<&'static Mutex<arboard::Clipboard>> {
 /// Try to read an image from the system clipboard.
 ///
 /// Returns `None` when the clipboard has no image, the platform does not
-/// support image clipboard, or the read fails.
+/// support image clipboard, the read fails, or the read exceeds the UI
+/// timeout (so text paste can still proceed).
 pub fn try_get_image() -> Option<ComposeImage> {
     #[cfg(not(target_os = "android"))]
     {
@@ -44,22 +55,14 @@ pub fn try_get_image() -> Option<ComposeImage> {
 #[cfg(not(target_os = "android"))]
 fn try_get_image_desktop() -> Option<ComposeImage> {
     // 1) arboard (Wayland data-control when available, else X11 bridge).
-    if let Some(clip) = arboard_clipboard() {
-        if let Ok(mut guard) = clip.lock() {
-            match guard.get_image() {
-                Ok(img) => {
-                    if let Some(composed) = compose_from_arboard(img) {
-                        log::debug!(
-                            "clipboard image via arboard: {}x{}",
-                            composed.width,
-                            composed.height
-                        );
-                        return Some(composed);
-                    }
-                }
-                Err(e) => log::debug!("arboard get_image: {e}"),
-            }
-        }
+    //    Always off the UI thread — `get_image` can block on X11 conversion.
+    if let Some(img) = try_get_image_arboard_timed() {
+        log::debug!(
+            "clipboard image via arboard: {}x{}",
+            img.width,
+            img.height
+        );
+        return Some(img);
     }
 
     // 2) wl-paste: works on GNOME/Wayland even when arboard has no data-control.
@@ -80,8 +83,56 @@ fn try_get_image_desktop() -> Option<ComposeImage> {
     None
 }
 
+/// Owned RGBA snapshot from arboard (safe to move across threads).
 #[cfg(not(target_os = "android"))]
-fn compose_from_arboard(img: arboard::ImageData<'_>) -> Option<ComposeImage> {
+struct OwnedImage {
+    width: usize,
+    height: usize,
+    bytes: Vec<u8>,
+}
+
+#[cfg(not(target_os = "android"))]
+fn try_get_image_arboard_timed() -> Option<ComposeImage> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-clip-img".into())
+        .spawn(move || {
+            let result = (|| {
+                let clip = arboard_clipboard()?;
+                let mut guard = clip.lock().ok()?;
+                let img = guard.get_image().ok()?;
+                if img.width == 0 || img.height == 0 {
+                    return None;
+                }
+                let expected = img.width.checked_mul(img.height)?.checked_mul(4)?;
+                if img.bytes.len() < expected || expected > MAX_RGBA_BYTES {
+                    return None;
+                }
+                Some(OwnedImage {
+                    width: img.width,
+                    height: img.height,
+                    bytes: img.bytes.into_owned(),
+                })
+            })();
+            let _ = tx.send(result);
+        })
+        .ok()?;
+
+    match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
+        Ok(Some(owned)) => compose_from_owned(owned),
+        Ok(None) => None,
+        Err(_) => {
+            log::debug!(
+                "arboard get_image timed out after {}ms — leaving text paste alone",
+                CLIPBOARD_UI_TIMEOUT.as_millis()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn compose_from_owned(img: OwnedImage) -> Option<ComposeImage> {
     if img.width == 0 || img.height == 0 {
         return None;
     }
@@ -96,7 +147,7 @@ fn compose_from_arboard(img: arboard::ImageData<'_>) -> Option<ComposeImage> {
     Some(ComposeImage::from_rgba(
         img.width,
         img.height,
-        Arc::from(img.bytes.into_owned()),
+        Arc::from(img.bytes),
     ))
 }
 
@@ -140,12 +191,19 @@ fn try_get_image_wl_paste() -> Option<ComposeImage> {
 
 #[cfg(not(target_os = "android"))]
 fn wl_paste_list_types() -> Option<Vec<String>> {
-    let out = std::process::Command::new("wl-paste")
-        .args(["--list-types"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("wl-paste")
+            .args(["--list-types"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    let out = match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
+        Ok(Ok(out)) => out,
+        _ => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -173,7 +231,7 @@ fn wl_paste_bytes(mime: &str) -> Option<Vec<u8>> {
             .output();
         let _ = tx.send(out);
     });
-    let out = match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+    let out = match rx.recv_timeout(CLIPBOARD_UI_TIMEOUT) {
         Ok(Ok(out)) => out,
         _ => return None,
     };
@@ -190,21 +248,44 @@ fn wl_paste_bytes(mime: &str) -> Option<Vec<u8>> {
 
 #[cfg(not(target_os = "android"))]
 fn try_get_image_from_uri_list() -> Option<ComposeImage> {
-    let clip = arboard_clipboard()?;
-    let mut guard = clip.lock().ok()?;
-    let paths = guard.get().file_list().ok()?;
-    for path in paths {
-        if is_likely_image_path(&path) {
-            match load_image_from_path(&path) {
-                Ok(img) => {
-                    log::debug!("clipboard image from file list: {}", path.display());
-                    return Some(img);
+    // Path list + decode off the UI thread (decode can take hundreds of ms).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-clip-uri".into())
+        .spawn(move || {
+            let result = (|| {
+                let clip = arboard_clipboard()?;
+                let mut guard = clip.lock().ok()?;
+                let paths = guard.get().file_list().ok()?;
+                for path in paths {
+                    if is_likely_image_path(&path) {
+                        match load_image_from_path(&path) {
+                            Ok(img) => {
+                                log::debug!("clipboard image from file list: {}", path.display());
+                                return Some(img);
+                            }
+                            Err(e) => log::debug!("clipboard file {}: {e}", path.display()),
+                        }
+                    }
                 }
-                Err(e) => log::debug!("clipboard file {}: {e}", path.display()),
-            }
+                None
+            })();
+            let _ = tx.send(result);
+        })
+        .ok()?;
+
+    // Decode can take >400ms for large photos; allow longer than raw clipboard I/O.
+    const URI_LIST_TIMEOUT: Duration = Duration::from_secs(2);
+    match rx.recv_timeout(URI_LIST_TIMEOUT) {
+        Ok(img) => img,
+        Err(_) => {
+            log::debug!(
+                "clipboard file-list image timed out after {}ms",
+                URI_LIST_TIMEOUT.as_millis()
+            );
+            None
         }
     }
-    None
 }
 
 fn is_likely_image_path(path: &Path) -> bool {
@@ -219,22 +300,22 @@ fn is_likely_image_path(path: &Path) -> bool {
     }
 }
 
-/// Result of a native image file dialog (`Ok(None)` = user cancelled).
-pub type PickImageResult = Result<Option<ComposeImage>, String>;
+/// Result of a native media file dialog (`Ok(None)` = user cancelled).
+pub type PickAttachResult = Result<Option<ComposeAttach>, String>;
 
 /// Open the **OS file picker** on a background thread and return a receiver.
 ///
 /// Never call the dialog on the egui UI thread — a modal `block_on` there
 /// freezes the whole app (often until the process is killed). Desktop uses
-/// `rfd` (xdg-desktop-portal). Android uses the system document/photo Intent.
-pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
+/// `rfd` (xdg-desktop-portal). Android uses the system document Intent.
+pub fn start_pick_media_file() -> std::sync::mpsc::Receiver<PickAttachResult> {
     let (tx, rx) = std::sync::mpsc::channel();
     #[cfg(not(target_os = "android"))]
     {
         std::thread::Builder::new()
             .name("sleek-file-pick".into())
             .spawn(move || {
-                let result = pick_image_file_desktop();
+                let result = pick_media_file_desktop();
                 let _ = tx.send(result);
             })
             .expect("spawn file pick thread");
@@ -244,7 +325,7 @@ pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
         std::thread::Builder::new()
             .name("sleek-file-pick".into())
             .spawn(move || {
-                let result = crate::android_media::pick_image_file();
+                let result = crate::android_media::pick_media_file();
                 let _ = tx.send(result);
             })
             .expect("spawn android file pick thread");
@@ -252,42 +333,157 @@ pub fn start_pick_image_file() -> std::sync::mpsc::Receiver<PickImageResult> {
     rx
 }
 
+/// Process-lifetime Tokio runtime for rfd's xdg-desktop-portal backend.
+///
+/// ashpd caches a single `zbus::Connection` in a static `OnceLock`. That
+/// connection is driven by the runtime that created it — if we build+drop a
+/// runtime per pick (as we used to), cancel works once, then the next open
+/// reuses the dead connection and hangs forever.
+#[cfg(not(target_os = "android"))]
+fn rfd_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("sleek-rfd")
+            .build()
+            .expect("sleek-rfd tokio runtime")
+    })
+}
+
 /// Desktop: native OS dialog via rfd (portal / platform backend).
 #[cfg(not(target_os = "android"))]
-fn pick_image_file_desktop() -> PickImageResult {
-    // rfd's xdg-portal backend (ashpd → zbus) needs a Tokio reactor. Run it on
-    // this worker thread only — never on the egui UI thread.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .thread_name("sleek-rfd")
-        .build()
-        .map_err(|e| format!("Could not start file dialog runtime: {e}"))?;
+fn pick_media_file_desktop() -> PickAttachResult {
+    // Serialize portal requests: a UI timeout can clear `file_pick_rx` while
+    // the first worker is still inside `pick_file`, and two concurrent
+    // OpenFileRequests on ashpd's shared connection also hang.
+    static PICK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = PICK_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "File picker lock poisoned".to_string())?;
 
-    let path = rt.block_on(async {
+    // rfd's xdg-portal backend (ashpd → zbus) needs a Tokio reactor. Drive it
+    // from this worker thread only — never on the egui UI thread.
+    let path = rfd_runtime().block_on(async {
         rfd::AsyncFileDialog::new()
-            .set_title("Attach image")
+            .set_title("Attach image or video")
+            .add_filter(
+                "Media",
+                &["png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "m4v", "webm", "mov"],
+            )
             .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .add_filter("Videos", &["mp4", "m4v", "webm", "mov"])
             .pick_file()
             .await
             .map(|handle| handle.path().to_path_buf())
     });
-    // Drop the runtime before heavy decode so worker threads go away promptly.
-    drop(rt);
 
     let Some(path) = path else {
         return Ok(None);
     };
-    Ok(Some(load_image_from_path(&path)?))
+    Ok(Some(load_attach_from_path(&path)?))
+}
+
+/// Load an image or video file into a compose attachment.
+pub fn load_attach_from_path(path: &Path) -> Result<ComposeAttach, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Could not read file: {e}"))?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attach")
+        .to_string();
+    load_attach_from_vec(bytes, Some(&name))
 }
 
 /// Load and decode an image file into RGBA for the compose preview / upload.
 pub fn load_image_from_path(path: &Path) -> Result<ComposeImage, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read file: {e}"))?;
-    load_image_from_bytes(&bytes)
+    match load_attach_from_path(path)? {
+        ComposeAttach::Image(img) => Ok(img),
+        ComposeAttach::Video(_) => Err("Not an image file".into()),
+    }
 }
 
-/// Decode image bytes (png/jpeg/gif/webp/bmp) into a compose attachment.
+/// Build a compose attachment from raw bytes + optional filename hint.
+///
+/// Prefer [`load_attach_from_vec`] when you already own the buffer so video
+/// attachments can move into an `Arc` without a second copy.
+pub fn load_attach_from_bytes(bytes: &[u8], filename: Option<&str>) -> Result<ComposeAttach, String> {
+    load_attach_from_vec(bytes.to_vec(), filename)
+}
+
+/// Like [`load_attach_from_bytes`], but takes ownership (no video double-copy).
+pub fn load_attach_from_vec(
+    bytes: Vec<u8>,
+    filename: Option<&str>,
+) -> Result<ComposeAttach, String> {
+    if bytes.is_empty() {
+        return Err("Empty file".into());
+    }
+
+    let name = filename.unwrap_or("attach");
+    let lower = name.to_ascii_lowercase();
+    if let Some(ct) =
+        video_content_type_for_name(&lower).or_else(|| sniff_video_content_type(&bytes))
+    {
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            return Err("Video is too large (max 10MB)".into());
+        }
+        let filename = if lower.ends_with(".mp4")
+            || lower.ends_with(".m4v")
+            || lower.ends_with(".webm")
+            || lower.ends_with(".mov")
+        {
+            name.to_string()
+        } else {
+            default_video_filename(ct)
+        };
+        return Ok(ComposeAttach::Video(ComposeVideo::new(
+            Arc::<[u8]>::from(bytes),
+            ct,
+            filename,
+        )));
+    }
+
+    Ok(ComposeAttach::Image(load_image_from_bytes(&bytes)?))
+}
+
+fn video_content_type_for_name(name: &str) -> Option<&'static str> {
+    let base = name.split('?').next().unwrap_or(name);
+    let base = base.split('#').next().unwrap_or(base);
+    if base.ends_with(".mp4") || base.ends_with(".m4v") {
+        Some("video/mp4")
+    } else if base.ends_with(".webm") {
+        Some("video/webm")
+    } else if base.ends_with(".mov") {
+        Some("video/quicktime")
+    } else {
+        None
+    }
+}
+
+fn sniff_video_content_type(bytes: &[u8]) -> Option<&'static str> {
+    // ISO BMFF (`….ftyp`) — mp4 / m4v / mov.
+    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        return Some("video/mp4");
+    }
+    // EBML / Matroska / WebM
+    if bytes.len() >= 4 && bytes[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return Some("video/webm");
+    }
+    None
+}
+
+fn default_video_filename(content_type: &str) -> String {
+    match content_type {
+        "video/webm" => "clip.webm".into(),
+        "video/quicktime" => "clip.mov".into(),
+        _ => "clip.mp4".into(),
+    }
+}
+
+/// Decode image bytes (png/jpeg/gif/webp/bmp) into a compose attachment image.
 pub fn load_image_from_bytes(bytes: &[u8]) -> Result<ComposeImage, String> {
     if bytes.is_empty() {
         return Err("Empty file".into());
@@ -334,4 +530,47 @@ pub fn encode_png(image: &ComposeImage) -> Result<Vec<u8>, String> {
         )
         .map_err(|e| format!("PNG encode failed: {e}"))?;
     Ok(buf)
+}
+
+/// Encode on a worker thread so large pastes cannot freeze the egui frame.
+pub fn start_encode_png(
+    image: ComposeImage,
+) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sleek-png-encode".into())
+        .spawn(move || {
+            let _ = tx.send(encode_png(&image));
+        })
+        .expect("spawn png encode thread");
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_mp4_as_video_attach() {
+        // Minimal ISO BMFF header (ftyp) — enough for sniff + attach.
+        let mut bytes = vec![0u8; 32];
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[8..12].copy_from_slice(b"isom");
+        let attach = load_attach_from_bytes(&bytes, Some("clip.mp4")).unwrap();
+        match attach {
+            ComposeAttach::Video(v) => {
+                assert_eq!(v.content_type, "video/mp4");
+                assert_eq!(v.filename, "clip.mp4");
+            }
+            other => panic!("expected video, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_huge_video() {
+        let mut bytes = vec![0u8; MAX_UPLOAD_BYTES + 1];
+        bytes[4..8].copy_from_slice(b"ftyp");
+        let err = load_attach_from_bytes(&bytes, Some("big.mp4")).unwrap_err();
+        assert!(err.contains("10MB"), "{err}");
+    }
 }

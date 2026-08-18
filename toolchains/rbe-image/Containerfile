@@ -1,0 +1,158 @@
+# RBE worker image for sleek's cargo.bzl-backed genrules (sleek-host,
+# sleek-android-lib) — these still shell out to `pixi run -- cargo build`,
+# unlike the hermetic reindeer-vendored third-party/ graph, which
+# self-provisions its own rustc/zig via buck2 http_archive and works fine
+# on BuildBuddy's plain stock image. This one extends that same stock
+# image with pixi + the Android NDK baked in, matching flake.nix's
+# devShell env exactly, so sleek-android-lib's `cargo build` has
+# everything it needs without depending on this machine's local pixi/NDK
+# install. Also bakes in flatpak + flatpak-builder + a system-wide
+# org.freedesktop.Platform//25.08 + org.freedesktop.Sdk//25.08 install for
+# flatpak.bzl's sleek-flatpak genrule (see near the bottom of this file) —
+# same "pre-install so RE actions don't need Flathub network access"
+# pattern as the Android NDK/SDK. See README.md in this directory for how
+# to build + push it.
+FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
+
+# build-essential: pixi's own clang/libclang (bindgen's dependency, see
+# pixi.toml) still needs a real /usr/include with libc's own headers
+# (stdint.h etc.) present on the system to successfully parse C headers —
+# without it, any build.rs that runs bindgen (cpal's pipewire feature,
+# among others) fails with "unknown type name 'uint32_t'". Confirmed by
+# hitting exactly that error without this.
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git unzip xz-utils bzip2 build-essential \
+    openjdk-17-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,
+# v4l2-controls.h,v4l2-common.h,const.h} into conda's own bundled (even
+# staler) compat sysroot so v4l2r's bindgen-generated bindings have the
+# V4L2 stateless-codec control structs (VP9/AV1/H264 decode, …) its
+# src/controls/codec.rs unconditionally references — but that only helps
+# if the *system's own* copies have them. This base image's jammy
+# (22.04) linux-libc-dev is pinned to a 5.15 kernel UAPI baseline, which
+# predates those structs entirely — confirmed missing, and apt has no
+# newer linux-libc-dev for jammy (Ubuntu ties it to the release, not
+# HWE). Pull a current noble (24.04) linux-libc-dev .deb instead, purely
+# for its /usr/include/linux/*.h — a pinned build (not :latest-of-noble)
+# so this doesn't silently drift on a future rebuild; bump deliberately
+# if v4l2r ever needs something newer than this.
+RUN curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/main/l/linux/linux-libc-dev_6.8.0-139.139_amd64.deb" -o /tmp/linux-libc-dev.deb \
+    && dpkg -x /tmp/linux-libc-dev.deb /tmp/linux-libc-dev-extracted \
+    && cp -f /tmp/linux-libc-dev-extracted/usr/include/linux/videodev2.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/v4l2-controls.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/v4l2-common.h \
+             /tmp/linux-libc-dev-extracted/usr/include/linux/const.h \
+             /usr/include/linux/ \
+    && rm -rf /tmp/linux-libc-dev.deb /tmp/linux-libc-dev-extracted
+
+# pixi — same install method as everywhere else in this repo (see
+# pixi-activate.sh's own comments); installs to /root/.pixi/bin.
+RUN curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/opt/pixi bash
+ENV PATH="/opt/pixi/bin:${PATH}"
+
+# Android NDK r29 — same version flake.nix's devShell pins
+# ($HOME/.local/share/android-ndk-r29), extracted to the same shape so
+# the exact same env vars work unmodified. Downloaded at image-build time
+# rather than checked in (~780MB).
+RUN curl -fsSL "https://dl.google.com/android/repository/android-ndk-r29-linux.zip" -o /tmp/android-ndk.zip \
+    && mkdir -p /opt/android \
+    && unzip -q /tmp/android-ndk.zip -d /opt/android \
+    && mv /opt/android/android-ndk-r29 /opt/android/ndk \
+    && rm /tmp/android-ndk.zip
+
+ENV ANDROID_NDK_HOME=/opt/android/ndk
+ENV ANDROID_NDK_ROOT=/opt/android/ndk
+ENV PATH="/opt/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+ENV CC_x86_64_linux_android=x86_64-linux-android28-clang
+ENV CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=x86_64-linux-android28-clang
+ENV AR_x86_64_linux_android=llvm-ar
+ENV CC_aarch64_linux_android=aarch64-linux-android28-clang
+ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android28-clang
+ENV AR_aarch64_linux_android=llvm-ar
+
+# Android SDK cmdline-tools + platform 34 + build-tools 34.0.0 — same
+# versions flake.nix's androidComposition pins (platformVersions = ["34"],
+# buildToolsVersions = ["34.0.0"]) — for `cargo apk build`'s packaging
+# step (aapt2, apksigner, zipalign), which the NDK alone doesn't provide;
+# `sdkmanager --licenses` piped through `yes` accepts every license
+# non-interactively (no need to track specific license-hash files).
+RUN curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip \
+    && mkdir -p /opt/android/sdk/cmdline-tools \
+    && unzip -q /tmp/cmdline-tools.zip -d /opt/android/sdk/cmdline-tools \
+    && mv /opt/android/sdk/cmdline-tools/cmdline-tools /opt/android/sdk/cmdline-tools/latest \
+    && rm /tmp/cmdline-tools.zip \
+    && yes | /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk --licenses > /dev/null \
+    && /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk \
+       "platforms;android-34" "build-tools;34.0.0"
+
+ENV ANDROID_HOME=/opt/android/sdk
+ENV ANDROID_SDK_ROOT=/opt/android/sdk
+ENV PATH="/opt/android/sdk/build-tools/34.0.0:${PATH}"
+
+ENV PATH="/opt/cargo-apk/bin:${PATH}"
+
+# Pre-warm the pixi env at image-build time (network access, but only
+# once here — not on every RE action) so `pixi run --` on an RE worker
+# doesn't need to solve/fetch conda-forge packages itself. Copies just
+# the manifest/lockfile, not the whole repo — this image is meant to be
+# reused across commits; the actual source comes from the RE action's
+# own inputs.
+#
+# Also builds+installs cargo-apk here, reusing this same prewarmed env
+# (not a separate `pixi run` elsewhere) — not on conda-forge, so it's
+# built from source via pixi's own cargo, same rustc it'll later invoke.
+# Installed to a dedicated root (not pixi's own bin dir) so it survives
+# independent of whatever pixi does with its own env.
+COPY pixi.toml pixi.lock /tmp/sleek-pixi/
+RUN cd /tmp/sleek-pixi && pixi install --locked \
+    && pixi run -- cargo install --root /opt/cargo-apk cargo-apk \
+    && rm -rf /tmp/sleek-pixi
+
+# flatpak + flatpak-builder — for flatpak.bzl's sleek-flatpak genrule
+# (packages //:sleek-host into a distributable .flatpak using the
+# Freedesktop Platform/25.08 runtime, not GNOME's — `ldd` on the built
+# binary shows only libstdc++/libpipewire/libasound/libc, no GTK/glib, so
+# GNOME's runtime was pulling in a desktop stack the app never uses;
+# org.freedesktop.Platform.GL//25.08 is what org.gnome.Platform//49
+# itself declares as its own GL extension version, confirmed via
+# `flatpak remote-info --show-metadata`, so 25.08 is the correctly-paired
+# base version). Ports flake.nix's old nix2flatpak-based sleek-flatpak
+# derivation, see that file's git history. Jammy's stock apt versions
+# (flatpak 1.12.7, flatpak-builder 1.2.2 — both quite old) confirmed able
+# to pull a current Freedesktop 25.08 runtime from Flathub fine, no PPA
+# needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    flatpak flatpak-builder \
+    && rm -rf /var/lib/apt/lists/*
+
+# librsvg2-common: registers gdk-pixbuf's SVG loader. flatpak.bzl's
+# genrule calls `flatpak build-export --disable-sandbox` (see that file's
+# comments — build-export's icon validator needs bwrap, which BuildBuddy's
+# RE containers refuse, same CLONE_NEWUSER restriction as flatpak-builder
+# itself), and the *unsandboxed* validator rasterizes the app's SVG icon
+# via the image's own gdk-pixbuf, not the sandboxed runtime's — without
+# this, that fails with "is not a valid icon: Format not recognized" even
+# though the exact same command succeeds on a dev machine that already
+# has an SVG-capable gdk-pixbuf installed. Confirmed hitting exactly that
+# on a real BuildBuddy RE run before adding this.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    librsvg2-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# System-wide (not --user): RE actions may run as any/no particular user
+# and shouldn't need a real $HOME set up just to see the runtime — a
+# system install under /var/lib/flatpak is visible to everyone. Installed
+# at image-build time (network access, but only once here) so RE actions
+# themselves need no Flathub access — same rationale as pre-warming pixi
+# above and baking in the Android NDK/SDK.
+#
+# flatpak-builder's `"appstream-compose": false` manifest key (see
+# flatpak/uk.nandi.sleek.json) means appstreamcli's compose subcommand is
+# never invoked, so it deliberately isn't installed here — confirmed
+# jammy's own `appstream` package (0.15.2) doesn't ship it anyway (that
+# subcommand only exists in much newer libappstream releases).
+RUN flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo \
+    && flatpak install -y --noninteractive --system flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08

@@ -4,11 +4,13 @@ use eframe::egui::{self, Align, CursorIcon, Layout, RichText};
 use vidya::{body, dim_label, primary_button, title, title_2, Theme};
 
 use crate::state::{AppState, POPULAR_CHANNELS};
-use crate::ui::widgets::{avatar_circle, card};
+use crate::ui::widgets::{avatar_circle, card, text_edit_clipboard_menu};
 
 pub enum DiscoverAction {
     None,
     Join(String),
+    /// Already a member — open the channel buffer.
+    Open(String),
 }
 
 pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> DiscoverAction {
@@ -34,6 +36,7 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
                     .min_size(egui::vec2(0.0, th.spacing.control_height))
                     .hint_text("#channel"),
             );
+            text_edit_clipboard_menu(ui, th, &resp);
             // singleline TextEdit surrenders focus on Enter — join when that happens.
             let enter = resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -92,10 +95,14 @@ pub fn discover_tab(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> Disc
             .interact(egui::Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
 
-        if resp.clicked() && !joined {
-            action = DiscoverAction::Join((*name).to_string());
+        if resp.clicked() {
+            action = if joined {
+                DiscoverAction::Open((*name).to_string())
+            } else {
+                DiscoverAction::Join((*name).to_string())
+            };
         }
-        if resp.hovered() && !joined {
+        if resp.hovered() {
             ui.painter().rect_filled(
                 resp.rect,
                 sp.radius_md,

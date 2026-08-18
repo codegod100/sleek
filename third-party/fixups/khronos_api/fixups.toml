@@ -1,0 +1,21 @@
+# src/lib.rs pulls in a handful of non-.rs asset files directly
+# (include_bytes!("../api/xml/gl.xml") etc — normal relative-to-source
+# paths, portable on their own) plus, via our patched build.rs's
+# generated include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), ...)), all
+# of api_webgl/extensions/*/extension.xml. reindeer only globs for .rs
+# files by default (same class of gap as third-party/fixups/egui_glow),
+# so the compile action never sees any of these without this.
+extra_srcs = [
+    "api/xml/gl.xml",
+    "api/xml/wgl.xml",
+    "api/xml/glx.xml",
+    "api_egl/api/egl.xml",
+    "api_angle/scripts/gl_angle_ext.xml",
+    "api_angle/scripts/egl_angle_ext.xml",
+    "api_webgl/specs/latest/1.0/webgl.idl",
+    "api_webgl/specs/latest/2.0/webgl2.idl",
+    "api_webgl/extensions/*/extension.xml",
+]
+
+[buildscript]
+run = true

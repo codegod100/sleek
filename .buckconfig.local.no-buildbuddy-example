@@ -1,0 +1,12 @@
+# BuildBuddy remote caching is on by default (see .buckconfig) and needs
+# BUILDBUDDY_API_KEY in the environment — without it, buck2 hard-fails every
+# build the moment it tries to reach the cache.
+#
+# No BuildBuddy account? Opt out locally:
+#   cp .buckconfig.local.no-buildbuddy-example .buckconfig.local
+#
+# `.buckconfig.local` is git-ignored and buck2 auto-merges it over
+# `.buckconfig`, so this is per-developer/per-machine, never committed.
+
+[buildbuddy]
+    enabled = false

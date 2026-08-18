@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Vidya
+GenericName=UI Showcase
+Comment=GNOME/HIG-inspired aesthetic showcase for egui
+Exec=vidya-demo
+Icon=applications-graphics
+Categories=Development;Graphics;
+Keywords=egui;theme;demo;vidya;hig;
+Terminal=false
+StartupNotify=true
+StartupWMClass=Vidya Showcase

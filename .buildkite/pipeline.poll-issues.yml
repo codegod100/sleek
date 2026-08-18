@@ -1,0 +1,18 @@
+# Optional standalone upload target for issue polling.
+# Prefer scheduling the main pipeline with env RADICLE_TRIGGER=poll instead
+# (see create_pipeline_schedule / Buildkite UI → Schedules).
+
+agents:
+  queue: auto
+
+env:
+  RADICLE_TRIGGER: poll
+
+steps:
+  - label: ":radicle: Poll for new issues"
+    command: bash scripts/buildkite/poll-issues.sh
+    # BUILDKITE_API_TOKEN is optional (soft-load in poll-issues.sh). Do not list
+    # it under secrets: — missing/denied hard secrets fail job setup.
+    env:
+      BUILDKITE_ORG: ${BUILDKITE_ORG}
+      BUILDKITE_PIPELINE: ${BUILDKITE_PIPELINE:-sleek-5u9xbr}

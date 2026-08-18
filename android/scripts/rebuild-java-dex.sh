@@ -30,9 +30,13 @@ javac --release 11 -Xlint:-options -classpath "$ANDROID_JAR" -d "$WORKDIR/pick" 
 cp "$WORKDIR/pick/classes.dex" "$ROOT/src/assets/pick_fragment.dex"
 echo "Wrote $ROOT/src/assets/pick_fragment.dex ($(wc -c < "$ROOT/src/assets/pick_fragment.dex") bytes)"
 
-# ── SleekActivity (must be APK-root classes.dex for system classloader) ────
+# ── SleekActivity + CameraCapture (APK-root classes.dex) ───────────────────
+# CameraCapture must live in the system classloader (same dex as SleekActivity)
+# so Rust JNI find_class / native method resolution works from NativeActivity.
 javac --release 11 -Xlint:-options -classpath "$ANDROID_JAR" -d "$WORKDIR/act" \
-  "$ROOT/java/uk/nandi/sleek/SleekActivity.java"
+  "$ROOT/java/uk/nandi/sleek/SleekActivity.java" \
+  "$ROOT/java/uk/nandi/sleek/CameraCapture.java" \
+  "$ROOT/java/uk/nandi/sleek/SleekIme.java"
 "$D8" --min-api 28 --output "$WORKDIR/act" "$WORKDIR/act"/uk/nandi/sleek/*.class
 cp "$WORKDIR/act/classes.dex" "$ROOT/src/assets/sleek_activity.dex"
 echo "Wrote $ROOT/src/assets/sleek_activity.dex ($(wc -c < "$ROOT/src/assets/sleek_activity.dex") bytes)"
