@@ -56,6 +56,9 @@ export default {
     if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
       return handleDownload(request, env, url);
     }
+    if (request.method === "GET" && url.pathname === "/") {
+      return handleIndex(env);
+    }
     if (request.method === "POST" && url.pathname.startsWith("/publish-release/")) {
       return handlePublishRelease(request, env, url);
     }
@@ -605,6 +608,86 @@ async function handleDownload(request, env, url) {
   obj.writeHttpMetadata(headers);
   headers.set("etag", obj.httpEtag);
   return new Response(obj.body, { headers });
+}
+
+// --- index page -------------------------------------------------------------
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// GET / — a plain landing page linking the artifacts this Worker actually
+// hosts, so proxy.latha.org isn't just a bare API with no browsable entry
+// point. "latest/*" is listed dynamically (R2 list) since it changes on
+// every main-branch build; the flatpak repo + its .flatpakref are close to
+// static (manually republished, see sleek-tangled-release-publishing notes)
+// so their presence is just probed with head() rather than listed.
+async function handleIndex(env) {
+  const latest = await env.ARTIFACTS.list({ prefix: "latest/" });
+  const latestFiles = latest.objects.map((o) => o.key.slice("latest/".length)).sort();
+
+  const [flatpakrefObj, repoConfigObj] = await Promise.all([
+    env.ARTIFACTS.head("uk.nandi.sleek.flatpakref"),
+    env.ARTIFACTS.head("repo/config"),
+  ]);
+
+  const latestItems = latestFiles.length
+    ? latestFiles.map((f) => `<li><a href="/artifacts/latest/${encodeURIComponent(f)}">${escapeHtml(f)}</a></li>`).join("\n      ")
+    : "<li><em>none built yet</em></li>";
+
+  const flatpakSection = flatpakrefObj && repoConfigObj
+    ? `<section>
+      <h2>Flatpak (single-command install)</h2>
+      <pre>flatpak install --user https://proxy.latha.org/artifacts/uk.nandi.sleek.flatpakref</pre>
+      <ul>
+        <li><a href="/artifacts/uk.nandi.sleek.flatpakref">uk.nandi.sleek.flatpakref</a></li>
+        <li><a href="/artifacts/repo/config">repo/config</a> (OSTree repo root)</li>
+      </ul>
+    </section>`
+    : "";
+
+  const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>proxy.latha.org — sleek build artifacts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; }
+  pre { background: #f0f0f0; padding: 0.6rem 0.8rem; overflow-x: auto; border-radius: 4px; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  ul { padding-left: 1.3rem; }
+  a { color: #0554b3; }
+  footer { margin-top: 3rem; font-size: 0.85rem; color: #666; }
+</style>
+</head>
+<body>
+<h1>proxy.latha.org</h1>
+<p>Build artifact host for <a href="https://tangled.org/nandi.uk/sleek">nandi.uk/sleek</a>.</p>
+
+${flatpakSection}
+
+<section>
+  <h2>Latest main-branch builds</h2>
+  <ul>
+      ${latestItems}
+  </ul>
+</section>
+
+<section>
+  <h2>Tagged releases</h2>
+  <p>Version tags publish <code>sh.tangled.repo.artifact</code> records, browsable under
+     <strong>Artifacts</strong> on each tag's page, e.g.
+     <a href="https://tangled.org/nandi.uk/sleek/tags/v0.1.5">tags/v0.1.5</a>.</p>
+</section>
+
+<footer>Source: <a href="https://tangled.org/nandi.uk/sleek/blob/main/cloudflare/proxy-latha-org">cloudflare/proxy-latha-org</a></footer>
+</body>
+</html>`;
+
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
 // --- atproto OAuth ---------------------------------------------------------
