@@ -32,11 +32,19 @@
 # copies (no actual compilation happens inside the flatpak sandbox), the
 # fix is to skip flatpak-builder's sandboxed execution path entirely and
 # drive the same lower-level `flatpak build-*` commands it would otherwise
-# wrap around bwrap for us — `build-init`/`build-finish`/`build-export`/
-# `build-bundle` are pure OSTree/metadata operations and never invoke
-# bwrap, confirmed by running this exact sequence locally with strace
-# absent from the picture (no namespace-clone error, `bwrap` never
-# appears in the process tree). Mirrors what flatpak-builder does under
+# wrap around bwrap for us. `build-init`/`build-finish`/`build-bundle` are
+# pure OSTree/metadata operations and never invoke bwrap — but
+# `build-export` does, internally, for its icon validator (confirmed live
+# on BuildBuddy RE: dropping flatpak-builder entirely still hit "... is
+# not a valid icon: bwrap: Creating new namespace failed" from
+# build-export itself) — worked around with build-export's own
+# `--disable-sandbox` flag (see the flag's own comment below), not by
+# avoiding build-export. A local-only test can't be trusted to reveal
+# this kind of thing: this dev machine's kernel allows unprivileged user
+# namespaces, so bwrap silently succeeds here even where a RE worker
+# would refuse it — always verify against a real remote run, not just a
+# local one (same lesson as the buck2-musl-vs-glibc gotcha documented in
+# .claude/skills/analyze-build/). Mirrors what flatpak-builder does under
 # the hood for a "simple" buildsystem module, just without the sandboxed
 # `install` step:
 #   1. `flatpak build-init` — sets up build-dir/{files,var,metadata}.
@@ -46,8 +54,7 @@
 #      ...` — build-init's build-dir *is* what /app maps to once exported).
 #   3. `flatpak build-finish` — sets finish-args/command (same as the
 #      manifest's finish-args + command fields).
-#   4. `flatpak build-export` + `flatpak build-bundle` — unchanged from
-#      the original flatpak-builder-based version.
+#   4. `flatpak build-export --disable-sandbox` + `flatpak build-bundle`.
 #
 # The manifest (flatpak/uk.nandi.sleek.json) is kept as the single source
 # of truth for app-id/runtime/finish-args/build-commands even though
@@ -127,7 +134,16 @@ def flatpak_genrule(name, manifest, app_id, host_target = "//:sleek-host"):
             "    --device=dri --device=all \\",
             "    --filesystem=xdg-run/pipewire-0 --filesystem=xdg-download \\",
             "    --talk-name=org.freedesktop.Notifications --talk-name=org.freedesktop.portal.Desktop",
-            "  flatpak build-export export-repo build-dir",
+            # --disable-sandbox: build-export runs its icon validator (svg
+            # -> raster rendering, to catch a malformed icon before
+            # publishing) through bwrap too, by default — hit this live on
+            # BuildBuddy RE ("... is not a valid icon: bwrap: Creating new
+            # namespace failed: Operation not permitted") even after
+            # dropping flatpak-builder entirely, since build-export itself
+            # still shells out to a sandboxed validator internally. This
+            # flag is exactly for that: skip the sandbox for the icon
+            # validation step (see `flatpak build-export --help`).
+            "  flatpak build-export --disable-sandbox export-repo build-dir",
             "  flatpak build-bundle export-repo {} {}".format(bundle_name, app_id),
             ")",
             'cp "flatpak-work/{}" "$OUT"'.format(bundle_name),

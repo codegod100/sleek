@@ -122,6 +122,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     flatpak flatpak-builder \
     && rm -rf /var/lib/apt/lists/*
 
+# librsvg2-common: registers gdk-pixbuf's SVG loader. flatpak.bzl's
+# genrule calls `flatpak build-export --disable-sandbox` (see that file's
+# comments — build-export's icon validator needs bwrap, which BuildBuddy's
+# RE containers refuse, same CLONE_NEWUSER restriction as flatpak-builder
+# itself), and the *unsandboxed* validator rasterizes the app's SVG icon
+# via the image's own gdk-pixbuf, not the sandboxed runtime's — without
+# this, that fails with "is not a valid icon: Format not recognized" even
+# though the exact same command succeeds on a dev machine that already
+# has an SVG-capable gdk-pixbuf installed. Confirmed hitting exactly that
+# on a real BuildBuddy RE run before adding this.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    librsvg2-common \
+    && rm -rf /var/lib/apt/lists/*
+
 # System-wide (not --user): RE actions may run as any/no particular user
 # and shouldn't need a real $HOME set up just to see the runtime — a
 # system install under /var/lib/flatpak is visible to everyone. Installed
