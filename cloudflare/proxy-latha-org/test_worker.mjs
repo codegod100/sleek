@@ -378,6 +378,40 @@ async function testTagPushTriggersBuildAndPublishStep() {
   console.log("PASS: tag push -> resolves the tag's real commit, builds with commit_sha (not branch), and appends a release-publish step");
 }
 
+async function testTagPushBuildScriptIncludesHostBinary() {
+  // A tag push must also build //:sleek-host (the desktop egui binary
+  // codegod100/tap's Formula/sleek.rb downloads) and publish it as a
+  // second, separately-named artifact under the same tag — not just the
+  // apk. See buildScript()'s tagName branch.
+  const payload = JSON.stringify({
+    after: "tagcommitsha2",
+    ref: "refs/tags/v4.5.6",
+    repository: { clone_url: "https://tangled.org/nandi.uk/sleek" },
+  });
+  const req = new Request("https://proxy.latha.org/webhook", {
+    method: "POST",
+    headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": sign("test-secret", payload) },
+    body: payload,
+  });
+  const { ctx, pending } = ctxWithWaitUntil();
+  const res = await worker.fetch(req, env, ctx);
+  assert.equal(res.status, 200);
+  await Promise.all(pending);
+  const bbBody = JSON.parse(calls.fetch[calls.fetch.length - 1].opts.body);
+  const script = bbBody.steps[0].run;
+  assert.match(script, /buck2 build --show-output \/\/:sleek-host/, "must also build the desktop host binary");
+  assert.match(script, new RegExp(`upload/${MOCK_TAG_COMMIT_SHA}/sleek-x86_64-linux`), "must upload it under its own filename, not overwrite sleek.apk");
+  // Two release-publish calls: one per artifact, each naming which file it's
+  // publishing — filename defaults to sleek.apk server-side, so the apk
+  // call must still say so explicitly for the second one to be
+  // distinguishable at all.
+  const publishCalls = script.match(/\/publish-release\/v4\.5\.6/g) || [];
+  assert.equal(publishCalls.length, 2, "must publish both the apk and the host binary as separate release records");
+  assert.match(script, /\\"filename\\":\\"sleek\.apk\\"/, "apk publish call must name itself explicitly");
+  assert.match(script, /\\"filename\\":\\"sleek-x86_64-linux\\"/, "host-binary publish call must name itself");
+  console.log("PASS: tag push build script also builds + publishes the desktop host binary as a distinct artifact");
+}
+
 async function testPublishReleaseRejectsBadToken() {
   const req = new Request("https://proxy.latha.org/publish-release/v1.2.3", {
     method: "POST",
@@ -421,6 +455,35 @@ async function testPublishReleaseWithoutOauthSession401() {
   console.log("PASS: publish-release without a prior /oauth/login -> 401, no atproto calls attempted");
 }
 
+async function testPublishReleaseWithExplicitFilenameDoesNotClobber() {
+  // Two artifacts published under the same tag (apk defaults to
+  // "sleek.apk"; the host binary passes filename explicitly) must land as
+  // two separate releases/<tag>/<filename>.json records, not one
+  // overwriting the other.
+  await env.ARTIFACTS.put("multisha/sleek.apk", "fake apk bytes");
+  await env.ARTIFACTS.put("multisha/sleek-x86_64-linux", "fake host binary bytes");
+  // No oauth session configured in this test env, so both calls 401 before
+  // ever reaching atproto — enough to prove each call resolves and records
+  // against its *own* filename-keyed R2 object without a crash or a wrong
+  // "no artifact stored" 404 for either one.
+  const reqApk = new Request("https://proxy.latha.org/publish-release/v7.7.7", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
+    body: JSON.stringify({ sha: "multisha", tagHash: "deadbeef", filename: "sleek.apk" }),
+  });
+  const reqHost = new Request("https://proxy.latha.org/publish-release/v7.7.7", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
+    body: JSON.stringify({ sha: "multisha", tagHash: "deadbeef", filename: "sleek-x86_64-linux" }),
+  });
+  const { ctx } = ctxWithWaitUntil();
+  const resApk = await worker.fetch(reqApk, env, ctx);
+  const resHost = await worker.fetch(reqHost, env, ctx);
+  assert.equal(resApk.status, 401, "apk artifact was found (not 404) — just no oauth session");
+  assert.equal(resHost.status, 401, "host-binary artifact was found (not 404) — just no oauth session");
+  console.log("PASS: publish-release resolves each artifact by its own filename, not just sha");
+}
+
 async function testOauthCallbackRejectsUnknownState() {
   const req = new Request("https://proxy.latha.org/oauth/callback?code=abc&state=never-issued");
   const { ctx } = ctxWithWaitUntil();
@@ -443,9 +506,11 @@ const tests = [
   testClientMetadataDocument,
   testOauthCallbackRejectsUnknownState,
   testTagPushTriggersBuildAndPublishStep,
+  testTagPushBuildScriptIncludesHostBinary,
   testPublishReleaseRejectsBadToken,
   testPublishReleaseMissingArtifact404,
   testPublishReleaseWithoutOauthSession401,
+  testPublishReleaseWithExplicitFilenameDoesNotClobber,
 ];
 
 let failed = 0;

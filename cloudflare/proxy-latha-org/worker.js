@@ -13,6 +13,12 @@
 //   https://proxy.latha.org/artifacts/<sha>/sleek.apk
 //   https://proxy.latha.org/artifacts/latest/sleek.apk   (always newest)
 //
+// Tag pushes additionally build //:sleek-host (the desktop egui binary) and
+// publish both it and the apk to tangled.org as sh.tangled.repo.artifact
+// release records (see "tangled release publishing" below) — that's what
+// codegod100/tap's Formula/sleek.rb downloads instead of building from
+// source.
+//
 // No npm deps — plain ES module Worker, deployable via the raw Cloudflare
 // API with curl (see deploy.sh). Bindings/secrets expected:
 //   env.ARTIFACTS              R2 bucket binding
@@ -99,9 +105,9 @@ async function handleWebhook(request, env, ctx) {
     return new Response("bad json", { status: 400 });
   }
 
-  // main pushes build the apk; tag pushes build it *and* publish it to
-  // tangled.org as a sh.tangled.repo.artifact release record (see
-  // handlePublishRelease near the bottom of this file) — everything else
+  // main pushes build just the apk; tag pushes additionally build
+  // //:sleek-host and publish both as sh.tangled.repo.artifact release
+  // records (see handlePublishRelease near the bottom of this file) — everything else
   // (feature branches, etc.) is ignored.
   const isMain = payload.ref === "refs/heads/main";
   const tagMatch = typeof payload.ref === "string" ? payload.ref.match(/^refs\/tags\/(.+)$/) : null;
@@ -220,10 +226,14 @@ function buildScript(env, sha, tagName, tagHash) {
   // hit, ~2s, zero local/remote compute — "standard" RE caching working
   // as designed, unlike Nix's substituter-trust footguns.
   //
-  // Only //:sleek-android-apk for now — there's no buck2 target for the
-  // flatpak bundle yet (that was flake.nix's sleek-flatpak derivation;
-  // porting it is future work), so this pipeline currently only publishes
-  // the APK.
+  // //:sleek-android-apk builds (and, on main, publishes to `latest/`)
+  // unconditionally. //:sleek-host — the desktop egui binary, used by the
+  // codegod100/tap Homebrew formula (see Formula/sleek.rb's history and
+  // https://github.com/codegod100/homebrew-tap) — only needs building on a
+  // tag push: nobody installs an unpinned/unreleased build via brew, and a
+  // stable download URL requires a real tag's hash anyway (see
+  // publishStep()'s comment below). Skipping it on main pushes also keeps
+  // ordinary main-push builds as fast as they were before this existed.
   const steps = [
     "set -euo pipefail",
     "if ! command -v buck2 >/dev/null 2>&1; then",
@@ -263,25 +273,38 @@ function buildScript(env, sha, tagName, tagHash) {
     '[ -n "$apk_path" ] && [ -f "$apk_path" ] || { echo "buck2 build did not produce //:sleek-android-apk output"; exit 1; }',
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$apk_path"`,
   ];
+  // Ask the Worker to publish `filename` (already uploaded to
+  // `${uploadBase}/${filename}` by this point) as a sh.tangled.repo.artifact
+  // release record (see handlePublishRelease). Best-effort — the file is
+  // already safely in R2 by the time this runs, so a publish failure here
+  // (e.g. OAuth was never completed via /oauth/login) shouldn't fail the
+  // whole build; check /artifacts/releases/<tag>/<filename>.json after for
+  // the actual outcome. tagHash (the tag object's own hash — what
+  // sh.tangled.repo.artifact's `tag` field wants) is passed in as a
+  // literal, computed by the caller from the webhook payload directly — NOT
+  // via `git rev-parse refs/tags/<name>` here, which fails on this
+  // executor: BuildBuddy's checkout only fetches the single commit_sha
+  // object, never the tag ref itself (confirmed live, invocation c24d0ebd:
+  // "fatal: ambiguous argument 'refs/tags/v0.1.3': unknown revision or path
+  // not in the working tree").
+  const publishStep = (filename) =>
+    `curl -fsS -X POST "https://proxy.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
+    `-H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" ` +
+    `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"${tagHash}\\",\\"filename\\":\\"${filename}\\"}" ` +
+    `|| echo "release publish failed (${filename} is still uploaded at ${uploadBase}/${filename})"`;
   if (tagName) {
-    // Ask the Worker to publish this apk as a sh.tangled.repo.artifact
-    // release record (see handlePublishRelease). Best-effort — the apk is
-    // already safely uploaded above by this point, so a publish failure
-    // here (e.g. OAuth was never completed via /oauth/login) shouldn't
-    // fail the whole build. Check /artifacts/releases/<tag>.json after for
-    // the actual outcome. tagHash (the tag object's own hash — what
-    // sh.tangled.repo.artifact's `tag` field wants) is passed in as a
-    // literal, computed by the caller from the webhook payload directly —
-    // NOT via `git rev-parse refs/tags/<name>` here, which fails on this
-    // executor: BuildBuddy's checkout only fetches the single commit_sha
-    // object, never the tag ref itself (confirmed live, invocation
-    // c24d0ebd: "fatal: ambiguous argument 'refs/tags/v0.1.3': unknown
-    // revision or path not in the working tree").
+    steps.push(publishStep("sleek.apk"));
+    // The desktop host binary — same repo checkout, same buck2/BuildBuddy
+    // setup already exported above, just a second target. Named
+    // sleek-x86_64-linux (not bare "sleek") so it's self-describing once
+    // it's sitting in a directory listing / download link on its own,
+    // divorced from the repo/formula context that names it "sleek".
     steps.push(
-      `curl -fsS -X POST "https://proxy.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
-        `-H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" ` +
-        `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"${tagHash}\\"}" ` +
-        `|| echo "release publish failed (apk is still uploaded at ${uploadBase}/sleek.apk)"`,
+      "buck2 build --show-output //:sleek-host 2>&1 | tee /tmp/buck2-build-host.log",
+      "host_path=$(grep '^root//:sleek-host ' /tmp/buck2-build-host.log | awk '{print $2}')",
+      '[ -n "$host_path" ] && [ -f "$host_path" ] || { echo "buck2 build did not produce //:sleek-host output"; exit 1; }',
+      `curl -fsS -X PUT "${uploadBase}/sleek-x86_64-linux" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$host_path"`,
+      publishStep("sleek-x86_64-linux"),
     );
   }
   return steps.join("\n");
@@ -464,11 +487,20 @@ function atprotoBytes(rawBytes) {
 // uploadBlob + createRecord against nandi's own PDS, authenticated with the
 // stored OAuth session. Throws on any failure — caller decides what to do
 // with that (the apk itself is already safely in R2 by the time this runs).
-async function publishTangledArtifact(session, { apkBytes, filename, tagHashHex }) {
+function contentTypeForArtifact(filename) {
+  // Only the two filenames buildScript() ever actually produces need real
+  // entries — application/octet-stream (a generic "just bytes,
+  // browser/client should offer Save As" type) is a fine fallback for
+  // anything else published this way in the future.
+  if (filename.endsWith(".apk")) return "application/vnd.android.package-archive";
+  return "application/octet-stream";
+}
+
+async function publishTangledArtifact(session, { bytes, filename, tagHashHex }) {
   const uploadResp = await dpopFetch(`${session.pds}/xrpc/com.atproto.repo.uploadBlob`, {
     method: "POST",
-    headers: { "content-type": "application/vnd.android.package-archive" },
-    body: apkBytes,
+    headers: { "content-type": contentTypeForArtifact(filename) },
+    body: bytes,
     dpopKeys: session.dpopKeys,
     accessToken: session.accessToken,
   });
@@ -507,12 +539,16 @@ async function handlePublishRelease(request, env, url) {
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  const { sha, tagHash } = body;
+  // filename defaults to sleek.apk for backward compatibility with the
+  // original single-artifact shape of this endpoint — buildScript() now
+  // always sends it explicitly (both for the apk and for sleek-x86_64-linux,
+  // the desktop host binary).
+  const { sha, tagHash, filename = "sleek.apk" } = body;
   if (!sha || !tagHash) return new Response("missing sha/tagHash", { status: 400 });
 
-  const apkObj = await env.ARTIFACTS.get(`${sha}/sleek.apk`);
-  if (!apkObj) return new Response(`no artifact stored for ${sha}/sleek.apk`, { status: 404 });
-  const apkBytes = await new Response(apkObj.body).arrayBuffer();
+  const obj = await env.ARTIFACTS.get(`${sha}/${filename}`);
+  if (!obj) return new Response(`no artifact stored for ${sha}/${filename}`, { status: 404 });
+  const bytes = await new Response(obj.body).arrayBuffer();
 
   const session = await getAtprotoSession(env);
   if (!session) {
@@ -522,15 +558,20 @@ async function handlePublishRelease(request, env, url) {
     );
   }
 
+  // Keyed by filename, not just tagName — a tag push now publishes two
+  // artifacts (sleek.apk and sleek-x86_64-linux), and a single
+  // `releases/<tag>.json` would have the second call's result silently
+  // clobber the first's.
+  const recordKey = `releases/${tagName}/${filename}.json`;
   try {
-    const result = await publishTangledArtifact(session, { apkBytes, filename: "sleek.apk", tagHashHex: tagHash });
-    await env.ARTIFACTS.put(`releases/${tagName}.json`, JSON.stringify({
-      tagName, sha, tagHash, publishedAt: new Date().toISOString(), record: result,
+    const result = await publishTangledArtifact(session, { bytes, filename, tagHashHex: tagHash });
+    await env.ARTIFACTS.put(recordKey, JSON.stringify({
+      tagName, sha, tagHash, filename, publishedAt: new Date().toISOString(), record: result,
     }));
     return new Response(JSON.stringify(result), { headers: { "content-type": "application/json" } });
   } catch (e) {
-    await env.ARTIFACTS.put(`releases/${tagName}.json`, JSON.stringify({
-      tagName, sha, tagHash, failedAt: new Date().toISOString(), error: e.message,
+    await env.ARTIFACTS.put(recordKey, JSON.stringify({
+      tagName, sha, tagHash, filename, failedAt: new Date().toISOString(), error: e.message,
     }));
     return new Response(`publish failed: ${e.message}`, { status: 502 });
   }
