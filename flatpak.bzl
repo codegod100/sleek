@@ -3,9 +3,13 @@
 # Unlike cargo.bzl's genrules (which shell out to a real `cargo build`),
 # this one doesn't compile anything itself — it packages the *already
 # buck2-built* //:sleek-host binary into a distributable .flatpak bundle,
-# reusing the org.gnome.Platform//49 runtime (baked into toolchains/
-# rbe-image/Containerfile at image-build time, same pattern as the Android
-# NDK/SDK) instead of vendoring every shared library sleek links against.
+# reusing the org.freedesktop.Platform//25.08 runtime (baked into
+# toolchains/rbe-image/Containerfile at image-build time, same pattern as
+# the Android NDK/SDK) instead of vendoring every shared library sleek
+# links against. Freedesktop's base runtime, not GNOME's — `ldd` on the
+# built binary shows only libstdc++/libpipewire/libasound/libc, no
+# GTK/glib/adwaita, so the GNOME layer GNOME's runtime adds on top of
+# Freedesktop's own was pure unused weight (eframe/glow, not GTK).
 #
 # Ports flake.nix's old `nix2flatpak.lib.${system}.mkFlatpak` derivation
 # (see git history) to buck2 — nix2flatpak itself has no buck2 equivalent
@@ -113,7 +117,7 @@ def flatpak_genrule(name, manifest, app_id, host_target = "//:sleek-host"):
             # build-init sets up build-dir/{files,var,metadata} — no bwrap
             # involved, unlike flatpak-builder's own build-command
             # execution (see module docstring).
-            "  flatpak build-init build-dir {} org.gnome.Sdk org.gnome.Platform 49".format(app_id),
+            "  flatpak build-init build-dir {} org.freedesktop.Sdk org.freedesktop.Platform 25.08".format(app_id),
             # Hand-replicated from flatpak/uk.nandi.sleek.json's
             # build-commands — /app/... there maps to build-dir/files/...
             # here (what build-init's build-dir becomes once exported).
