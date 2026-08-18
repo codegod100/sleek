@@ -150,7 +150,11 @@ function buildScript(env, sha) {
     "set -euo pipefail",
     "if ! command -v buck2 >/dev/null 2>&1; then",
     "  mkdir -p \"$HOME/.local/bin\"",
-    "  curl -fsSL -o /tmp/buck2.zst https://github.com/facebook/buck2/releases/download/latest/buck2-x86_64-unknown-linux-gnu.zst",
+    // musl, not gnu: confirmed live that the gnu build needs glibc >=2.32
+    // (up to 2.39) and the executor image is Ubuntu 20.04 focal (glibc
+    // 2.31) -> "version `GLIBC_2.32' not found". musl is statically linked
+    // so it has no glibc dependency at all.
+    "  curl -fsSL -o /tmp/buck2.zst https://github.com/facebook/buck2/releases/download/latest/buck2-x86_64-unknown-linux-musl.zst",
     "  command -v zstd >/dev/null 2>&1 || (sudo apt-get update -y && sudo apt-get install -y zstd)",
     '  zstd -d -f /tmp/buck2.zst -o "$HOME/.local/bin/buck2"',
     '  chmod +x "$HOME/.local/bin/buck2"',
