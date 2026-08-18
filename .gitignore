@@ -24,3 +24,7 @@ result-*
 /flatpak/export-repo/
 /flatpak/.flatpak-builder/
 /flatpak/*.flatpak
+# Singularity/Apptainer image output of `nix build .#sif` (flake.nix's
+# sleek-sif target) — 600MB+, a local build artifact, never committed.
+/sleek.sif
+/result-sif
