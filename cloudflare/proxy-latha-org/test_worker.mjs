@@ -360,11 +360,20 @@ async function testTagPushTriggersBuildAndPublishStep() {
   const bbBody = JSON.parse(calls.fetch[calls.fetch.length - 1].opts.body);
   assert.equal(bbBody.commit_sha, MOCK_TAG_COMMIT_SHA, "commit_sha must be the tag's *resolved commit*, not payload.after (which is the tag object's own sha for annotated tags)");
   assert.equal(bbBody.branch, undefined, "no branch field for tag pushes — a tag name isn't a valid checkout branch and would hit BuildBuddy's origin/<ref> checkout bug");
-  assert.match(bbBody.steps[0].run, /refs\/tags\/v1\.2\.3\^\{tag\}/, "build script computes the annotated tag object hash");
+  assert.doesNotMatch(
+    bbBody.steps[0].run,
+    /git rev-parse "refs\/tags/,
+    "must not try to resolve the tag ref via git on the trigger executor — that ref is never fetched there (only commit_sha's single commit object is)",
+  );
   // The curl -d payload is itself shell-quoted (it runs inside the outer
   // `-d "..."` argument), so its JSON quotes are backslash-escaped in the
   // literal script text: \"sha\":\"<sha>\" rather than "sha":"<sha>".
   assert.match(bbBody.steps[0].run, new RegExp(`\\\\"sha\\\\":\\\\"${MOCK_TAG_COMMIT_SHA}\\\\"`), "release-publish step reports the resolved commit sha, not the tag object sha");
+  assert.match(
+    bbBody.steps[0].run,
+    new RegExp(`\\\\"tagHash\\\\":\\\\"tagcommitsha\\\\"`),
+    "release-publish step reports payload.after (the tag object's own sha) as tagHash, as a literal — not a git rev-parse result",
+  );
   assert.match(bbBody.steps[0].run, /\/publish-release\/v1\.2\.3/, "build script calls back to publish the release");
   console.log("PASS: tag push -> resolves the tag's real commit, builds with commit_sha (not branch), and appends a release-publish step");
 }

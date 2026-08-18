@@ -154,6 +154,19 @@ async function handleWebhook(request, env, ctx) {
 
 async function triggerBuildForRef(env, cloneUrl, sha, tagName) {
   let buildSha = sha;
+  // The tag's own hash (what sh.tangled.repo.artifact's `tag` field
+  // wants) — for annotated tags this *is* payload.after (see below); for
+  // lightweight tags payload.after is just the commit sha, which is the
+  // right value there too (no separate tag object exists). Captured here,
+  // before buildSha gets overwritten with the resolved *commit*, and
+  // passed straight into buildScript() as a literal — deliberately not
+  // resolved via `git rev-parse refs/tags/<name>` on the trigger executor,
+  // since that ref is never fetched there (BuildBuddy's checkout uses
+  // commit_sha, which fetches only that one commit object, not any tag
+  // refs pointing at it — confirmed live, invocation c24d0ebd: both the
+  // primary and fallback rev-parse failed with "unknown revision or path
+  // not in the working tree").
+  const tagHash = tagName ? sha : null;
   if (tagName) {
     // For a tag push, Tangled's webhook reports `after` (sha, above) as
     // the *tag object*'s own sha, not the commit it points at — confirmed
@@ -172,7 +185,7 @@ async function triggerBuildForRef(env, cloneUrl, sha, tagName) {
     }
     buildSha = resolved;
   }
-  await triggerBuild(env, cloneUrl, buildSha, { tagName });
+  await triggerBuild(env, cloneUrl, buildSha, { tagName, tagHash });
 }
 
 async function resolveTagCommit(cloneUrl, tagName) {
@@ -210,7 +223,7 @@ function timingSafeEqual(a, b) {
 
 // --- BuildBuddy trigger -----------------------------------------------
 
-function buildScript(env, sha, tagName) {
+function buildScript(env, sha, tagName, tagHash) {
   const uploadBase = `https://proxy.latha.org/upload/${sha}`;
   // Runs on a BuildBuddy remote-bazel executor. NOT Nix anymore (see git
   // history for the abandoned flake.nix/nix-daemon path) — this repo
@@ -275,22 +288,25 @@ function buildScript(env, sha, tagName) {
     // already safely uploaded above by this point, so a publish failure
     // here (e.g. OAuth was never completed via /oauth/login) shouldn't
     // fail the whole build. Check /artifacts/releases/<tag>.json after for
-    // the actual outcome. `^{tag}` dereferences an annotated tag to its
-    // tag object hash (what sh.tangled.repo.artifact's `tag` field wants);
-    // falls back to the ref hash directly for lightweight tags, which have
-    // no separate tag object.
+    // the actual outcome. tagHash (the tag object's own hash — what
+    // sh.tangled.repo.artifact's `tag` field wants) is passed in as a
+    // literal, computed by the caller from the webhook payload directly —
+    // NOT via `git rev-parse refs/tags/<name>` here, which fails on this
+    // executor: BuildBuddy's checkout only fetches the single commit_sha
+    // object, never the tag ref itself (confirmed live, invocation
+    // c24d0ebd: "fatal: ambiguous argument 'refs/tags/v0.1.3': unknown
+    // revision or path not in the working tree").
     steps.push(
-      `tag_hash=$(git rev-parse "refs/tags/${tagName}^{tag}" 2>/dev/null || git rev-parse "refs/tags/${tagName}")`,
       `curl -fsS -X POST "https://proxy.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
         `-H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" ` +
-        `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"$tag_hash\\"}" ` +
+        `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"${tagHash}\\"}" ` +
         `|| echo "release publish failed (apk is still uploaded at ${uploadBase}/sleek.apk)"`,
     );
   }
   return steps.join("\n");
 }
 
-async function triggerBuild(env, cloneUrl, sha, { tagName } = {}) {
+async function triggerBuild(env, cloneUrl, sha, { tagName, tagHash } = {}) {
   const body = {
     repo: cloneUrl,
     // commit_sha pins the exact checkout regardless of ref type — required
@@ -318,7 +334,7 @@ async function triggerBuild(env, cloneUrl, sha, { tagName } = {}) {
     // final ~20MB apk — default disk (~22G) is plenty. (The old Nix path
     // needed EstimatedFreeDiskBytes:"60GB" here because it compiled the
     // *entire* dependency graph inside this one VM — see git history.)
-    steps: [{ run: buildScript(env, sha, tagName) }],
+    steps: [{ run: buildScript(env, sha, tagName, tagHash) }],
   };
   const resp = await fetch("https://app.buildbuddy.io/api/v1/Run", {
     method: "POST",
