@@ -64,10 +64,19 @@ async function handleWebhook(request, env, ctx) {
   }
 
   const sha = payload.after;
-  const cloneUrl = payload.repository && payload.repository.clone_url;
-  if (!sha || !cloneUrl) {
-    return new Response("missing after/repository.clone_url", { status: 400 });
+  if (!sha) {
+    return new Response("missing after", { status: 400 });
   }
+
+  // NOT payload.repository.clone_url: confirmed on a real webhook delivery
+  // that Tangled populates it as https://knot1.tangled.sh/<owner-did>/sleek,
+  // which 404s ("repository not found") — the knot expects the repo's own
+  // DID there, not the owner's. https://tangled.org/nandi.uk/sleek is the
+  // appview host, confirmed to actually redirect+clone correctly (it 302s
+  // to the right knot1.tangled.sh/<repo-did>/ URL). This Worker only ever
+  // serves this one repo, so hardcode the URL that's proven to work rather
+  // than trust a field Tangled itself gets wrong for this case.
+  const cloneUrl = "https://tangled.org/nandi.uk/sleek";
 
   // Respond fast (Tangled times out at 30s + retries on 5xx); do the actual
   // BuildBuddy trigger after responding.
@@ -144,9 +153,29 @@ async function triggerBuild(env, cloneUrl, sha) {
     },
     body: JSON.stringify(body),
   });
+  const respText = await resp.text();
   if (!resp.ok) {
-    console.log("buildbuddy trigger failed", resp.status, await resp.text());
+    console.log("buildbuddy trigger failed", resp.status, respText);
+    await env.ARTIFACTS.put(
+      `${sha}/invocation.json`,
+      JSON.stringify({ triggeredAt: new Date().toISOString(), triggerFailed: true, status: resp.status, body: respText }),
+    );
+    return;
   }
+  // Record the invocation ID immediately (not just once the build finishes)
+  // so a run can be looked up via BuildBuddy's GetInvocation/GetLog APIs
+  // (they need an invocationId; there's no commit-sha lookup for runs
+  // triggered this way) without waiting on the build itself.
+  let invocationId = null;
+  try {
+    invocationId = JSON.parse(respText).invocationId || null;
+  } catch {
+    // leave null; still record that a trigger happened
+  }
+  await env.ARTIFACTS.put(
+    `${sha}/invocation.json`,
+    JSON.stringify({ triggeredAt: new Date().toISOString(), invocationId }),
+  );
 }
 
 // --- artifact storage (R2) -------------------------------------------------

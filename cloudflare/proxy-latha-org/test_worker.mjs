@@ -10,7 +10,7 @@ let calls = { fetch: [] };
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts) => {
   calls.fetch.push({ url, opts });
-  return new Response("{}", { status: 200 });
+  return new Response(JSON.stringify({ invocationId: "mock-invocation-id" }), { status: 200 });
 };
 
 class MockBucket {
@@ -91,6 +91,13 @@ async function testValidPushWebhook() {
   assert.equal(bbBody.branch, "main");
   assert.match(bbBody.steps[0].run, /nix build \.#android/);
   assert.equal(calls.fetch[0].opts.headers["x-buildbuddy-api-key"], "test-bb-key");
+
+  const recorded = await env.ARTIFACTS.get("abc123/invocation.json");
+  assert.ok(recorded, "should record invocation.json for lookup without a commit-sha filter");
+  const recordedBuf = Buffer.concat(await recorded.body.getReader().read().then((r) => [r.value]));
+  const recordedJson = JSON.parse(recordedBuf.toString());
+  assert.equal(recordedJson.invocationId, "mock-invocation-id");
+
   console.log("PASS: valid push webhook -> queues BuildBuddy run with correct payload");
 }
 
