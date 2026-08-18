@@ -1,10 +1,9 @@
-# sleek CI — check + APK + Flatpak on merge to main and on GitHub PR checks.
+# sleek CI — APK + Flatpak on merge to main.
 #
 # Issue→patch is builtin to boxci (POST /api/webhooks/garden/issue, /api/poll).
 #
 # Triggers:
 #   merge — Garden webhook / boxci-merge.yml on push to main
-#   check — GitHub Actions .github/workflows/boxci-check.yml on pull_request
 #
 # boxci publishes a Radicle Job COB (xyz.radworks.job) for each merge run so
 # Desktop/Explorer show CI status + a log link back to https://boxci.boxd.sh
@@ -17,7 +16,6 @@
 name: sleek
 on:
   - merge
-  - check
 
 env:
   RUST_BACKTRACE: "1"
@@ -27,7 +25,7 @@ steps:
   # Fast heartbeat so Job COB start is visible before the heavy check/APK steps.
   - label: ":radar: Job COB probe"
     key: job-probe
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
+    if: build.env("BOXCI_TRIGGER") == "merge"
     command: |
       set -euo pipefail
       echo "boxci merge run ${BOXCI_RUN_ID:-?} for ${GIT_SHA:-unknown}"
@@ -45,7 +43,7 @@ steps:
 
   - label: ":rust: Check"
     key: check
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
+    if: build.env("BOXCI_TRIGGER") == "merge"
     depends_on: job-probe
     command: |
       set -euo pipefail
@@ -148,7 +146,7 @@ steps:
 
   - label: ":android: APK (nixbuild.net)"
     key: apk
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
+    if: build.env("BOXCI_TRIGGER") == "merge"
     depends_on: check
     allow_dependency_failure: true
     command: |
@@ -210,7 +208,7 @@ steps:
 
   - label: ":package: Flatpak (nixbuild.net)"
     key: flatpak
-    if: build.env("BOXCI_TRIGGER") == "merge" || build.env("BOXCI_TRIGGER") == "check"
+    if: build.env("BOXCI_TRIGGER") == "merge"
     depends_on: check
     allow_dependency_failure: true
     command: |
