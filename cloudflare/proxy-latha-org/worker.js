@@ -248,6 +248,19 @@ function buildScript(env, sha, tagName) {
     // .buckconfig instead reads $BUILDBUDDY_API_KEY straight from the
     // environment for [buck2_re_client]'s http_headers.
     `export BUILDBUDDY_API_KEY="${env.BUILDBUDDY_API_KEY}"`,
+    // Confirmed live (invocation 58c8218e, the first tag-push build to
+    // actually reach this step): a stale `buckd` daemon left running from
+    // a previous run on a reused trigger-executor host still points at
+    // that earlier run's buck-out/v2 — but this script's git checkout
+    // step above always starts with `git clean -x -d --force`, which
+    // deletes buck-out/ outright. The daemon never sees that deletion, so
+    // the next `buck2 build` fails immediately with "Error validating
+    // working directory ... buck-out/v2: ENOENT" before running anything.
+    // `buck2 killall` tears down any daemon for this project root so the
+    // next buck2 command starts a fresh one against the actually-current
+    // (just-cleaned) working directory. Harmless/no-op if there's no
+    // stale daemon (e.g. first run on a fresh executor).
+    "buck2 killall || true",
     "buck2 --version",
     "echo '--- disk before build ---'; df -h / || true",
     "buck2 build --show-output //:sleek-android-apk 2>&1 | tee /tmp/buck2-build.log",
