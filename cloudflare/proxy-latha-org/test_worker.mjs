@@ -120,8 +120,8 @@ async function testValidPushWebhook() {
   const bbBody = JSON.parse(calls.fetch[0].opts.body);
   assert.equal(bbBody.repo, "https://tangled.org/nandi.uk/sleek");
   assert.equal(bbBody.branch, "main");
-  assert.equal(bbBody.platform_properties.EstimatedFreeDiskBytes, "60GB");
-  assert.match(bbBody.steps[0].run, /nix build \.#android/);
+  assert.equal(bbBody.platform_properties, undefined, "no disk override needed — compute runs on BuildBuddy's RE cluster, not this trigger executor");
+  assert.match(bbBody.steps[0].run, /buck2 build --show-output \/\/:sleek-android-apk/);
   assert.equal(calls.fetch[0].opts.headers["x-buildbuddy-api-key"], "test-bb-key");
 
   const recorded = await env.ARTIFACTS.get("abc123/invocation.json");
