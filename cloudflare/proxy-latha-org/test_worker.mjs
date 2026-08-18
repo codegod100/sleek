@@ -10,8 +10,23 @@ let calls = { fetch: [] };
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts) => {
   calls.fetch.push({ url, opts });
+  // resolveTagCommit() fetches the tag's own web page (no opts — a plain
+  // GET) to scrape its target commit; everything else here is the
+  // BuildBuddy Run call. Stub both distinctly so the tag-push test
+  // exercises the real resolveTagCommit() parsing path, not just its
+  // caller.
+  if (!opts && String(url).includes("/tags/")) {
+    return new Response(
+      `<a href="/nandi.uk/sleek/commit/${MOCK_TAG_COMMIT_SHA}">${MOCK_TAG_COMMIT_SHA.slice(0, 7)}</a>`,
+      { status: 200 },
+    );
+  }
   return new Response(JSON.stringify({ invocationId: "mock-invocation-id" }), { status: 200 });
 };
+
+// 40 lowercase-hex chars, like a real git sha — resolveTagCommit()'s regex
+// requires exactly that shape.
+const MOCK_TAG_COMMIT_SHA = "deadbeef00112233445566778899aabbccddeeff";
 
 class MockBucket {
   constructor() { this.store = new Map(); this.mpus = new Map(); }
@@ -335,13 +350,23 @@ async function testTagPushTriggersBuildAndPublishStep() {
   const text = await res.text();
   assert.match(text, /tag v1\.2\.3/);
   await Promise.all(pending);
-  assert.equal(calls.fetch.length, before + 1, "tag push must also trigger exactly one BuildBuddy call");
+  // 2 calls: resolveTagCommit()'s GET of the tag's own page (scraping its
+  // target commit — payload.after is the *tag object*'s sha, not a
+  // commit, confirmed against a real Tangled delivery) + the actual
+  // BuildBuddy Run call.
+  assert.equal(calls.fetch.length, before + 2, "tag push must resolve the tag's commit, then trigger exactly one BuildBuddy call");
+  const tagPageCall = calls.fetch[before];
+  assert.match(String(tagPageCall.url), /\/tags\/v1\.2\.3$/, "must scrape the pushed tag's own page, not a hardcoded one");
   const bbBody = JSON.parse(calls.fetch[calls.fetch.length - 1].opts.body);
-  assert.equal(bbBody.commit_sha, "tagcommitsha", "commit_sha pins the exact checkout for tag pushes");
+  assert.equal(bbBody.commit_sha, MOCK_TAG_COMMIT_SHA, "commit_sha must be the tag's *resolved commit*, not payload.after (which is the tag object's own sha for annotated tags)");
   assert.equal(bbBody.branch, undefined, "no branch field for tag pushes — a tag name isn't a valid checkout branch and would hit BuildBuddy's origin/<ref> checkout bug");
   assert.match(bbBody.steps[0].run, /refs\/tags\/v1\.2\.3\^\{tag\}/, "build script computes the annotated tag object hash");
+  // The curl -d payload is itself shell-quoted (it runs inside the outer
+  // `-d "..."` argument), so its JSON quotes are backslash-escaped in the
+  // literal script text: \"sha\":\"<sha>\" rather than "sha":"<sha>".
+  assert.match(bbBody.steps[0].run, new RegExp(`\\\\"sha\\\\":\\\\"${MOCK_TAG_COMMIT_SHA}\\\\"`), "release-publish step reports the resolved commit sha, not the tag object sha");
   assert.match(bbBody.steps[0].run, /\/publish-release\/v1\.2\.3/, "build script calls back to publish the release");
-  console.log("PASS: tag push -> build queued with commit_sha (not branch) and a release-publish step appended");
+  console.log("PASS: tag push -> resolves the tag's real commit, builds with commit_sha (not branch), and appends a release-publish step");
 }
 
 async function testPublishReleaseRejectsBadToken() {

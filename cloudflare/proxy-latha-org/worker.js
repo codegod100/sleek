@@ -144,10 +144,46 @@ async function handleWebhook(request, env, ctx) {
   // than trust a field Tangled itself gets wrong for this case.
   const cloneUrl = "https://tangled.org/nandi.uk/sleek";
 
-  // Respond fast (Tangled times out at 30s + retries on 5xx); do the actual
-  // BuildBuddy trigger after responding.
-  ctx.waitUntil(triggerBuild(env, cloneUrl, sha, { tagName }));
+  // Respond fast (Tangled times out at 30s + retries on 5xx); resolve the
+  // tag's real commit (if this is a tag push) and trigger the BuildBuddy
+  // run after responding — see triggerBuildForRef()'s own comment for why
+  // a tag push needs an extra resolution step sha alone doesn't cover.
+  ctx.waitUntil(triggerBuildForRef(env, cloneUrl, sha, tagName));
   return new Response(`ok: build queued for ${sha}${tagName ? ` (tag ${tagName})` : ""}`, { status: 200 });
+}
+
+async function triggerBuildForRef(env, cloneUrl, sha, tagName) {
+  let buildSha = sha;
+  if (tagName) {
+    // For a tag push, Tangled's webhook reports `after` (sha, above) as
+    // the *tag object*'s own sha, not the commit it points at — confirmed
+    // against a real delivery (2026-08-18, pushing v0.1.1): `sha` here
+    // was `git cat-file -t <sha>` == "tag", and BuildBuddy's commit_sha
+    // needs an actual commit for its `git fetch`. Tangled's
+    // git-upload-pack ref advertisement (the info/refs endpoint) doesn't
+    // include the peeled (`^{}`) line either, so there's no way to
+    // resolve this via the plain git protocol. resolveTagCommit() scrapes
+    // the tag's own web page instead, which always links to exactly one
+    // real commit.
+    const resolved = await resolveTagCommit(cloneUrl, tagName);
+    if (!resolved) {
+      console.error(`could not resolve a commit for tag ${tagName} (tag object ${sha})`);
+      return;
+    }
+    buildSha = resolved;
+  }
+  await triggerBuild(env, cloneUrl, buildSha, { tagName });
+}
+
+async function resolveTagCommit(cloneUrl, tagName) {
+  const res = await fetch(`${cloneUrl}/tags/${encodeURIComponent(tagName)}`);
+  if (!res.ok) return null;
+  const html = await res.text();
+  const shas = [...new Set([...html.matchAll(/\/commit\/([0-9a-f]{40})/g)].map((m) => m[1]))];
+  // Only trust this if the page links to exactly one commit — anything
+  // else (0, or >1 from some future page layout change) means this
+  // scrape can't be trusted to have found the right one.
+  return shas.length === 1 ? shas[0] : null;
 }
 
 async function verifySignature(secret, rawBody, signatureHeader) {
