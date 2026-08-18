@@ -280,8 +280,21 @@
               ];
 
               postInstall = ''
+                # On NixOS, __EGL_VENDOR_LIBRARY_DIRS/LIBGL_DRIVERS_PATH/vulkan
+                # ICDs are found via the system-wide /run/opengl-driver (or the
+                # host distro's /usr/share/glvnd) symlink. Neither exists in a
+                # minimal environment that only has this closure on $PATH —
+                # notably `apptainer`/`singularity run ./result` (see .#sif):
+                # glvnd's libEGL then enumerates zero vendors, and glutin/winit
+                # report it as "no glutin configs" / "NoCompositor" even
+                # though a real GPU (or llvmpipe) is right there in the
+                # closure. Point at this package's own mesa so GL/EGL/Vulkan
+                # resolve without relying on host system config.
+                # --set-default so an explicit host override still wins.
                 wrapProgram $out/bin/sleek \
-                  --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libs}
+                  --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libs} \
+                  --set-default __EGL_VENDOR_LIBRARY_DIRS ${pkgs.mesa}/share/glvnd/egl_vendor.d \
+                  --set-default LIBGL_DRIVERS_PATH ${pkgs.mesa}/lib/dri
 
                 # Freedesktop icon theme (scalable + common raster sizes).
                 install -Dm644 ${./assets/uk.nandi.sleek.svg} \
@@ -383,6 +396,15 @@
           # Uses vmTools.runInLinuxVM under the hood — needs a builder with
           # the `kvm` system feature (nixbuild.net's builders advertise it;
           # see scripts/ci-nixbuild.sh's sleek-nixbuild-builders line).
+          #
+          # Neither apptainer nor singularity bind-mounts $XDG_RUNTIME_DIR by
+          # default, so the container can't see the host Wayland socket even
+          # though $WAYLAND_DISPLAY is passed through — winit then fails with
+          # WaylandError(Connection(NoCompositor)). Bind it explicitly:
+          #   apptainer run --bind /run/user/$(id -u) ./result
+          # (GL/EGL driver discovery is handled inside the image itself — see
+          # the __EGL_VENDOR_LIBRARY_DIRS/LIBGL_DRIVERS_PATH wrapProgram flags
+          # on sleek-host above — so no extra --bind is needed for that part.)
           sleek-sif = pkgs.singularity-tools.buildImage {
             name = "sleek";
             contents = [ sleek-host ];
