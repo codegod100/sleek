@@ -91,13 +91,27 @@ R2 upload → download → `latest/` alias roundtrip.
 - `worker.js`'s own logic (HMAC, routing, R2 read/write) — unit-tested
   locally, all passing (see above).
 
+## Deployed and live
+
+`proxy.latha.org` is deployed (R2 bucket + Worker script + custom domain
+route all attached) and confirmed working against real HTTP traffic:
+HMAC accept/reject, the BuildBuddy trigger call, and the full R2
+upload → download → `latest/` alias roundtrip all verified live, not just
+in `test_worker.mjs`.
+
 ## What's still unverified
 
-Only the Worker's deployment itself — it has never actually run on
-Cloudflare, because that needs an API token + account ID only the account
-owner can produce. Everything upstream (clone, build, disk capacity) and
-the Worker's own logic (tested locally) are now proven; deploying should be
-close to a formality once credentials are available.
+Registering the actual webhook on tangled.org's side (repo → **Settings →
+Hooks** → new webhook). This is confirmed UI-only — [Tangled's own
+webhooks docs](https://docs.tangled.org/webhooks) describe only the web UI
+flow with no CLI/API alternative, and `/settings/hooks` 307-redirects to
+`/login` with no session available outside a browser — so this one step
+needs a human with an authenticated browser session; nothing to script
+around it. Everything downstream of it (the Worker, BuildBuddy, R2) is
+proven; once the hook is registered, a normal `git push` should light up
+the whole chain. Confirmed via Cloudflare's Workers Analytics GraphQL API
+that a real push before registering the hook produces zero Worker
+invocations from Tangled, as expected.
 
 `.tangled/workflows/packages.yml` still exists and still builds on Spindle
 in parallel for now (belt-and-suspenders) — once this path is proven live,
