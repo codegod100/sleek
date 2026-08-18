@@ -3135,7 +3135,7 @@ impl eframe::App for SleekApp {
                                 }
                             }
                             Tab::Settings => {
-                                match ui::settings_tab(ui, &th, &mut self.state, self.mode) {
+                                match ui::settings_tab(ui, &th, &mut self.state) {
                                     SettingsAction::None => {}
                                     SettingsAction::Disconnect => {
                                         self.do_intentional_disconnect();
@@ -3146,13 +3146,6 @@ impl eframe::App for SleekApp {
                                         self.state.cancel_auto_reconnect();
                                         self.net.send(NetCmd::Quit);
                                         self.state.logout();
-                                    }
-                                    SettingsAction::ToggleTheme => {
-                                        let next = match self.mode {
-                                            Mode::Dark => Mode::Light,
-                                            Mode::Light => Mode::Dark,
-                                        };
-                                        self.set_mode(ctx, next);
                                     }
                                 }
                             }

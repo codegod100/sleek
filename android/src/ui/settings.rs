@@ -2,8 +2,8 @@
 
 use eframe::egui::{self, Align, Layout, RichText};
 use vidya::{
-    body, button, checkbox, destructive_button, dim_label, primary_button, status_dot, title,
-    title_2, Mode, Theme,
+    body, checkbox, destructive_button, dim_label, primary_button, status_dot, title,
+    title_2, Theme,
 };
 
 use crate::state::{AppState, ConnectionState};
@@ -13,14 +13,12 @@ pub enum SettingsAction {
     None,
     Disconnect,
     Logout,
-    ToggleTheme,
 }
 
 pub fn settings_tab(
     ui: &mut egui::Ui,
     th: &Theme,
     state: &mut AppState,
-    mode: Mode,
 ) -> SettingsAction {
     let mut action = SettingsAction::None;
     let sp = &th.spacing;
@@ -119,28 +117,6 @@ pub fn settings_tab(
             th,
             "When off, presence lines stay out of the buffer. Member lists still update.",
         );
-    });
-
-    ui.add_space(sp.md);
-
-    // Appearance
-    card(ui, th, |ui| {
-        section_label(ui, th, "APPEARANCE");
-        ui.add_space(sp.md);
-        ui.horizontal(|ui| {
-            body(ui, th, "Shell");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = match mode {
-                    Mode::Dark => " Dark ",
-                    Mode::Light => " Light ",
-                };
-                if button(ui, th, label).clicked() {
-                    action = SettingsAction::ToggleTheme;
-                }
-            });
-        });
-        ui.add_space(sp.sm);
-        dim_label(ui, th, "Vidya theme · GNOME/HIG-inspired");
     });
 
     ui.add_space(sp.md);
