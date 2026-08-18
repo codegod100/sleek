@@ -28,6 +28,15 @@ Sleek on Waydroid (chat + in-call video):
 - **Network**: [freeq-sdk](https://github.com/codegod100/freeq/tree/main/freeq-sdk) (guest IRC, TLS / WebSocket)
 - **Targets**: desktop host (Wayland/X11) and Android NativeActivity (`cargo-apk` / Waydroid)
 
+## Installation
+
+Install via Flatpak (hosted OSTree repo on `artifacts.latha.org`):
+
+```bash
+flatpak install --user https://artifacts.latha.org/artifacts/sleek/uk.nandi.sleek.flatpakref
+flatpak run uk.nandi.sleek
+```
+
 ## Run
 
 Dev shell + desktop host build work via either **pixi** or **Nix** — pick one.
