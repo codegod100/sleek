@@ -128,6 +128,40 @@ CI APKs are signed with the committed `android/ci.keystore` (password `android`,
 
 Optional: `ATP_IDENTIFIER` (default `nandi.uk`), `ATP_PDS`. Uses the **microvm** engine.
 
+### Tagged releases
+
+Version tags (`v0.1.5`, …) on [tangled.org/nandi.uk/sleek](https://tangled.org/nandi.uk/sleek) carry release
+artifacts as `sh.tangled.repo.artifact` records — visible under **Artifacts** on each tag's page, e.g.
+https://tangled.org/nandi.uk/sleek/tags/v0.1.5. Tangled serves each one at a plain download URL:
+
+```
+https://tangled.org/nandi.uk/sleek/tags/<tag>/download/<filename>
+```
+
+**Single-command install** (real hosted OSTree repo on `proxy.latha.org`, backed by R2 — built from
+the tagged `.flatpak` bundle via `flatpak build-import-bundle`, `flatpak/uk.nandi.sleek.flatpakref`
+points at it):
+
+```bash
+flatpak install --user https://proxy.latha.org/artifacts/uk.nandi.sleek.flatpakref
+flatpak run uk.nandi.sleek
+```
+
+The repo lives at `https://proxy.latha.org/artifacts/repo/` (ref `app/uk.nandi.sleek/x86_64/master`);
+the runtime (`org.gnome.Platform`//49) comes from Flathub via the `.flatpakref`'s `RuntimeRepo=`. This
+repo currently tracks whatever bundle was last pushed there manually — it is **not** yet wired into
+CI/the tag-artifact publish flow, so it can lag behind the latest tag.
+
+Alternatively, the `.flatpak` bundle itself is attached to each tag as a downloadable asset — but
+`flatpak install` flatly refuses a remote URL for a bundle (`error: Remote bundles are not supported`,
+confirmed live against flatpak 1.18), `--bundle` or not, so that path needs a local download first:
+
+```bash
+curl -LO https://tangled.org/nandi.uk/sleek/tags/v0.1.5/download/uk.nandi.sleek.flatpak
+flatpak install --user ./uk.nandi.sleek.flatpak
+flatpak run uk.nandi.sleek
+```
+
 ### Cachix
 
 Bootstrap configures **pull** from `https://codegod100.cachix.org` and installs the `cachix` CLI.
