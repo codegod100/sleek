@@ -89,6 +89,7 @@ async function testValidPushWebhook() {
   const bbBody = JSON.parse(calls.fetch[0].opts.body);
   assert.equal(bbBody.repo, "https://tangled.org/nandi.uk/sleek");
   assert.equal(bbBody.branch, "main");
+  assert.equal(bbBody.platform_properties.EstimatedFreeDiskBytes, "60GB");
   assert.match(bbBody.steps[0].run, /nix build \.#android/);
   assert.equal(calls.fetch[0].opts.headers["x-buildbuddy-api-key"], "test-bb-key");
 

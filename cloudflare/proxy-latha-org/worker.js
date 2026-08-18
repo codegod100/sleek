@@ -181,6 +181,13 @@ async function triggerBuild(env, cloneUrl, sha) {
   const body = {
     repo: cloneUrl,
     branch: "main",
+    // Default executor disk (~22G) isn't enough for a from-scratch build of
+    // this project (confirmed repeatedly: "No space left on device", even
+    // after fixing cache trust and clearing stale GC roots — the compile
+    // itself just needs more room than that). Confirmed directly that this
+    // property actually resizes the runner: a manual test with it reported
+    // `/dev/vda 63G` free vs. the ~22G default with it omitted.
+    platform_properties: { EstimatedFreeDiskBytes: "60GB" },
     steps: [{ run: buildScript(env, sha) }],
   };
   const resp = await fetch("https://app.buildbuddy.io/api/v1/Run", {
