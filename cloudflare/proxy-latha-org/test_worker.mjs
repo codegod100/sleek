@@ -14,7 +14,38 @@ globalThis.fetch = async (url, opts) => {
 };
 
 class MockBucket {
-  constructor() { this.store = new Map(); }
+  constructor() { this.store = new Map(); this.mpus = new Map(); }
+  // Minimal stand-in for R2's multipart upload API — enough to exercise
+  // worker.js's handleUploadInit/Part/Complete without a real R2 bucket.
+  async createMultipartUpload(key) {
+    const uploadId = `mock-mpu-${this.mpus.size + 1}`;
+    this.mpus.set(uploadId, { key, parts: new Map() });
+    return { uploadId, key };
+  }
+  resumeMultipartUpload(key, uploadId) {
+    const mpu = this.mpus.get(uploadId);
+    return {
+      uploadPart: async (partNumber, body) => {
+        const chunks = [];
+        const reader = body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+        const etag = `etag-${partNumber}`;
+        mpu.parts.set(partNumber, buf);
+        return { partNumber, etag };
+      },
+      complete: async (uploadedParts) => {
+        const ordered = [...uploadedParts].sort((a, b) => a.partNumber - b.partNumber);
+        const full = Buffer.concat(ordered.map((p) => mpu.parts.get(p.partNumber)));
+        this.store.set(key, full);
+        this.mpus.delete(uploadId);
+      },
+    };
+  }
   async put(key, body) {
     const chunks = [];
     if (body && body.getReader) {
@@ -170,6 +201,71 @@ async function testUploadAndDownloadRoundtrip() {
   console.log("PASS: upload -> R2 -> download + latest/ alias roundtrip");
 }
 
+async function testMultipartUploadRoundtrip() {
+  // Simulates the flatpak-upload path buildScript() now uses: init -> N
+  // part PUTs -> complete, each request small (the whole point — avoiding
+  // the 413 a single 617MB PUT hit against the real Worker).
+  const key = "deadbeef/uk.nandi.sleek.flatpak";
+  const { ctx } = ctxWithWaitUntil();
+
+  const initReq = new Request(`https://proxy.latha.org/upload-init/${key}`, {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token" },
+  });
+  const initRes = await worker.fetch(initReq, env, ctx);
+  assert.equal(initRes.status, 200);
+  const { uploadId } = await initRes.json();
+  assert.ok(uploadId);
+
+  const chunkA = Buffer.from("chunk-one-bytes-");
+  const chunkB = Buffer.from("chunk-two-bytes-");
+  const parts = [];
+  let partNumber = 0;
+  for (const chunk of [chunkA, chunkB]) {
+    partNumber++;
+    const partReq = new Request(
+      `https://proxy.latha.org/upload-part/${key}?uploadId=${uploadId}&partNumber=${partNumber}`,
+      { method: "PUT", headers: { Authorization: "Bearer test-upload-token" }, body: chunk },
+    );
+    const partRes = await worker.fetch(partReq, env, ctx);
+    assert.equal(partRes.status, 200);
+    const { etag } = await partRes.json();
+    assert.ok(etag);
+    parts.push({ partNumber, etag });
+  }
+
+  const completeReq = new Request(`https://proxy.latha.org/upload-complete/${key}?uploadId=${uploadId}`, {
+    method: "POST",
+    headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
+    body: JSON.stringify(parts),
+  });
+  const completeRes = await worker.fetch(completeReq, env, ctx);
+  assert.equal(completeRes.status, 200);
+
+  const getReq = new Request(`https://proxy.latha.org/artifacts/${key}`);
+  const getRes = await worker.fetch(getReq, env, ctx);
+  assert.equal(getRes.status, 200);
+  const gotBuf = Buffer.from(await getRes.arrayBuffer());
+  assert.equal(gotBuf.toString(), Buffer.concat([chunkA, chunkB]).toString(), "reassembled parts must match original bytes in order");
+
+  const latestReq = new Request("https://proxy.latha.org/artifacts/latest/uk.nandi.sleek.flatpak");
+  const latestRes = await worker.fetch(latestReq, env, ctx);
+  assert.equal(latestRes.status, 200, "multipart complete must also mirror to latest/");
+
+  console.log("PASS: multipart upload init -> parts -> complete -> download + latest/ alias roundtrip");
+}
+
+async function testMultipartEndpointsRejectBadToken() {
+  const { ctx } = ctxWithWaitUntil();
+  const initReq = new Request("https://proxy.latha.org/upload-init/x/y", {
+    method: "POST",
+    headers: { Authorization: "Bearer wrong" },
+  });
+  const res = await worker.fetch(initReq, env, ctx);
+  assert.equal(res.status, 401);
+  console.log("PASS: upload-init with bad bearer token -> 401");
+}
+
 async function testUploadRejectsBadToken() {
   const req = new Request("https://proxy.latha.org/upload/x/sleek.apk", {
     method: "PUT",
@@ -196,6 +292,8 @@ const tests = [
   testNonMainRefIgnored,
   testNonPushEventIgnored,
   testUploadAndDownloadRoundtrip,
+  testMultipartUploadRoundtrip,
+  testMultipartEndpointsRejectBadToken,
   testUploadRejectsBadToken,
   testDownloadMissingKey404,
 ];

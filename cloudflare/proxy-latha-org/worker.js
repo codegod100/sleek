@@ -29,6 +29,21 @@ export default {
     if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
       return handleUpload(request, env, url);
     }
+    // Cloudflare Workers reject request bodies over ~100MB — confirmed live,
+    // a single-shot PUT of the 617MB flatpak bundle got a 413. R2's native
+    // multipart upload API lets the build script stream it in chunks
+    // instead (each chunk is its own small request; only the final
+    // completion call needs the accumulated part list, which the build
+    // script itself tracks across the run — no server-side state needed).
+    if (request.method === "POST" && url.pathname.startsWith("/upload-init/")) {
+      return handleUploadInit(request, env, url);
+    }
+    if (request.method === "PUT" && url.pathname.startsWith("/upload-part/")) {
+      return handleUploadPart(request, env, url);
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/upload-complete/")) {
+      return handleUploadComplete(request, env, url);
+    }
     if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
       return handleDownload(request, env, url);
     }
@@ -173,7 +188,30 @@ function buildScript(env, sha) {
     "echo '--- disk after android build ---'; df -h / || true",
     "nix build .#flatpak --out-link result-flatpak -L --print-build-logs",
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @result-android/sleek.apk`,
-    `curl -fsS -X PUT "${uploadBase}/uk.nandi.sleek.flatpak" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @result-flatpak/uk.nandi.sleek.flatpak`,
+    // The flatpak bundle runs several hundred MB (confirmed: 617MB on a real
+    // build) — a single PUT through the Worker hits Cloudflare's ~100MB
+    // request body cap and 413s. Stream it via R2's multipart upload API
+    // instead: split into 50MB chunks, upload each part, then complete with
+    // the part list this script accumulates itself (no server-side state).
+    "flatpak_file=result-flatpak/uk.nandi.sleek.flatpak",
+    `flatpak_key="${sha}/uk.nandi.sleek.flatpak"`,
+    `init=$(curl -fsS -X POST "https://proxy.latha.org/upload-init/$flatpak_key" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}")`,
+    `uploadId=$(printf '%s' "$init" | sed -n 's/.*"uploadId":"\\([^"]*\\)".*/\\1/p')`,
+    '[ -n "$uploadId" ] || { echo "failed to init multipart upload: $init"; exit 1; }',
+    "rm -f /tmp/flatpak-parts.json /tmp/flatpak-chunk-*",
+    'split -b 50m -d -a 4 "$flatpak_file" /tmp/flatpak-chunk-',
+    'printf "[" > /tmp/flatpak-parts.json',
+    "n=0",
+    'for chunk in /tmp/flatpak-chunk-*; do',
+    "  n=$((n + 1))",
+    `  resp=$(curl -fsS -X PUT "https://proxy.latha.org/upload-part/$flatpak_key?uploadId=$uploadId&partNumber=$n" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$chunk")`,
+    `  etag=$(printf '%s' "$resp" | sed -n 's/.*"etag":"\\([^"]*\\)".*/\\1/p')`,
+    '  [ -n "$etag" ] || { echo "part $n upload failed: $resp"; exit 1; }',
+    '  [ "$n" -gt 1 ] && printf "," >> /tmp/flatpak-parts.json',
+    '  printf \'{"partNumber":%d,"etag":"%s"}\' "$n" "$etag" >> /tmp/flatpak-parts.json',
+    "done",
+    'printf "]" >> /tmp/flatpak-parts.json',
+    `curl -fsS -X POST "https://proxy.latha.org/upload-complete/$flatpak_key?uploadId=$uploadId" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" --data-binary @/tmp/flatpak-parts.json`,
   ].join("\n");
 }
 
@@ -226,21 +264,65 @@ async function triggerBuild(env, cloneUrl, sha) {
 // --- artifact storage (R2) -------------------------------------------------
 
 async function handleUpload(request, env, url) {
-  const auth = request.headers.get("Authorization") || "";
-  if (!env.UPLOAD_TOKEN || auth !== `Bearer ${env.UPLOAD_TOKEN}`) {
-    return new Response("unauthorized", { status: 401 });
-  }
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
   const key = url.pathname.replace(/^\/upload\//, "");
   if (!key) return new Response("missing key", { status: 400 });
 
   await env.ARTIFACTS.put(key, request.body);
+  await mirrorToLatest(env, key); // stable "latest/<filename>" alias
 
-  // Mirror to a stable "latest/<filename>" alias for convenience.
+  return new Response(`ok: stored ${key}`, { status: 200 });
+}
+
+function checkUploadAuth(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  return env.UPLOAD_TOKEN && auth === `Bearer ${env.UPLOAD_TOKEN}`;
+}
+
+async function mirrorToLatest(env, key) {
   const filename = key.split("/").pop();
   const stored = await env.ARTIFACTS.get(key);
   if (stored) await env.ARTIFACTS.put(`latest/${filename}`, stored.body);
+}
 
-  return new Response(`ok: stored ${key}`, { status: 200 });
+async function handleUploadInit(request, env, url) {
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
+  const key = url.pathname.replace(/^\/upload-init\//, "");
+  if (!key) return new Response("missing key", { status: 400 });
+  const mpu = await env.ARTIFACTS.createMultipartUpload(key);
+  return new Response(JSON.stringify({ uploadId: mpu.uploadId, key: mpu.key }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleUploadPart(request, env, url) {
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
+  const key = url.pathname.replace(/^\/upload-part\//, "");
+  const uploadId = url.searchParams.get("uploadId");
+  const partNumber = Number(url.searchParams.get("partNumber"));
+  if (!key || !uploadId || !partNumber) return new Response("missing key/uploadId/partNumber", { status: 400 });
+  const mpu = env.ARTIFACTS.resumeMultipartUpload(key, uploadId);
+  const part = await mpu.uploadPart(partNumber, request.body);
+  return new Response(JSON.stringify({ partNumber: part.partNumber, etag: part.etag }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleUploadComplete(request, env, url) {
+  if (!checkUploadAuth(request, env)) return new Response("unauthorized", { status: 401 });
+  const key = url.pathname.replace(/^\/upload-complete\//, "");
+  const uploadId = url.searchParams.get("uploadId");
+  if (!key || !uploadId) return new Response("missing key/uploadId", { status: 400 });
+  let parts;
+  try {
+    parts = JSON.parse(await request.text());
+  } catch {
+    return new Response("bad json parts list", { status: 400 });
+  }
+  const mpu = env.ARTIFACTS.resumeMultipartUpload(key, uploadId);
+  await mpu.complete(parts);
+  await mirrorToLatest(env, key);
+  return new Response(`ok: completed multipart upload for ${key}`, { status: 200 });
 }
 
 async function handleDownload(request, env, url) {
