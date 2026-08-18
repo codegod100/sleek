@@ -1,0 +1,50 @@
+# Deploys cloudflare/proxy-latha-org/worker.js via its own deploy.sh —
+# manual only (workflow_dispatch), same rationale as rbe-image.yml: this
+# only needs re-running when worker.js/deploy.sh actually change, not on
+# every push, and this sandbox/dev machine has no Cloudflare credentials
+# of its own — OpenBao (same secret store cachix.yml already pulls from)
+# is the only place they live outside a human's own machine.
+#
+# Expects these keys under OpenBao's secret/data/ai-api-keys (or wherever
+# OPENBAO_SECRET_PATH points): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+# TANGLED_WEBHOOK_SECRET, BUILDBUDDY_API_KEY, UPLOAD_TOKEN — see
+# deploy.sh's own header comment for what each one needs to be able to do.
+# If any are missing, fetch-openbao-env.sh fails loudly (no partial/silent
+# deploy).
+name: Deploy proxy.latha.org
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch secrets from OpenBao
+        env:
+          OPENBAO_ADDR: https://openbao.boxd.sh
+          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+          OPENBAO_SECRET_PATH: secret/data/ai-api-keys
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPENBAO_TOKEN:-}" ]]; then
+            echo "OPENBAO_TOKEN repository secret is not set" >&2
+            exit 1
+          fi
+          chmod +x scripts/fetch-openbao-env.sh
+          ./scripts/fetch-openbao-env.sh --github-env --keys \
+            CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID,TANGLED_WEBHOOK_SECRET,BUILDBUDDY_API_KEY,UPLOAD_TOKEN
+
+      - name: Run worker test suite
+        run: node cloudflare/proxy-latha-org/test_worker.mjs
+
+      - name: ./deploy.sh
+        working-directory: cloudflare/proxy-latha-org
+        run: ./deploy.sh

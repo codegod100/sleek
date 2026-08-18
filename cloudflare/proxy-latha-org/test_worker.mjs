@@ -123,6 +123,7 @@ async function testValidPushWebhook() {
   const bbBody = JSON.parse(calls.fetch[0].opts.body);
   assert.equal(bbBody.repo, "https://tangled.org/nandi.uk/sleek");
   assert.equal(bbBody.branch, "main");
+  assert.equal(bbBody.commit_sha, "abc123", "commit_sha is always sent, even for main pushes");
   assert.equal(bbBody.platform_properties, undefined, "no disk override needed — compute runs on BuildBuddy's RE cluster, not this trigger executor");
   assert.match(bbBody.steps[0].run, /buck2 build --show-output \/\/:sleek-android-apk/);
   assert.equal(calls.fetch[0].opts.headers["x-buildbuddy-api-key"], "test-bb-key");
@@ -336,10 +337,11 @@ async function testTagPushTriggersBuildAndPublishStep() {
   await Promise.all(pending);
   assert.equal(calls.fetch.length, before + 1, "tag push must also trigger exactly one BuildBuddy call");
   const bbBody = JSON.parse(calls.fetch[calls.fetch.length - 1].opts.body);
-  assert.equal(bbBody.branch, "v1.2.3", "tag name used as the checkout ref");
+  assert.equal(bbBody.commit_sha, "tagcommitsha", "commit_sha pins the exact checkout for tag pushes");
+  assert.equal(bbBody.branch, undefined, "no branch field for tag pushes — a tag name isn't a valid checkout branch and would hit BuildBuddy's origin/<ref> checkout bug");
   assert.match(bbBody.steps[0].run, /refs\/tags\/v1\.2\.3\^\{tag\}/, "build script computes the annotated tag object hash");
   assert.match(bbBody.steps[0].run, /\/publish-release\/v1\.2\.3/, "build script calls back to publish the release");
-  console.log("PASS: tag push -> build queued with branch=tag and a release-publish step appended");
+  console.log("PASS: tag push -> build queued with commit_sha (not branch) and a release-publish step appended");
 }
 
 async function testPublishReleaseRejectsBadToken() {

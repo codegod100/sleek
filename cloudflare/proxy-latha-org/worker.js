@@ -225,11 +225,24 @@ function buildScript(env, sha, tagName) {
 async function triggerBuild(env, cloneUrl, sha, { tagName } = {}) {
   const body = {
     repo: cloneUrl,
-    // Tag names work as a checkout ref here the same way branch names do
-    // (plain `git clone --branch <ref>` semantics) — not yet verified
-    // against a real tag push through BuildBuddy specifically, only
-    // against main-branch pushes. First real tag push is the test.
-    branch: tagName || "main",
+    // commit_sha pins the exact checkout regardless of ref type — required
+    // for tag pushes. Confirmed live (debugging the sif-egl-fix invocation)
+    // that BuildBuddy's hosted-runner repo setup does an unconditional
+    // `git checkout -B <ref> origin/<ref>` after a shallow
+    // `git fetch --depth=1 origin <ref>`. That works for a branch (the
+    // fetch creates `refs/remotes/origin/<ref>`), but a tag ref only
+    // populates FETCH_HEAD — `origin/<tag>` never exists, so the checkout
+    // fails with "fatal: 'origin/<ref>' is not a commit" and the run never
+    // gets past setup. commit_sha (api/v1/service.proto's RunRequest field
+    // 3, independent of `branch`) sidesteps ref-type resolution entirely —
+    // we always have the real sha here regardless of tag vs. branch push.
+    commit_sha: sha,
+    // branch is *also* sent, but only for main-branch pushes, purely as a
+    // snapshot-affinity hint (BuildBuddy prefers reusing a runner snapshot
+    // from a matching branch to warm-start git/bazel state) — skip it for
+    // tag pushes so there's no `branch` value that could reintroduce the
+    // same ref-resolution path this is fixing.
+    ...(tagName ? {} : { branch: "main" }),
     // No platform_properties override needed now that buildScript() runs
     // buck2 instead of Nix: the actual compile happens on BuildBuddy's own
     // RE cluster (platforms/defs.bzl's custom sleek-rbe image), so this
