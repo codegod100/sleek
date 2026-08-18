@@ -1,0 +1,44 @@
+# Mirror main to tangled.org/nandi.uk/sleek on every push.
+# This is what fires the Tangled webhook → proxy.latha.org →
+# BuildBuddy → R2 artifact pipeline.
+#
+# Requires repository secret DEPLOY_KEY — an SSH private key with
+# write access to the Tangled repo (same key the old Tangled Spindle
+# workflow used for tag pushes).
+
+name: Mirror to Tangled
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    name: Push main → tangled.org
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Tangled
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DEPLOY_KEY:-}" ]]; then
+            echo "DEPLOY_KEY secret not set — skipping mirror" >&2
+            exit 0
+          fi
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/tangled_deploy"
+          chmod 600 "$HOME/.ssh/tangled_deploy"
+          ssh-keyscan -t rsa,ed25519,ecdsa knot1.tangled.sh >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tangled_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+            git push git@knot1.tangled.sh:did:plc:eimwo4adqwppiiweleayixez/sleek main
+          rm -f "$HOME/.ssh/tangled_deploy"
