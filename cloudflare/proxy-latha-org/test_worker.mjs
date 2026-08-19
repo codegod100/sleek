@@ -120,7 +120,7 @@ async function testValidPushWebhook() {
     ref: "refs/heads/main",
     repository: { clone_url: "https://tangled.org/nandi.uk/sleek" },
   });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: {
       "X-Tangled-Event": "push",
@@ -154,7 +154,7 @@ async function testValidPushWebhook() {
 
 async function testBadSignatureRejected() {
   const payload = JSON.stringify({ after: "x", ref: "refs/heads/main", repository: { clone_url: "u" } });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": "sha256=deadbeef" },
     body: payload,
@@ -167,7 +167,7 @@ async function testBadSignatureRejected() {
 
 async function testNonMainRefIgnored() {
   const payload = JSON.stringify({ after: "x", ref: "refs/heads/feature", repository: { clone_url: "u" } });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": sign("test-secret", payload) },
     body: payload,
@@ -182,7 +182,7 @@ async function testNonMainRefIgnored() {
 
 async function testNonPushEventIgnored() {
   const payload = JSON.stringify({ after: "x", ref: "refs/heads/main", repository: { clone_url: "u" } });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: { "X-Tangled-Event": "pull_request:created", "X-Tangled-Signature-256": sign("test-secret", payload) },
     body: payload,
@@ -197,7 +197,7 @@ async function testNonPushEventIgnored() {
 
 async function testUploadAndDownloadRoundtrip() {
   const body = Buffer.from("fake apk bytes");
-  const putReq = new Request("https://proxy.latha.org/upload/deadbeef/sleek.apk", {
+  const putReq = new Request("https://artifacts.latha.org/upload/deadbeef/sleek.apk", {
     method: "PUT",
     headers: { Authorization: "Bearer test-upload-token" },
     body,
@@ -206,13 +206,13 @@ async function testUploadAndDownloadRoundtrip() {
   const putRes = await worker.fetch(putReq, env, ctx);
   assert.equal(putRes.status, 200);
 
-  const getReq = new Request("https://proxy.latha.org/artifacts/deadbeef/sleek.apk");
+  const getReq = new Request("https://artifacts.latha.org/artifacts/deadbeef/sleek.apk");
   const getRes = await worker.fetch(getReq, env, ctx);
   assert.equal(getRes.status, 200);
   const gotBuf = Buffer.from(await getRes.arrayBuffer());
   assert.equal(gotBuf.toString(), "fake apk bytes");
 
-  const latestReq = new Request("https://proxy.latha.org/artifacts/latest/sleek.apk");
+  const latestReq = new Request("https://artifacts.latha.org/artifacts/latest/sleek.apk");
   const latestRes = await worker.fetch(latestReq, env, ctx);
   assert.equal(latestRes.status, 200);
   const latestBuf = Buffer.from(await latestRes.arrayBuffer());
@@ -227,7 +227,7 @@ async function testMultipartUploadRoundtrip() {
   const key = "deadbeef/uk.nandi.sleek.flatpak";
   const { ctx } = ctxWithWaitUntil();
 
-  const initReq = new Request(`https://proxy.latha.org/upload-init/${key}`, {
+  const initReq = new Request(`https://artifacts.latha.org/upload-init/${key}`, {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token" },
   });
@@ -243,7 +243,7 @@ async function testMultipartUploadRoundtrip() {
   for (const chunk of [chunkA, chunkB]) {
     partNumber++;
     const partReq = new Request(
-      `https://proxy.latha.org/upload-part/${key}?uploadId=${uploadId}&partNumber=${partNumber}`,
+      `https://artifacts.latha.org/upload-part/${key}?uploadId=${uploadId}&partNumber=${partNumber}`,
       { method: "PUT", headers: { Authorization: "Bearer test-upload-token" }, body: chunk },
     );
     const partRes = await worker.fetch(partReq, env, ctx);
@@ -253,7 +253,7 @@ async function testMultipartUploadRoundtrip() {
     parts.push({ partNumber, etag });
   }
 
-  const completeReq = new Request(`https://proxy.latha.org/upload-complete/${key}?uploadId=${uploadId}`, {
+  const completeReq = new Request(`https://artifacts.latha.org/upload-complete/${key}?uploadId=${uploadId}`, {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
     body: JSON.stringify(parts),
@@ -261,13 +261,13 @@ async function testMultipartUploadRoundtrip() {
   const completeRes = await worker.fetch(completeReq, env, ctx);
   assert.equal(completeRes.status, 200);
 
-  const getReq = new Request(`https://proxy.latha.org/artifacts/${key}`);
+  const getReq = new Request(`https://artifacts.latha.org/artifacts/${key}`);
   const getRes = await worker.fetch(getReq, env, ctx);
   assert.equal(getRes.status, 200);
   const gotBuf = Buffer.from(await getRes.arrayBuffer());
   assert.equal(gotBuf.toString(), Buffer.concat([chunkA, chunkB]).toString(), "reassembled parts must match original bytes in order");
 
-  const latestReq = new Request("https://proxy.latha.org/artifacts/latest/uk.nandi.sleek.flatpak");
+  const latestReq = new Request("https://artifacts.latha.org/artifacts/latest/uk.nandi.sleek.flatpak");
   const latestRes = await worker.fetch(latestReq, env, ctx);
   assert.equal(latestRes.status, 200, "multipart complete must also mirror to latest/");
 
@@ -276,7 +276,7 @@ async function testMultipartUploadRoundtrip() {
 
 async function testMultipartEndpointsRejectBadToken() {
   const { ctx } = ctxWithWaitUntil();
-  const initReq = new Request("https://proxy.latha.org/upload-init/x/y", {
+  const initReq = new Request("https://artifacts.latha.org/upload-init/x/y", {
     method: "POST",
     headers: { Authorization: "Bearer wrong" },
   });
@@ -286,7 +286,7 @@ async function testMultipartEndpointsRejectBadToken() {
 }
 
 async function testUploadRejectsBadToken() {
-  const req = new Request("https://proxy.latha.org/upload/x/sleek.apk", {
+  const req = new Request("https://artifacts.latha.org/upload/x/sleek.apk", {
     method: "PUT",
     headers: { Authorization: "Bearer wrong" },
     body: "nope",
@@ -298,7 +298,7 @@ async function testUploadRejectsBadToken() {
 }
 
 async function testDownloadMissingKey404() {
-  const req = new Request("https://proxy.latha.org/artifacts/nope/sleek.apk");
+  const req = new Request("https://artifacts.latha.org/artifacts/nope/sleek.apk");
   const { ctx } = ctxWithWaitUntil();
   const res = await worker.fetch(req, env, ctx);
   assert.equal(res.status, 404);
@@ -310,7 +310,7 @@ async function testOauthSessionNeverServedAsArtifact() {
   // an oauth session file exists in the bucket, /artifacts/oauth/... must
   // never serve it.
   await env.ARTIFACTS.put("oauth/session.json", JSON.stringify({ accessToken: "should-never-leak" }));
-  const req = new Request("https://proxy.latha.org/artifacts/oauth/session.json");
+  const req = new Request("https://artifacts.latha.org/artifacts/oauth/session.json");
   const { ctx } = ctxWithWaitUntil();
   const res = await worker.fetch(req, env, ctx);
   assert.equal(res.status, 404, "oauth/ prefix must never be servable via /artifacts/");
@@ -319,14 +319,14 @@ async function testOauthSessionNeverServedAsArtifact() {
 }
 
 async function testClientMetadataDocument() {
-  const req = new Request("https://proxy.latha.org/client-metadata.json");
+  const req = new Request("https://artifacts.latha.org/client-metadata.json");
   const { ctx } = ctxWithWaitUntil();
   const res = await worker.fetch(req, env, ctx);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("content-type"), "application/json");
   const meta = await res.json();
-  assert.equal(meta.client_id, "https://proxy.latha.org/client-metadata.json", "client_id must exactly match the URL it's served from");
-  assert.deepEqual(meta.redirect_uris, ["https://proxy.latha.org/oauth/callback"]);
+  assert.equal(meta.client_id, "https://artifacts.latha.org/client-metadata.json", "client_id must exactly match the URL it's served from");
+  assert.deepEqual(meta.redirect_uris, ["https://artifacts.latha.org/oauth/callback"]);
   assert.equal(meta.dpop_bound_access_tokens, true);
   assert.ok(meta.scope.includes("atproto"));
   console.log("PASS: /client-metadata.json is well-formed and self-referential");
@@ -338,7 +338,7 @@ async function testTagPushTriggersBuildAndPublishStep() {
     ref: "refs/tags/v1.2.3",
     repository: { clone_url: "https://tangled.org/nandi.uk/sleek" },
   });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": sign("test-secret", payload) },
     body: payload,
@@ -388,7 +388,7 @@ async function testTagPushBuildScriptIncludesHostBinary() {
     ref: "refs/tags/v4.5.6",
     repository: { clone_url: "https://tangled.org/nandi.uk/sleek" },
   });
-  const req = new Request("https://proxy.latha.org/webhook", {
+  const req = new Request("https://artifacts.latha.org/webhook", {
     method: "POST",
     headers: { "X-Tangled-Event": "push", "X-Tangled-Signature-256": sign("test-secret", payload) },
     body: payload,
@@ -412,7 +412,7 @@ async function testTagPushBuildScriptIncludesHostBinary() {
 }
 
 async function testPublishReleaseRejectsBadToken() {
-  const req = new Request("https://proxy.latha.org/publish-release/v1.2.3", {
+  const req = new Request("https://artifacts.latha.org/publish-release/v1.2.3", {
     method: "POST",
     headers: { Authorization: "Bearer wrong", "content-type": "application/json" },
     body: JSON.stringify({ sha: "x", tagHash: "y" }),
@@ -424,7 +424,7 @@ async function testPublishReleaseRejectsBadToken() {
 }
 
 async function testPublishReleaseMissingArtifact404() {
-  const req = new Request("https://proxy.latha.org/publish-release/v1.2.3", {
+  const req = new Request("https://artifacts.latha.org/publish-release/v1.2.3", {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
     body: JSON.stringify({ sha: "never-uploaded-sha", tagHash: "deadbeef" }),
@@ -441,7 +441,7 @@ async function testPublishReleaseWithoutOauthSession401() {
   const key = "releasesha/sleek.apk";
   await env.ARTIFACTS.put(key, "fake apk bytes for release test");
   const before = calls.fetch.length;
-  const req = new Request("https://proxy.latha.org/publish-release/v9.9.9", {
+  const req = new Request("https://artifacts.latha.org/publish-release/v9.9.9", {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
     body: JSON.stringify({ sha: "releasesha", tagHash: "deadbeef" }),
@@ -465,12 +465,12 @@ async function testPublishReleaseWithExplicitFilenameDoesNotClobber() {
   // ever reaching atproto — enough to prove each call resolves and records
   // against its *own* filename-keyed R2 object without a crash or a wrong
   // "no artifact stored" 404 for either one.
-  const reqApk = new Request("https://proxy.latha.org/publish-release/v7.7.7", {
+  const reqApk = new Request("https://artifacts.latha.org/publish-release/v7.7.7", {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
     body: JSON.stringify({ sha: "multisha", tagHash: "deadbeef", filename: "sleek.apk" }),
   });
-  const reqHost = new Request("https://proxy.latha.org/publish-release/v7.7.7", {
+  const reqHost = new Request("https://artifacts.latha.org/publish-release/v7.7.7", {
     method: "POST",
     headers: { Authorization: "Bearer test-upload-token", "content-type": "application/json" },
     body: JSON.stringify({ sha: "multisha", tagHash: "deadbeef", filename: "sleek-x86_64-linux" }),
@@ -484,7 +484,7 @@ async function testPublishReleaseWithExplicitFilenameDoesNotClobber() {
 }
 
 async function testOauthCallbackRejectsUnknownState() {
-  const req = new Request("https://proxy.latha.org/oauth/callback?code=abc&state=never-issued");
+  const req = new Request("https://artifacts.latha.org/oauth/callback?code=abc&state=never-issued");
   const { ctx } = ctxWithWaitUntil();
   const res = await worker.fetch(req, env, ctx);
   assert.equal(res.status, 400);

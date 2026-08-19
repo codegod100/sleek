@@ -1,4 +1,4 @@
-# proxy.latha.org
+# artifacts.latha.org
 
 Replaces Spindle as the build path for `.#android` + `.#flatpak`: Spindle's
 `microvm` runner has too little disk to compile this project from a cache
@@ -9,15 +9,15 @@ repo's Buck2/RBE build, have the disk. This Worker is the glue:
 
 ```
 push to tangled.org/nandi.uk/sleek (main)
-  → Tangled fires a `push` webhook  →  https://proxy.latha.org/webhook
+  → Tangled fires a `push` webhook  →  https://artifacts.latha.org/webhook
   → Worker verifies HMAC, triggers a BuildBuddy remote run
   → BuildBuddy executor: nix build .#android + .#flatpak, then PUTs the
-    finished files back to https://proxy.latha.org/upload/<sha>/<file>
+    finished files back to https://artifacts.latha.org/upload/<sha>/<file>
   → Worker stores them in R2, serves them at:
-      https://proxy.latha.org/artifacts/<sha>/sleek.apk
-      https://proxy.latha.org/artifacts/<sha>/uk.nandi.sleek.flatpak
-      https://proxy.latha.org/artifacts/latest/sleek.apk         (always newest)
-      https://proxy.latha.org/artifacts/latest/uk.nandi.sleek.flatpak
+      https://artifacts.latha.org/artifacts/<sha>/sleek.apk
+      https://artifacts.latha.org/artifacts/<sha>/uk.nandi.sleek.flatpak
+      https://artifacts.latha.org/artifacts/latest/sleek.apk         (always newest)
+      https://artifacts.latha.org/artifacts/latest/uk.nandi.sleek.flatpak
 ```
 
 No npm/wrangler dependency — `worker.js` is a plain ES module Worker,
@@ -43,7 +43,7 @@ export UPLOAD_TOKEN=...             # openssl rand -hex 32
 ```
 
 4. On tangled.org: repo → **Settings → Hooks → new webhook**
-   - Payload URL: `https://proxy.latha.org/webhook`
+   - Payload URL: `https://artifacts.latha.org/webhook`
    - Secret: the same `TANGLED_WEBHOOK_SECRET`
    - Events: `push`
    - Active: on
@@ -93,7 +93,7 @@ R2 upload → download → `latest/` alias roundtrip.
 
 ## Deployed and live
 
-`proxy.latha.org` is deployed (R2 bucket + Worker script + custom domain
+`artifacts.latha.org` is deployed (R2 bucket + Worker script + custom domain
 route all attached) and confirmed working against real HTTP traffic:
 HMAC accept/reject, the BuildBuddy trigger call, and the full R2
 upload → download → `latest/` alias roundtrip all verified live, not just

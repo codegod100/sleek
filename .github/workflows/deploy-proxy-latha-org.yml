@@ -24,7 +24,7 @@
 # 3 secrets ever needs to be rotated, that's a separate, deliberate
 # `./deploy.sh` run (by a human, with the new value exported locally) —
 # not something this workflow does.
-name: Deploy proxy.latha.org
+name: Deploy artifacts.latha.org
 
 on:
   workflow_dispatch:

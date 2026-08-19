@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Deploy proxy.latha.org via the raw Cloudflare API (no wrangler/node needed).
+# Deploy artifacts.latha.org via the raw Cloudflare API (no wrangler/node needed).
 #
 # Creates/updates:
 #   - R2 bucket "proxy-latha-org-artifacts" (artifact storage)
 #   - Worker script "proxy-latha-org" (module worker, worker.js), with
 #     bindings: ARTIFACTS (r2_bucket) + 3 secret_text bindings
-#   - Custom domain route proxy.latha.org -> that worker (needs the
+#   - Custom domain route artifacts.latha.org -> that worker (needs the
 #     latha.org zone already on this Cloudflare account)
 #
 # Required env:
@@ -44,7 +44,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="proxy-latha-org"
 BUCKET_NAME="proxy-latha-org-artifacts"
-HOSTNAME="proxy.latha.org"
+HOSTNAME="artifacts.latha.org"
 ZONE_NAME="latha.org"
 API="https://api.cloudflare.com/client/v4"
 

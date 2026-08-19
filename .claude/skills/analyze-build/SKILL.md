@@ -1,7 +1,7 @@
 ---
 name: analyze-build
 description: >
-  Inspect BuildBuddy remote-run builds triggered by proxy.latha.org (the
+  Inspect BuildBuddy remote-run builds triggered by artifacts.latha.org (the
   Tangled webhook -> BuildBuddy -> R2 artifact pipeline in
   cloudflare/proxy-latha-org/). Use when asked to check build status, read
   build logs, debug a failed/stuck BuildBuddy invocation, or when
@@ -17,13 +17,13 @@ Pipeline: push to `tangled.org/nandi.uk/sleek` (main) -> Worker webhook ->
 BuildBuddy's own RE cluster via the repo's `platforms/defs.bzl` custom
 `sleek-rbe` image (pixi + Android NDK baked in), with real BuildBuddy
 action-cache reuse -> executor PUTs `sleek.apk` back to the Worker -> stored
-in R2, served at `https://proxy.latha.org/artifacts/<sha>/...`. Not Nix
+in R2, served at `https://artifacts.latha.org/artifacts/<sha>/...`. Not Nix
 anymore — see git history for the abandoned flake.nix/nix-daemon path.
 See `cloudflare/proxy-latha-org/README.md` for the full design.
 
 ## Push -> watch briefly -> if it doesn't start, just push again
 
-After a push, poll `https://proxy.latha.org/artifacts/<sha>/invocation.json`
+After a push, poll `https://artifacts.latha.org/artifacts/<sha>/invocation.json`
 for ~1-2 minutes (a few 5s probes). If an `invocationId` shows up but
 `GetInvocation` stays `{}`/null for a couple more minutes, that's the
 registration bug below — don't keep waiting on it, it's probably just
@@ -38,7 +38,7 @@ ad-hoc runs, so this is the only lookup path):
 
 ```bash
 sha=$(git rev-parse HEAD)
-curl -s "https://proxy.latha.org/artifacts/$sha/invocation.json"
+curl -s "https://artifacts.latha.org/artifacts/$sha/invocation.json"
 # {"triggeredAt":"...","invocationId":"<id>"}
 ```
 

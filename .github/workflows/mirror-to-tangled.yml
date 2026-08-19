@@ -1,5 +1,5 @@
 # Mirror main to tangled.org/nandi.uk/sleek on every push.
-# This is what fires the Tangled webhook → proxy.latha.org →
+# This is what fires the Tangled webhook → artifacts.latha.org →
 # BuildBuddy → R2 artifact pipeline.
 #
 # Requires repository secret DEPLOY_KEY — an SSH private key with

@@ -1,4 +1,4 @@
-// proxy.latha.org — Tangled webhook relay + build artifact host.
+// artifacts.latha.org — Tangled webhook relay + build artifact host.
 //
 // Flow: push to tangled.org/nandi.uk/sleek → Tangled fires a `push` webhook
 // at this Worker → verify HMAC → kick a BuildBuddy remote run (clones the
@@ -10,8 +10,8 @@
 // script PUTs the finished apk back to this Worker → stored in R2 →
 // served back out at a public URL:
 //
-//   https://proxy.latha.org/artifacts/<sha>/sleek.apk
-//   https://proxy.latha.org/artifacts/latest/sleek.apk   (always newest)
+//   https://artifacts.latha.org/artifacts/<sha>/sleek.apk
+//   https://artifacts.latha.org/artifacts/latest/sleek.apk   (always newest)
 //
 // Tag pushes additionally build //:sleek-host (the desktop egui binary) and
 // publish both it and the apk to tangled.org as sh.tangled.repo.artifact
@@ -211,7 +211,7 @@ function timingSafeEqual(a, b) {
 // --- BuildBuddy trigger -----------------------------------------------
 
 function buildScript(env, sha, tagName, tagHash) {
-  const uploadBase = `https://proxy.latha.org/upload/${sha}`;
+  const uploadBase = `https://artifacts.latha.org/upload/${sha}`;
   // Runs on a BuildBuddy remote-bazel executor. NOT Nix anymore (see git
   // history for the abandoned flake.nix/nix-daemon path) — this repo
   // already has a proven buck2 + BuildBuddy Remote Execution setup
@@ -294,7 +294,7 @@ function buildScript(env, sha, tagName, tagHash) {
   // "fatal: ambiguous argument 'refs/tags/v0.1.3': unknown revision or path
   // not in the working tree").
   const publishStep = (filename) =>
-    `curl -fsS -X POST "https://proxy.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
+    `curl -fsS -X POST "https://artifacts.latha.org/publish-release/${encodeURIComponent(tagName)}" ` +
     `-H "Authorization: Bearer ${env.UPLOAD_TOKEN}" -H "content-type: application/json" ` +
     `-d "{\\"sha\\":\\"${sha}\\",\\"tagHash\\":\\"${tagHash}\\",\\"filename\\":\\"${filename}\\"}" ` +
     `|| echo "release publish failed (${filename} is still uploaded at ${uploadBase}/${filename})"`;
@@ -562,7 +562,7 @@ async function handlePublishRelease(request, env, url) {
   const session = await getAtprotoSession(env);
   if (!session) {
     return new Response(
-      "not authorized to publish — visit https://proxy.latha.org/oauth/login once, then retry",
+      "not authorized to publish — visit https://artifacts.latha.org/oauth/login once, then retry",
       { status: 401 },
     );
   }
@@ -633,8 +633,8 @@ async function handleDownload(request, env, url) {
 // straight to the tangled.org repo page. That publish step itself isn't
 // wired up yet — this is just the auth plumbing.
 
-const ATPROTO_CLIENT_ID = "https://proxy.latha.org/client-metadata.json";
-const ATPROTO_REDIRECT_URI = "https://proxy.latha.org/oauth/callback";
+const ATPROTO_CLIENT_ID = "https://artifacts.latha.org/client-metadata.json";
+const ATPROTO_REDIRECT_URI = "https://artifacts.latha.org/oauth/callback";
 const ATPROTO_SCOPE = "atproto transition:generic";
 // nandi's personal DID (handle nandi.uk resolves here; DIDs are the stable
 // identifier, handles can change). Confirmed live: resolveHandle(nandi.uk)
@@ -729,7 +729,7 @@ function handleClientMetadata() {
   return new Response(JSON.stringify({
     client_id: ATPROTO_CLIENT_ID,
     client_name: "sleek build artifact publisher",
-    client_uri: "https://proxy.latha.org/",
+    client_uri: "https://artifacts.latha.org/",
     redirect_uris: [ATPROTO_REDIRECT_URI],
     scope: ATPROTO_SCOPE,
     grant_types: ["authorization_code", "refresh_token"],
