@@ -156,6 +156,73 @@ def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = No
         visibility = ["PUBLIC"],
     )
 
+def cargo_aab_genrule(name, manifest, package, target = "aarch64-linux-android"):
+    """Produces a signed .aab (Android App Bundle) for Google Play Store submission.
+
+    Mirrors cargo_apk_genrule step-for-step to build the release APK, then
+    converts it to AAB format:
+      1. aapt2 convert --output-format proto  — AXML → proto binary XML
+      2. bundletool build-bundle              — assemble the AAB
+      3. jarsigner                            — sign with the CI upload key
+
+    The resulting bundle is suitable for direct upload to Google Play Console.
+    See android/scripts/apk-to-aab.sh for the conversion details.
+
+    Requires bundletool.jar on the remote worker — baked into the RBE image at
+    $BUNDLETOOL_JAR (toolchains/rbe-image/Containerfile). Locally, the script
+    downloads it on first use to $XDG_CACHE_HOME/bundletool/ if not already set.
+    """
+    android_dir = manifest[:-len("Cargo.toml")]
+    log_path = android_dir + "cargo-aab-build.log"
+
+    # Same signing injection as cargo_apk_genrule — see that function's comment.
+    inject_signing = 'python3 {}scripts/inject-release-signing.py {} "$PWD/{}ci.keystore"\n'.format(android_dir, manifest, android_dir)
+
+    # NOT --manifest-path: same cargo-apk quirk as cargo_apk_genrule — see comment there.
+    build_cmd = "cargo apk build --release --target {} -p {} --lib".format(target, package)
+
+    # Same APK discovery logic as cargo_apk_genrule.
+    find_apk = (
+        'apk=""\n' +
+        'for cand in "{ad}target/release/apk/{pkg}.apk" "{ad}target/{pkg}.apk" "{ad}target/release/apk/{pkg}-release.apk"; do\n'.format(ad = android_dir, pkg = package) +
+        '  if [ -f "$cand" ]; then apk="$cand"; break; fi\n' +
+        "done\n" +
+        'if [ -z "$apk" ]; then\n' +
+        '  apk="`find {}target -type f -path "*/release/apk/*.apk" ! -name "*-unaligned.apk" 2>/dev/null | head -1 || true`"\n'.format(android_dir) +
+        "fi\n" +
+        '[ -n "$apk" ] && [ -f "$apk" ] || { echo "APK not found under ' + android_dir + 'target" >&2; exit 1; }\n'
+    )
+
+    # Convert APK → AAB using android/scripts/apk-to-aab.sh.
+    # The script handles aapt2 convert, bundletool, and jarsigner internally.
+    convert_aab = (
+        'export SLEEK_KEYSTORE="$PWD/{ad}ci.keystore"\n'.format(ad = android_dir) +
+        "export SLEEK_KEYSTORE_PASSWORD=android\n" +
+        "export SLEEK_KEY_ALIAS=androiddebugkey\n" +
+        "export SLEEK_KEY_PASSWORD=android\n" +
+        'bash {ad}scripts/apk-to-aab.sh "$apk" {ad}src/assets/sleek_activity.dex "$OUT"\n'.format(ad = android_dir)
+    )
+
+    native.genrule(
+        name = name,
+        srcs = _srcs(),
+        out = "sleek.aab",
+        cmd = 'set -euo pipefail\n{stage}{sign}(cd {ad} && {enter} {build}) 2>&1 | tee "{log}" | tail -c 200000\n{find_apk}{convert_aab}'.format(
+            stage = _STAGE_PATCHED_FORKS,
+            sign = inject_signing,
+            ad = android_dir,
+            enter = _ENTER,
+            build = build_cmd,
+            log = log_path,
+            find_apk = find_apk,
+            convert_aab = convert_aab,
+        ),
+        # Same rationale as cargo_apk_genrule — see its own comment.
+        repo_relative_root = True,
+        always_print_stderr = True,
+        visibility = ["PUBLIC"],
+    )
+
 def cargo_apk_genrule(name, manifest, package, target = "aarch64-linux-android"):
     """A genrule that runs `cargo apk build --release` and produces a signed sleek.apk.
 

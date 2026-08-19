@@ -70,9 +70,11 @@ Rebuild whenever `pixi.toml`/`pixi.lock` changes (the image pre-warms the
 pixi env at build time so RE actions don't have to resolve/fetch
 conda-forge packages themselves), to bump the Android NDK version
 (currently r29, pinned in the `curl` line — keep in sync with
-`flake.nix`'s devShell), or the pinned `linux-libc-dev` version (currently
+`flake.nix`'s devShell), the pinned `linux-libc-dev` version (currently
 noble 6.8.0-139.139 — bump if v4l2r ever needs newer V4L2 kernel structs
-than that ships).
+than that ships), or the bundletool version (currently 1.17.2 — bump when
+google/bundletool cuts a new release; check
+https://github.com/google/bundletool/releases).
 
 ## Registry visibility
 

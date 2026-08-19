@@ -94,6 +94,18 @@ ENV PATH="/opt/android/sdk/build-tools/34.0.0:${PATH}"
 
 ENV PATH="/opt/cargo-apk/bin:${PATH}"
 
+# bundletool — converts cargo-apk APKs to Android App Bundles (.aab) for
+# Play Store submission. Not part of the Android SDK (sdkmanager doesn't
+# ship it); downloaded separately from GitHub releases and baked in at a
+# pinned version so RE actions need no outbound network for this. The jar
+# runs on openjdk-17 (installed above). Update the pinned version here when
+# google/bundletool cuts a new release, then rebuild + repush the image and
+# update the digest in platforms/defs.bzl.
+RUN curl -fsSL \
+    "https://github.com/google/bundletool/releases/download/1.17.2/bundletool-all-1.17.2.jar" \
+    -o /opt/bundletool.jar
+ENV BUNDLETOOL_JAR=/opt/bundletool.jar
+
 # Pre-warm the pixi env at image-build time (network access, but only
 # once here — not on every RE action) so `pixi run --` on an RE worker
 # doesn't need to solve/fetch conda-forge packages itself. Copies just

@@ -1,4 +1,4 @@
-load(":cargo.bzl", "cargo_apk_genrule", "cargo_genrule")
+load(":cargo.bzl", "cargo_aab_genrule", "cargo_apk_genrule", "cargo_genrule")
 load(":flatpak.bzl", "flatpak_genrule")
 
 # `buck2 build //:sleek-host` / `buck2 run //:sleek-host`
@@ -42,6 +42,20 @@ cp android/target/release/libsleek.rlib "$OUT/libsleek.rlib"
 #   adb install -r buck-out/.../sleek.apk
 cargo_apk_genrule(
     name = "sleek-android-apk",
+    manifest = "android/Cargo.toml",
+    package = "sleek",
+)
+
+# `buck2 build //:sleek-android-aab`
+# Signed Android App Bundle for Google Play Store submission — same cargo-apk
+# pipeline as //:sleek-android-apk, then converted to AAB format via aapt2
+# (proto resources) + bundletool, and signed with the CI keystore. Requires
+# bundletool.jar on the worker (baked into the RBE image; see
+# toolchains/rbe-image/Containerfile — rebuilt after each Containerfile change).
+#   buck2 build --show-output //:sleek-android-aab
+#   # Upload buck-out/.../sleek.aab to Google Play Console
+cargo_aab_genrule(
+    name = "sleek-android-aab",
     manifest = "android/Cargo.toml",
     package = "sleek",
 )
