@@ -551,10 +551,10 @@ pub fn parse_reactions_tag(raw: &str) -> HashMap<String, HashSet<String>> {
     out
 }
 
-/// Quick-react set — same six as freeq-android `MessageList` (no dance/music extras).
+/// Quick-react set — the seven most common reactions (no dance/music extras).
 /// Wire form keeps emoji-presentation VS16 where freeq does (`❤️`); strip for display
 /// via [`display_emoji`] so egui's NotoEmoji fallback doesn't draw a tofu box for `U+FE0F`.
-pub const QUICK_REACT_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "👎"];
+pub const QUICK_REACT_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🥹", "👎"];
 
 /// Default heart reaction glyph (freeq-android parity: heavy black heart + VS16).
 /// Kept as the canonical form for tests / future shortcuts (body double-click
@@ -2657,8 +2657,8 @@ mod tests {
         assert_eq!(display_emoji("👍"), "👍");
         assert_eq!(display_emoji("☺\u{FE0F}"), "☺");
         assert_eq!(display_emoji(DEFAULT_REACT_EMOJI), "❤");
-        // Quick set stays freeq-android's six (no dance/music).
-        assert_eq!(QUICK_REACT_EMOJIS.len(), 6);
+        // Quick set: seven common reactions (no dance/music).
+        assert_eq!(QUICK_REACT_EMOJIS.len(), 7);
         assert_eq!(QUICK_REACT_EMOJIS[1], "❤️");
     }
 

@@ -67,6 +67,7 @@ pub enum Icon {
     Laugh,
     Surprised,
     Frown,
+    HoldingBackTears,
     /// Drawn stroke — not a Twemoji glyph.
     Plus,
     /// Drawn stroke — overlapping pages (copy / duplicate).
@@ -80,6 +81,7 @@ impl Icon {
         Icon::Laugh,
         Icon::Surprised,
         Icon::Frown,
+        Icon::HoldingBackTears,
         Icon::ThumbsDown,
     ];
 
@@ -89,6 +91,7 @@ impl Icon {
         Icon::Laugh,
         Icon::Surprised,
         Icon::Frown,
+        Icon::HoldingBackTears,
         Icon::ThumbsDown,
         Icon::Plus,
         Icon::Copy,
@@ -107,6 +110,7 @@ impl Icon {
             Icon::Laugh => "😂",
             Icon::Surprised => "😮",
             Icon::Frown => "😢",
+            Icon::HoldingBackTears => "🥹",
             Icon::Plus => "+",
             Icon::Copy => "⧉",
         }
@@ -140,6 +144,7 @@ pub fn icon_for_emoji(emoji: &str) -> Option<Icon> {
         "😂" | "😄" | "😆" | "🤣" => Some(Icon::Laugh),
         "😮" | "😯" | "😲" => Some(Icon::Surprised),
         "😢" | "😞" | "🙁" | "☹" | "😭" => Some(Icon::Frown),
+        "🥹" => Some(Icon::HoldingBackTears),
         _ => None,
     }
 }
@@ -478,8 +483,8 @@ mod tests {
     #[test]
     fn resolves_common_and_rare() {
         for e in [
-            "👍", "❤️", "❤", "😂", "😮", "😢", "👎", "🚀", "🎉", "🔥", "✨", "👀", "💯", "🙏",
-            "😎", "🤯", "🏳️", "🏴",
+            "👍", "❤️", "❤", "😂", "😮", "😢", "🥹", "👎", "🚀", "🎉", "🔥", "✨", "👀", "💯",
+            "🙏", "😎", "🤯", "🏳️", "🏴",
         ] {
             assert!(
                 has_emoji_icon(e),
@@ -510,6 +515,7 @@ mod tests {
     fn icon_shortcuts() {
         assert_eq!(icon_for_emoji("👍"), Some(Icon::ThumbsUp));
         assert_eq!(icon_for_emoji("❤️"), Some(Icon::Heart));
+        assert_eq!(icon_for_emoji("🥹"), Some(Icon::HoldingBackTears));
     }
 
     #[test]
