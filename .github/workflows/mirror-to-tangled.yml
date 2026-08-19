@@ -12,11 +12,18 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  # Also fire when Automerge completes — auto-merge uses GITHUB_TOKEN,
-  # which GitHub intentionally excludes from triggering other workflows
-  # (push events from GITHUB_TOKEN don't fire further push-triggered
-  # runs). workflow_run fires via GitHub Actions infrastructure, not
-  # via the push, so it bypasses that restriction.
+  # pull_request:closed fires when GitHub's auto-merge lands the PR — this
+  # event comes from GitHub's PR system, not the GITHUB_TOKEN push, so it
+  # isn't suppressed by GitHub's "GITHUB_TOKEN won't trigger further
+  # workflows" restriction. This is the reliable trigger for auto-merged PRs.
+  pull_request:
+    types: [closed]
+    branches: [main]
+  # workflow_run on Automerge is kept as a belt-and-suspenders fallback, but
+  # note it fires when auto-merge is *enabled* (on PR open/sync), not when
+  # the PR is actually merged — so it races the pull_request:closed event.
+  # The concurrency cancel-in-progress means whichever fires last wins, and
+  # pull_request:closed always fires after the real merge lands.
   workflow_run:
     workflows: ["Automerge"]
     types: [completed]
@@ -32,6 +39,7 @@ jobs:
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
       github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
