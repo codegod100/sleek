@@ -53,8 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${DEPLOY_KEY:-}" ]]; then
-            echo "DEPLOY_KEY secret not set — skipping mirror" >&2
-            exit 0
+            echo "DEPLOY_KEY secret not set — add it under Settings → Secrets and variables → Actions" >&2
+            exit 1
           fi
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
