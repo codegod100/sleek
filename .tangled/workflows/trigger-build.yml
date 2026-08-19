@@ -18,14 +18,15 @@ engine: microvm
 image: nixos
 
 dependencies:
-  - git
-  - curl
-  - openssl
-  - coreutils
+  nixpkgs:
+    - git
+    - curl
+    - openssl
+    - coreutils
 
 steps:
   - name: Fire artifacts webhook
-    run: |
+    command: |
       set -euo pipefail
 
       sha=$(git rev-parse HEAD)
