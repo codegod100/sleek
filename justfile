@@ -146,6 +146,19 @@ flatpak:
     ./scripts/nix-build-push.sh .#flatpak -L --out-link result-flatpak
 
 
+# AAB for Play Store (aarch64) — buck2 build via RBE/BuildBuddy.
+# Requires bundletool in the RBE image (toolchains/rbe-image/Containerfile).
+# Output: buck-out/.../sleek.aab (upload to Google Play Console)
+#   buck2 build --show-output //:sleek-android-aab
+aab:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : > android/cargo-aab-build.log
+    tail -n +1 -f android/cargo-aab-build.log &
+    tail_pid=$!
+    trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+    buck2 build -v={{buck_verbosity}} //:sleek-android-aab
+
 # adb install result of .#android onto a connected phone
 install-android *args:
     nix run .#install-android -- {{args}}
