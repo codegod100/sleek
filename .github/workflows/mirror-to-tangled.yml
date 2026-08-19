@@ -60,7 +60,7 @@ jobs:
           chmod 700 "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/tangled_deploy"
           chmod 600 "$HOME/.ssh/tangled_deploy"
-          ssh-keyscan -t rsa,ed25519,ecdsa knot1.tangled.sh >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+          ssh-keyscan -t rsa,ed25519,ecdsa tangled.org >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
           GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tangled_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-            git push git@knot1.tangled.sh:did:plc:eimwo4adqwppiiweleayixez/sleek main
+            git push git@tangled.org:did:plc:eimwo4adqwppiiweleayixez main
           rm -f "$HOME/.ssh/tangled_deploy"
