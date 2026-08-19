@@ -11,6 +11,15 @@ name: Mirror to Tangled
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+  # Also fire when Automerge completes — auto-merge uses GITHUB_TOKEN,
+  # which GitHub intentionally excludes from triggering other workflows
+  # (push events from GITHUB_TOKEN don't fire further push-triggered
+  # runs). workflow_run fires via GitHub Actions infrastructure, not
+  # via the push, so it bypasses that restriction.
+  workflow_run:
+    workflows: ["Automerge"]
+    types: [completed]
 
 concurrency:
   group: ${{ github.workflow }}
@@ -20,9 +29,14 @@ jobs:
   mirror:
     name: Push main → tangled.org
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Push to Tangled
