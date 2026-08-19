@@ -2691,6 +2691,8 @@ impl SleekApp {
             if let Some(buf) = self.state.channels.get_mut(&buffer_key) {
                 buf.add_reaction(&msgid, &emoji, &nick);
             }
+            self.state.push_recent_emoji(&emoji);
+            self.state.persist_prefs();
             self.net.send(NetCmd::React {
                 target,
                 emoji,
