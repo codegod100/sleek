@@ -1,0 +1,52 @@
+# Manual trigger for the artifacts.latha.org → BuildBuddy APK build.
+#
+# Spindle can't drive the build itself (disk too small for a cache miss),
+# but it CAN fire the webhook so the worker queues a BuildBuddy run without
+# requiring a real code push.
+#
+# Usage: tangled.org/nandi.uk/sleek → Actions → trigger-build → Run
+#
+# Secrets (Settings → Secrets on tangled.org):
+#   TANGLED_WEBHOOK_SECRET — same value as the artifacts.latha.org worker
+#                            binding (set when you ran ./deploy.sh).
+
+when:
+  - event: ["manual"]
+    branch: ["main"]
+
+engine: microvm
+image: nixos
+
+dependencies:
+  - git
+  - curl
+  - openssl
+  - coreutils
+
+steps:
+  - name: Fire artifacts webhook
+    run: |
+      set -euo pipefail
+
+      sha=$(git rev-parse HEAD)
+      echo "Triggering build for sleek@${sha}"
+
+      body="{\"ref\":\"refs/heads/main\",\"after\":\"${sha}\"}"
+
+      sig="sha256=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$TANGLED_WEBHOOK_SECRET" | awk '{print $2}')"
+
+      response=$(curl -fsS -w "\n%{http_code}" -X POST https://artifacts.latha.org/webhook/sleek \
+        -H "X-Tangled-Event: push" \
+        -H "X-Tangled-Signature-256: ${sig}" \
+        -H "content-type: application/json" \
+        -d "$body")
+
+      http_code=$(echo "$response" | tail -1)
+      body_out=$(echo "$response" | head -1)
+
+      echo "Response ${http_code}: ${body_out}"
+      [ "$http_code" = "200" ] || { echo "Webhook returned ${http_code}"; exit 1; }
+
+      echo ""
+      echo "Build queued. Check status at:"
+      echo "  https://artifacts.latha.org/artifacts/sleek/${sha}/invocation.json"
