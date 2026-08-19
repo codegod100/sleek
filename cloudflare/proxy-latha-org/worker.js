@@ -2,16 +2,18 @@
 //
 // Flow: push to tangled.org/nandi.uk/sleek → Tangled fires a `push` webhook
 // at this Worker → verify HMAC → kick a BuildBuddy remote run (clones the
-// repo, runs `buck2 build //:sleek-android-apk` — the actual compile
-// happens on BuildBuddy's own RE cluster via the repo's existing
-// platforms/defs.bzl setup, with real BuildBuddy action-cache reuse, not
-// Nix — see git history for the abandoned flake.nix/nix-daemon path and
-// the disk-exhaustion problems that motivated dropping it) → the remote
-// script PUTs the finished apk back to this Worker → stored in R2 →
-// served back out at a public URL:
+// repo, runs `buck2 build //:sleek-android-apk //:sleek-android-aab` — the
+// actual compile happens on BuildBuddy's own RE cluster via the repo's
+// existing platforms/defs.bzl setup, with real BuildBuddy action-cache
+// reuse, not Nix — see git history for the abandoned flake.nix/nix-daemon
+// path and the disk-exhaustion problems that motivated dropping it) → the
+// remote script PUTs the finished files back to this Worker → stored in R2
+// → served back out at public URLs:
 //
 //   https://proxy.latha.org/artifacts/<sha>/sleek.apk
-//   https://proxy.latha.org/artifacts/latest/sleek.apk   (always newest)
+//   https://proxy.latha.org/artifacts/<sha>/sleek.aab      ← Play Store bundle
+//   https://proxy.latha.org/artifacts/latest/sleek.apk
+//   https://proxy.latha.org/artifacts/latest/sleek.aab     (always newest)
 //
 // Tag pushes additionally build //:sleek-host (the desktop egui binary) and
 // publish both it and the apk to tangled.org as sh.tangled.repo.artifact
@@ -267,14 +269,21 @@ function buildScript(env, sha, tagName, tagHash) {
     "buck2 killall || true",
     "buck2 --version",
     "echo '--- disk before build ---'; df -h / || true",
-    // Build APK and flatpak together — //:sleek-flatpak depends on
+    // Build APK, AAB, and flatpak together — //:sleek-flatpak depends on
     // //:sleek-host so host is also compiled here as a dependency (useful
     // for tag builds: the subsequent //:sleek-host step will be a cache hit).
-    "buck2 build --show-output //:sleek-android-apk //:sleek-flatpak 2>&1 | tee /tmp/buck2-build.log",
+    // //:sleek-android-aab mirrors //:sleek-android-apk step-for-step (same
+    // cargo-apk build, same signing) then converts to AAB via aapt2 + bundletool;
+    // bundletool.jar is baked into the sleek-rbe image (see
+    // toolchains/rbe-image/Containerfile) so the RE worker needs no network for it.
+    "buck2 build --show-output //:sleek-android-apk //:sleek-android-aab //:sleek-flatpak 2>&1 | tee /tmp/buck2-build.log",
     "echo '--- disk after build ---'; df -h / || true",
     "apk_path=$(grep '^root//:sleek-android-apk ' /tmp/buck2-build.log | awk '{print $2}')",
     '[ -n "$apk_path" ] && [ -f "$apk_path" ] || { echo "buck2 build did not produce //:sleek-android-apk output"; exit 1; }',
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$apk_path"`,
+    "aab_path=$(grep '^root//:sleek-android-aab ' /tmp/buck2-build.log | awk '{print $2}')",
+    '[ -n "$aab_path" ] && [ -f "$aab_path" ] || { echo "buck2 build did not produce //:sleek-android-aab output"; exit 1; }',
+    `curl -fsS -X PUT "${uploadBase}/sleek.aab" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$aab_path"`,
     "flatpak_path=$(grep '^root//:sleek-flatpak ' /tmp/buck2-build.log | awk '{print $2}')",
     '[ -n "$flatpak_path" ] && [ -f "$flatpak_path" ] || { echo "buck2 build did not produce //:sleek-flatpak output"; exit 1; }',
     `curl -fsS -X PUT "${uploadBase}/uk.nandi.sleek.flatpak" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$flatpak_path"`,
@@ -497,11 +506,12 @@ function atprotoBytes(rawBytes) {
 // stored OAuth session. Throws on any failure — caller decides what to do
 // with that (the apk itself is already safely in R2 by the time this runs).
 function contentTypeForArtifact(filename) {
-  // Only the two filenames buildScript() ever actually produces need real
+  // Only the filenames buildScript() ever actually produces need real
   // entries — application/octet-stream (a generic "just bytes,
   // browser/client should offer Save As" type) is a fine fallback for
   // anything else published this way in the future.
   if (filename.endsWith(".apk")) return "application/vnd.android.package-archive";
+  if (filename.endsWith(".aab")) return "application/octet-stream"; // no official IANA type for AAB
   return "application/octet-stream";
 }
 

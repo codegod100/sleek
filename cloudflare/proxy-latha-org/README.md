@@ -15,8 +15,10 @@ push to tangled.org/nandi.uk/sleek (main)
     finished files back to https://proxy.latha.org/upload/<sha>/<file>
   → Worker stores them in R2, serves them at:
       https://proxy.latha.org/artifacts/<sha>/sleek.apk
+      https://proxy.latha.org/artifacts/<sha>/sleek.aab           (Play Store bundle)
       https://proxy.latha.org/artifacts/<sha>/uk.nandi.sleek.flatpak
       https://proxy.latha.org/artifacts/latest/sleek.apk         (always newest)
+      https://proxy.latha.org/artifacts/latest/sleek.aab
       https://proxy.latha.org/artifacts/latest/uk.nandi.sleek.flatpak
 ```
 
