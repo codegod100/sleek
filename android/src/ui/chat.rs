@@ -195,9 +195,9 @@ pub fn chat_screen(
     // Header — allocate right-side actions first so long channel names
     // (e.g. stream.place:…) truncate with an ellipsis instead of clipping
     // under Leave/Users or past the panel edge.
-    // Master-detail (wide shell): list stays visible — skip ←; Esc still deselects.
+    // Master-detail (wide shell): list stays visible — skip ← unless user list is open.
     ui.horizontal(|ui| {
-        if !master_detail {
+        if !master_detail || show_members {
             if button(ui, th, "←").clicked() {
                 // Same dismiss stack as Esc / Android back gesture.
                 if state.chat_back_step() {
