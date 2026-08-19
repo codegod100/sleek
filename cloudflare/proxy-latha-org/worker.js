@@ -267,11 +267,17 @@ function buildScript(env, sha, tagName, tagHash) {
     "buck2 killall || true",
     "buck2 --version",
     "echo '--- disk before build ---'; df -h / || true",
-    "buck2 build --show-output //:sleek-android-apk 2>&1 | tee /tmp/buck2-build.log",
+    // Build APK and flatpak together — //:sleek-flatpak depends on
+    // //:sleek-host so host is also compiled here as a dependency (useful
+    // for tag builds: the subsequent //:sleek-host step will be a cache hit).
+    "buck2 build --show-output //:sleek-android-apk //:sleek-flatpak 2>&1 | tee /tmp/buck2-build.log",
     "echo '--- disk after build ---'; df -h / || true",
     "apk_path=$(grep '^root//:sleek-android-apk ' /tmp/buck2-build.log | awk '{print $2}')",
     '[ -n "$apk_path" ] && [ -f "$apk_path" ] || { echo "buck2 build did not produce //:sleek-android-apk output"; exit 1; }',
     `curl -fsS -X PUT "${uploadBase}/sleek.apk" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$apk_path"`,
+    "flatpak_path=$(grep '^root//:sleek-flatpak ' /tmp/buck2-build.log | awk '{print $2}')",
+    '[ -n "$flatpak_path" ] && [ -f "$flatpak_path" ] || { echo "buck2 build did not produce //:sleek-flatpak output"; exit 1; }',
+    `curl -fsS -X PUT "${uploadBase}/uk.nandi.sleek.flatpak" -H "Authorization: Bearer ${env.UPLOAD_TOKEN}" --data-binary @"$flatpak_path"`,
   ];
   // Ask the Worker to publish `filename` (already uploaded to
   // `${uploadBase}/${filename}` by this point) as a sh.tangled.repo.artifact
@@ -294,11 +300,14 @@ function buildScript(env, sha, tagName, tagHash) {
     `|| echo "release publish failed (${filename} is still uploaded at ${uploadBase}/${filename})"`;
   if (tagName) {
     steps.push(publishStep("sleek.apk"));
+    steps.push(publishStep("uk.nandi.sleek.flatpak"));
     // The desktop host binary — same repo checkout, same buck2/BuildBuddy
     // setup already exported above, just a second target. Named
     // sleek-x86_64-linux (not bare "sleek") so it's self-describing once
     // it's sitting in a directory listing / download link on its own,
     // divorced from the repo/formula context that names it "sleek".
+    // //:sleek-host was already compiled as a //:sleek-flatpak dependency
+    // above, so this buck2 build call is a cache hit (~0 work).
     steps.push(
       "buck2 build --show-output //:sleek-host 2>&1 | tee /tmp/buck2-build-host.log",
       "host_path=$(grep '^root//:sleek-host ' /tmp/buck2-build-host.log | awk '{print $2}')",

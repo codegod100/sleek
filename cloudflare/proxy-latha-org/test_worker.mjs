@@ -140,7 +140,7 @@ async function testValidPushWebhook() {
   assert.equal(bbBody.branch, "main");
   assert.equal(bbBody.commit_sha, "abc123", "commit_sha is always sent, even for main pushes");
   assert.equal(bbBody.platform_properties, undefined, "no disk override needed — compute runs on BuildBuddy's RE cluster, not this trigger executor");
-  assert.match(bbBody.steps[0].run, /buck2 build --show-output \/\/:sleek-android-apk/);
+  assert.match(bbBody.steps[0].run, /buck2 build --show-output \/\/:sleek-android-apk \/\/:sleek-flatpak/);
   assert.equal(calls.fetch[0].opts.headers["x-buildbuddy-api-key"], "test-bb-key");
 
   const recorded = await env.ARTIFACTS.get("abc123/invocation.json");
@@ -401,13 +401,12 @@ async function testTagPushBuildScriptIncludesHostBinary() {
   const script = bbBody.steps[0].run;
   assert.match(script, /buck2 build --show-output \/\/:sleek-host/, "must also build the desktop host binary");
   assert.match(script, new RegExp(`upload/${MOCK_TAG_COMMIT_SHA}/sleek-x86_64-linux`), "must upload it under its own filename, not overwrite sleek.apk");
-  // Two release-publish calls: one per artifact, each naming which file it's
-  // publishing — filename defaults to sleek.apk server-side, so the apk
-  // call must still say so explicitly for the second one to be
-  // distinguishable at all.
+  // Three release-publish calls: apk, flatpak, and host binary — each naming
+  // which file it's publishing so the server can key them separately.
   const publishCalls = script.match(/\/publish-release\/v4\.5\.6/g) || [];
-  assert.equal(publishCalls.length, 2, "must publish both the apk and the host binary as separate release records");
+  assert.equal(publishCalls.length, 3, "must publish apk, flatpak, and host binary as separate release records");
   assert.match(script, /\\"filename\\":\\"sleek\.apk\\"/, "apk publish call must name itself explicitly");
+  assert.match(script, /\\"filename\\":\\"uk\.nandi\.sleek\.flatpak\\"/, "flatpak publish call must name itself");
   assert.match(script, /\\"filename\\":\\"sleek-x86_64-linux\\"/, "host-binary publish call must name itself");
   console.log("PASS: tag push build script also builds + publishes the desktop host binary as a distinct artifact");
 }
