@@ -12,7 +12,7 @@ use crate::preview::{self, Embed, MessageLinkSpan};
 use crate::state::{
     display_emoji, emoji_matches_search, AppState, Buffer, ChatMessage, EmojiPickerGroup,
     ImageState, LinkMeta, LinkState, MediaCache, DEFAULT_REACT_EMOJI, EMOJI_SEARCH_LIMIT,
-    QUICK_REACT_EMOJIS,
+    MAX_RECENT_EMOJI, QUICK_REACT_EMOJIS,
 };
 
 /// Interaction from a chat message bubble.
@@ -1846,6 +1846,27 @@ pub fn react_picker_overlay(
             ui.add_space(sp.xs);
 
             let searching = !state.react_picker_search.trim().is_empty();
+
+            // Recently used emoji row (shown when not searching and history is non-empty).
+            if !searching && !state.recent_emoji.is_empty() {
+                dim_label(ui, th, "Recently used");
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for emoji in state
+                        .recent_emoji
+                        .iter()
+                        .take(MAX_RECENT_EMOJI)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        if emoji_pick_button(ui, th, &emoji, &msg, &own_nick, pick_size) {
+                            picked = Some(emoji);
+                        }
+                    }
+                });
+                ui.add_space(sp.xs);
+            }
 
             // Category tabs (hidden while searching — results span all groups).
             if !searching {

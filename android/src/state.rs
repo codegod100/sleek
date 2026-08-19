@@ -1331,6 +1331,8 @@ pub struct AppState {
     pub recent_nicks: Vec<String>,
     /// Previously used Bluesky handles (MRU). Persisted; shown on Bluesky login.
     pub recent_handles: Vec<String>,
+    /// Recently used reaction emoji (MRU first). Persisted; shown in reaction picker.
+    pub recent_emoji: Vec<String>,
     /// Show JOIN / PART / QUIT system lines in channel buffers. Persisted.
     pub show_join_part: bool,
 
@@ -1467,6 +1469,7 @@ impl AppState {
             recent_channels: normalize_recent_channels(prefs.recent_channels),
             recent_nicks: normalize_recent_nicks(prefs.recent_nicks),
             recent_handles: normalize_recent_handles(prefs.recent_handles),
+            recent_emoji: prefs.recent_emoji,
             show_join_part: prefs.show_join_part,
             intentional_disconnect: false,
             reconnect_attempts: 0,
@@ -1705,6 +1708,7 @@ impl AppState {
         prefs.recent_channels = self.recent_channels.clone();
         prefs.recent_nicks = self.recent_nicks.clone();
         prefs.recent_handles = self.recent_handles.clone();
+        prefs.recent_emoji = self.recent_emoji.clone();
         prefs.show_join_part = self.show_join_part;
         if let Some(h) = self.recent_handles.first() {
             prefs.last_bsky_handle = Some(h.clone());
@@ -2328,6 +2332,11 @@ impl AppState {
         self.react_picker_search.clear();
     }
 
+    /// Record `emoji` as recently used (MRU front, deduplicated, capped).
+    pub fn push_recent_emoji(&mut self, emoji: &str) {
+        push_mru(&mut self.recent_emoji, emoji, MAX_RECENT_EMOJI);
+    }
+
     /// Open the channel policy join-gate modal and request a fresh check.
     pub fn open_policy_gate(&mut self, channel: &str) -> u64 {
         let ch = Self::normalize_channel(channel);
@@ -2589,6 +2598,7 @@ fn normalize_recent_channels(raw: Vec<String>) -> Vec<String> {
 
 const MAX_RECENT_NICKS: usize = 8;
 const MAX_RECENT_HANDLES: usize = 8;
+pub const MAX_RECENT_EMOJI: usize = 16;
 
 /// Insert `value` at the front of an MRU list (case-insensitive dedupe + cap).
 fn push_mru(list: &mut Vec<String>, value: &str, max: usize) {

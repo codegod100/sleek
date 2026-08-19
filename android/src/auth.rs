@@ -93,6 +93,10 @@ pub struct SavedPrefs {
     /// Member lists still update. Defaults to true (show).
     #[serde(default = "default_true")]
     pub show_join_part: bool,
+    /// Recently used reaction emoji (MRU first). Persisted; shown at the top of
+    /// the reaction picker so frequently-used emoji are immediately accessible.
+    #[serde(default)]
+    pub recent_emoji: Vec<String>,
 }
 
 impl Default for SavedPrefs {
@@ -109,6 +113,7 @@ impl Default for SavedPrefs {
             recent_handles: Vec::new(),
             recent_nicks: Vec::new(),
             show_join_part: true,
+            recent_emoji: Vec::new(),
         }
     }
 }
