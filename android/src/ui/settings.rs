@@ -13,6 +13,7 @@ pub enum SettingsAction {
     None,
     Disconnect,
     Logout,
+    SendRaw(String),
 }
 
 pub fn settings_tab(
@@ -120,6 +121,51 @@ pub fn settings_tab(
     });
 
     ui.add_space(sp.md);
+
+    // Server Console (only shown while connected)
+    if state.connection.is_live() {
+        card(ui, th, |ui| {
+            section_label(ui, th, "SERVER CONSOLE");
+            ui.add_space(sp.md);
+            dim_label(
+                ui,
+                th,
+                "Send a raw IRC command to the server (e.g. PING, WHO, MODE).",
+            );
+            ui.add_space(sp.sm);
+            ui.horizontal(|ui| {
+                let available = ui.available_width();
+                let btn_w = 60.0;
+                let gap = sp.sm;
+                let field_w = (available - btn_w - gap).max(0.0);
+                let te = egui::TextEdit::singleline(&mut state.console_input)
+                    .desired_width(field_w)
+                    .hint_text("e.g. WHO #general")
+                    .id(egui::Id::new("settings_console_input"));
+                let resp = ui.add_sized(egui::Vec2::new(field_w, 32.0), te);
+                let enter_pressed = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(gap);
+                let send_clicked = ui
+                    .add_sized(
+                        egui::Vec2::new(btn_w, 32.0),
+                        egui::Button::new(
+                            RichText::new("Send")
+                                .size(th.type_scale.body)
+                                .color(th.palette.accent_fg),
+                        )
+                        .fill(th.palette.accent),
+                    )
+                    .clicked();
+                if (send_clicked || enter_pressed) && !state.console_input.trim().is_empty() {
+                    let cmd = state.console_input.trim().to_string();
+                    state.console_input.clear();
+                    action = SettingsAction::SendRaw(cmd);
+                }
+            });
+        });
+        ui.add_space(sp.md);
+    }
 
     // About
     card(ui, th, |ui| {

@@ -1243,6 +1243,8 @@ pub struct AppState {
     pub search: String,
     pub join_input: String,
     pub discover_input: String,
+    /// Raw IRC command typed in the settings server console.
+    pub console_input: String,
     /// Channel member list open (chat detail only).
     pub show_members: bool,
     /// Global message search overlay open (chat detail only).
@@ -1419,6 +1421,7 @@ impl AppState {
             search: String::new(),
             join_input: String::new(),
             discover_input: String::new(),
+            console_input: String::new(),
             show_members: false,
             show_message_search: false,
             message_search: String::new(),

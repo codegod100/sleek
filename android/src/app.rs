@@ -3147,6 +3147,9 @@ impl eframe::App for SleekApp {
                                         self.net.send(NetCmd::Quit);
                                         self.state.logout();
                                     }
+                                    SettingsAction::SendRaw(line) => {
+                                        self.net.send(NetCmd::Raw(line));
+                                    }
                                 }
                             }
                         }
