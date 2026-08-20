@@ -102,7 +102,7 @@ def _platforms(ctx):
                 # digest `skopeo inspect` (no --raw) prints directly is
                 # already the one to use. Update after every rebuild (see
                 # toolchains/rbe-image/README.md).
-                "container-image": "docker://ghcr.io/codegod100/sleek-rbe@sha256:10d86a190a02a9f0ca14e9657e1d2ed12f693605f1a962c48ef786488437181c",
+                "container-image": "docker://ghcr.io/codegod100/sleek-rbe@sha256:6f292b5823c286fddfbfad7f1336c11028a9b91406b6a7c09f86ec84d784bca9",
                 # cargo_genrule's build.rs steps hit the network (crates.io,
                 # git deps) — off by default on BuildBuddy's containers.
                 "dockerNetwork": "bridge",
