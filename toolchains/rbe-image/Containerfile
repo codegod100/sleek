@@ -73,9 +73,9 @@ ENV CC_aarch64_linux_android=aarch64-linux-android28-clang
 ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android28-clang
 ENV AR_aarch64_linux_android=llvm-ar
 
-# Android SDK cmdline-tools + platform 34 + build-tools 34.0.0 — same
-# versions flake.nix's androidComposition pins (platformVersions = ["34"],
-# buildToolsVersions = ["34.0.0"]) — for `cargo apk build`'s packaging
+# Android SDK cmdline-tools + platform 35 + build-tools 35.0.0 — same
+# versions flake.nix's androidComposition pins (platformVersions = ["35"],
+# buildToolsVersions = ["35.0.0"]) — for `cargo apk build`'s packaging
 # step (aapt2, apksigner, zipalign), which the NDK alone doesn't provide;
 # `sdkmanager --licenses` piped through `yes` accepts every license
 # non-interactively (no need to track specific license-hash files).
@@ -86,11 +86,11 @@ RUN curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-
     && rm /tmp/cmdline-tools.zip \
     && yes | /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk --licenses > /dev/null \
     && /opt/android/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/opt/android/sdk \
-       "platforms;android-34" "build-tools;34.0.0"
+       "platforms;android-35" "build-tools;35.0.0"
 
 ENV ANDROID_HOME=/opt/android/sdk
 ENV ANDROID_SDK_ROOT=/opt/android/sdk
-ENV PATH="/opt/android/sdk/build-tools/34.0.0:${PATH}"
+ENV PATH="/opt/android/sdk/build-tools/35.0.0:${PATH}"
 
 ENV PATH="/opt/cargo-apk/bin:${PATH}"
 

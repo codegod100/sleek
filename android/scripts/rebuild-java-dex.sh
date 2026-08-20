@@ -11,7 +11,7 @@ if [[ -z "$SDK" ]]; then
   echo "Set ANDROID_HOME or ANDROID_SDK_ROOT" >&2
   exit 1
 fi
-ANDROID_JAR="$SDK/platforms/android-34/android.jar"
+ANDROID_JAR="$SDK/platforms/android-35/android.jar"
 if [[ ! -f "$ANDROID_JAR" ]]; then
   ANDROID_JAR="$(echo "$SDK"/platforms/android-*/android.jar | awk '{print $1}')"
 fi

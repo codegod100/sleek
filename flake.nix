@@ -398,8 +398,8 @@
 
           # Minimal Android SDK + NDK for cargo-apk (phone / aarch64 APK).
           androidComposition = pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "34" ];
-            buildToolsVersions = [ "34.0.0" ];
+            platformVersions = [ "35" ];
+            buildToolsVersions = [ "35.0.0" ];
             includeNDK = true;
             includeEmulator = false;
             includeSystemImages = false;

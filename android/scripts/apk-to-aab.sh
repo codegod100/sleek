@@ -10,7 +10,7 @@
 #   apk-to-aab.sh <input.apk> <activity.dex> <output.aab>
 #
 # Required env:
-#   ANDROID_HOME or ANDROID_SDK_ROOT — SDK with build-tools/34.0.0 (for aapt2)
+#   ANDROID_HOME or ANDROID_SDK_ROOT — SDK with build-tools/35.0.0 (for aapt2)
 #   SLEEK_KEYSTORE                   — path to signing keystore
 #   SLEEK_KEYSTORE_PASSWORD          — store password (default: android)
 #   SLEEK_KEY_ALIAS                  — key alias   (default: androiddebugkey)
