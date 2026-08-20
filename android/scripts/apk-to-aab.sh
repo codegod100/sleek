@@ -107,8 +107,9 @@ echo "==> aapt2 convert --output-format proto..." >&2
 
 # Step 2: Assemble the base module directory tree.
 #   manifest/AndroidManifest.xml  — proto binary XML (from proto APK)
-#   resources.pb                  — compiled resource table (from proto APK)
-#   lib/<abi>/libsleek.so         — native libs (from original APK)
+#   resources.pb                  — proto resource table (from proto APK)
+#   res/**                        — PNG/raw resources (from proto APK; unchanged by aapt2)
+#   lib/<abi>/libsleek.so         — native libs (from proto APK; unchanged by aapt2)
 #   dex/classes.dex               — SleekActivity (replaces cargo-apk's NativeActivity dex)
 mkdir -p "$WORKDIR/base/manifest" "$WORKDIR/base/dex"
 
@@ -118,29 +119,34 @@ from pathlib import Path
 
 proto_apk, _orig, dst_dir, orig_apk = sys.argv[1], sys.argv[2], Path(sys.argv[3]), sys.argv[4]
 
-# Extract manifest + resources.pb from the proto-format APK
+# Extract everything needed from the proto-format APK:
+#   - AndroidManifest.xml → manifest/AndroidManifest.xml (proto binary XML)
+#   - resources.pb        → resources.pb (proto resource table)
+#   - res/**              → res/** (PNG/raw resources referenced by resources.pb)
+#   - lib/**/*.so         → lib/** (native libs; unchanged by aapt2)
+# Skip classes.dex (replaced by $DEX below) and META-INF (signatures).
+lib_count = 0
 with zipfile.ZipFile(proto_apk) as z:
-    manifest_data = z.read("AndroidManifest.xml")
-    (dst_dir / "manifest" / "AndroidManifest.xml").write_bytes(manifest_data)
-    print(f"  manifest: {len(manifest_data)} bytes", file=sys.stderr)
-
-    if "resources.pb" in z.namelist():
-        res_data = z.read("resources.pb")
-        (dst_dir / "resources.pb").write_bytes(res_data)
-        print(f"  resources.pb: {len(res_data)} bytes", file=sys.stderr)
-
-# Extract native libs from the ORIGINAL APK (.so files are not touched by aapt2 convert)
-count = 0
-with zipfile.ZipFile(orig_apk) as z:
     for name in z.namelist():
-        if name.startswith("lib/") and name.endswith(".so"):
+        if name.startswith("META-INF/") or name == "classes.dex":
+            continue
+        if name == "AndroidManifest.xml":
+            data = z.read(name)
+            (dst_dir / "manifest" / "AndroidManifest.xml").write_bytes(data)
+            print(f"  manifest: {len(data)} bytes", file=sys.stderr)
+        elif name == "resources.pb":
+            data = z.read(name)
+            (dst_dir / "resources.pb").write_bytes(data)
+            print(f"  resources.pb: {len(data)} bytes", file=sys.stderr)
+        elif name.startswith("res/") or name.startswith("lib/"):
             dest = dst_dir / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(z.read(name))
             print(f"  {name}: {os.path.getsize(dest)} bytes", file=sys.stderr)
-            count += 1
+            if name.startswith("lib/"):
+                lib_count += 1
 
-if count == 0:
+if lib_count == 0:
     print("WARNING: no native libs found in APK — the bundle may be invalid", file=sys.stderr)
 PY
 
