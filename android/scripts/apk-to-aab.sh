@@ -109,8 +109,8 @@ echo "==> aapt2 convert --output-format proto..." >&2
 #   manifest/AndroidManifest.xml  — proto binary XML (from proto APK)
 #   resources.pb                  — compiled resource table (from proto APK)
 #   lib/<abi>/libsleek.so         — native libs (from original APK)
-#   root/classes.dex              — SleekActivity (injected dex)
-mkdir -p "$WORKDIR/base/manifest" "$WORKDIR/base/root"
+#   dex/classes.dex               — SleekActivity (replaces cargo-apk's NativeActivity dex)
+mkdir -p "$WORKDIR/base/manifest" "$WORKDIR/base/dex"
 
 python3 - "$WORKDIR/proto.apk" "$WORKDIR/original.apk" "$WORKDIR/base" "$APK" <<'PY'
 import sys, zipfile, os
@@ -144,9 +144,12 @@ if count == 0:
     print("WARNING: no native libs found in APK — the bundle may be invalid", file=sys.stderr)
 PY
 
-# SleekActivity dex goes into root/ so the system classloader picks it up.
-cp "$DEX" "$WORKDIR/base/root/classes.dex"
-echo "  root/classes.dex: SleekActivity ($(wc -c < "$DEX") bytes)" >&2
+# SleekActivity dex goes into dex/ — mirrors inject-activity-dex.sh's APK
+# path: drop the NativeActivity classes.dex cargo-apk generated and use
+# sleek_activity.dex as the sole classes.dex. bundletool requires DEX files
+# under dex/, not root/ (root/classes.dex is a reserved name it rejects).
+cp "$DEX" "$WORKDIR/base/dex/classes.dex"
+echo "  dex/classes.dex: SleekActivity ($(wc -c < "$DEX") bytes)" >&2
 
 # Step 3: Zip the base module (bundletool reads this as a module archive).
 echo "==> Packaging base module zip..." >&2
