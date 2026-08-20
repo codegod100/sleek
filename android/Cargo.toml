@@ -1,6 +1,14 @@
 [package]
 name = "sleek"
-version = "0.1.0"
+# cargo-apk derives Android's versionCode directly from this field —
+# (1 << 24) | (major << 16) | (minor << 8) | patch (ndk-build's
+# VersionCode::to_code, apk_id hardcoded to 1) — and panics if
+# [package.metadata.android] tries to set version_code explicitly. 0.1.0
+# encoded to versionCode 16777472, which Play Console had already seen
+# ("Version code 16777472 has already been used"), so every subsequent
+# upload with the same crate version collided. Bump this on every release
+# that needs a new versionCode.
+version = "0.1.1"
 edition = "2021"
 description = "Sleek — mobile freeq client with Vidya (egui)"
 license = "MIT"
