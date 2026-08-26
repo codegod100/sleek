@@ -2,7 +2,7 @@
 
 mod app;
 mod auth;
-mod av;
+pub mod av;
 mod av_media;
 mod avatar_cache;
 mod bsky;

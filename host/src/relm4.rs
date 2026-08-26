@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use freeq_sdk::av::{parse_av_state, AvAction};
 use freeq_sdk::event::Event;
 use libadwaita as adw;
 use adw::prelude::*;
@@ -19,14 +20,32 @@ struct App {
     net: NetBridge,
     connected: bool,
     nick: String,
+    server: String,
     channels: Vec<String>,
     messages: HashMap<String, Vec<ChatLine>>,
     active_channel: Option<String>,
+    channel_calls: HashMap<String, ChannelCall>,
+    local_call: Option<LocalCall>,
 }
 
 struct ChatLine {
     from: String,
     text: String,
+}
+
+struct ChannelCall {
+    session_id: String,
+    participants: u32,
+}
+
+struct LocalCall {
+    channel: String,
+    session_id: String,
+    instance: String,
+    muted: bool,
+    speaker_muted: bool,
+    camera: bool,
+    media_started: bool,
 }
 
 #[derive(Debug)]
@@ -38,6 +57,10 @@ enum Input {
     Disconnect,
     SelectChannel(String),
     SendMessage(String),
+    ToggleCall,
+    ToggleMute,
+    ToggleSpeaker,
+    ToggleCamera,
     Tick,
 }
 
@@ -49,6 +72,12 @@ struct Widgets {
     channel_list: gtk::ListBox,
     message_list: gtk::ListBox,
     compose: gtk::Entry,
+    call_button: gtk::Button,
+    call_bar: gtk::Box,
+    call_status: gtk::Label,
+    mute_button: gtk::Button,
+    speaker_button: gtk::Button,
+    camera_button: gtk::Button,
 }
 
 impl Component for App {
@@ -117,6 +146,9 @@ impl Component for App {
         let disconnect = gtk::Button::with_label("Disconnect");
         disconnect.add_css_class("flat");
         header.pack_end(&disconnect);
+        let call_button = gtk::Button::with_label("Start Call");
+        call_button.add_css_class("suggested-action");
+        header.pack_start(&call_button);
         let status = gtk::Label::new(Some("Connecting…"));
         status.set_margin_top(6);
         status.set_margin_bottom(6);
@@ -159,6 +191,28 @@ impl Component for App {
 
         let conversation = gtk::Box::new(gtk::Orientation::Vertical, 0);
         conversation.append(&message_scroll);
+
+        let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        call_bar.set_margin_top(8);
+        call_bar.set_margin_bottom(8);
+        call_bar.set_margin_start(12);
+        call_bar.set_margin_end(12);
+        call_bar.add_css_class("toolbar");
+        call_bar.set_visible(false);
+        let call_status = gtk::Label::new(Some("Connecting media…"));
+        call_status.set_hexpand(true);
+        call_status.set_halign(gtk::Align::Start);
+        let mute_button = gtk::Button::with_label("Mute");
+        let speaker_button = gtk::Button::with_label("Mute Speaker");
+        let camera_button = gtk::Button::with_label("Camera On");
+        let hangup_button = gtk::Button::with_label("Leave");
+        hangup_button.add_css_class("destructive-action");
+        call_bar.append(&call_status);
+        call_bar.append(&mute_button);
+        call_bar.append(&speaker_button);
+        call_bar.append(&camera_button);
+        call_bar.append(&hangup_button);
+        conversation.append(&call_bar);
         conversation.append(&compose_row);
 
         let split = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -200,6 +254,26 @@ impl Component for App {
                 sender.input(Input::SendMessage(compose.text().to_string()));
             }
         });
+        call_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleCall)
+        });
+        hangup_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleCall)
+        });
+        mute_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleMute)
+        });
+        speaker_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleSpeaker)
+        });
+        camera_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleCamera)
+        });
 
         gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
             sender.input(Input::Tick);
@@ -210,9 +284,12 @@ impl Component for App {
             net: NetBridge::start(),
             connected: false,
             nick: String::new(),
+            server: String::new(),
             channels: Vec::new(),
             messages: HashMap::new(),
             active_channel: None,
+            channel_calls: HashMap::new(),
+            local_call: None,
         };
         let widgets = Widgets {
             stack,
@@ -222,6 +299,12 @@ impl Component for App {
             channel_list,
             message_list,
             compose,
+            call_button,
+            call_bar,
+            call_status,
+            mute_button,
+            speaker_button,
+            camera_button,
         };
         ComponentParts { model, widgets }
     }
@@ -241,9 +324,12 @@ impl Component for App {
                 }
                 self.connected = true;
                 self.nick = nick.clone();
+                self.server = server.clone();
                 self.channels.clear();
                 self.messages.clear();
                 self.active_channel = None;
+                self.channel_calls.clear();
+                self.local_call = None;
                 root.set_titlebar(Some(&widgets.header));
                 widgets.stack.set_visible_child_name("shell");
                 widgets.status.set_text("Connecting…");
@@ -263,12 +349,16 @@ impl Component for App {
                 self.channels.clear();
                 self.messages.clear();
                 self.active_channel = None;
+                self.channel_calls.clear();
+                self.local_call = None;
+                widgets.call_bar.set_visible(false);
                 root.set_titlebar(None::<&gtk::Widget>);
                 widgets.stack.set_visible_child_name("connect");
             }
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
                 self.render_messages(widgets);
+                self.render_call_controls(widgets);
             }
             Input::SendMessage(text) => {
                 let text = text.trim();
@@ -285,6 +375,32 @@ impl Component for App {
                 });
                 widgets.compose.set_text("");
             }
+            Input::ToggleCall => self.toggle_call(widgets),
+            Input::ToggleMute => {
+                if let Some(call) = self.local_call.as_mut() {
+                    call.muted = !call.muted;
+                    self.net.send(NetCmd::AvMute { muted: call.muted });
+                    self.render_call_controls(widgets);
+                }
+            }
+            Input::ToggleSpeaker => {
+                if let Some(call) = self.local_call.as_mut() {
+                    call.speaker_muted = !call.speaker_muted;
+                    self.net.send(NetCmd::AvSpeakerMute {
+                        muted: call.speaker_muted,
+                    });
+                    self.render_call_controls(widgets);
+                }
+            }
+            Input::ToggleCamera => {
+                if let Some(call) = self.local_call.as_mut() {
+                    call.camera = !call.camera;
+                    self.net.send(NetCmd::AvCamera {
+                        enabled: call.camera,
+                    });
+                    self.render_call_controls(widgets);
+                }
+            }
             Input::Tick => {
                 for event in self.net.poll() {
                     match event {
@@ -294,6 +410,32 @@ impl Component for App {
                         }
                         NetEvent::Sdk(event) if self.connected => {
                             self.handle_sdk_event(event, widgets, &_sender)
+                        }
+                        NetEvent::AvSignalingSent {
+                            channel,
+                            session_id,
+                            instance,
+                            ..
+                        } => {
+                            if let Some(call) = self.local_call.as_mut() {
+                                if call.channel == channel {
+                                    call.instance = instance;
+                                    if let Some(session_id) = session_id {
+                                        call.session_id = session_id;
+                                    }
+                                }
+                            }
+                            self.try_start_media(widgets);
+                        }
+                        NetEvent::AvMediaStatus {
+                            status,
+                            has_camera,
+                            has_mic,
+                            ..
+                        } => {
+                            widgets.call_status.set_text(&status.label());
+                            widgets.camera_button.set_sensitive(has_camera);
+                            widgets.mute_button.set_sensitive(has_mic);
                         }
                         _ => {}
                     }
@@ -364,7 +506,162 @@ impl App {
                     self.render_messages(widgets);
                 }
             }
+            Event::TagMsg {
+                target, tags, ..
+            } => {
+                if let Some(state) = parse_av_state(&tags) {
+                    match state.action {
+                        AvAction::Started | AvAction::Joined => {
+                            self.channel_calls.insert(
+                                target.clone(),
+                                ChannelCall {
+                                    session_id: state.session_id.clone(),
+                                    participants: state.participants.unwrap_or(1),
+                                },
+                            );
+                            if state
+                                .actor
+                                .as_deref()
+                                .is_some_and(|actor| actor.eq_ignore_ascii_case(&self.nick))
+                            {
+                                if let Some(call) = self.local_call.as_mut() {
+                                    if call.channel == target {
+                                        call.session_id = state.session_id;
+                                    }
+                                }
+                                self.try_start_media(widgets);
+                            }
+                        }
+                        AvAction::Left => {
+                            if let Some(call) = self.channel_calls.get_mut(&target) {
+                                call.participants = state.participants.unwrap_or(0);
+                            }
+                        }
+                        AvAction::Ended => {
+                            self.channel_calls.remove(&target);
+                            if self
+                                .local_call
+                                .as_ref()
+                                .is_some_and(|call| call.channel == target)
+                            {
+                                self.net.send(NetCmd::AvMediaStop);
+                                self.local_call = None;
+                            }
+                        }
+                    }
+                    self.render_call_controls(widgets);
+                }
+            }
             _ => {}
+        }
+    }
+
+    fn toggle_call(&mut self, widgets: &Widgets) {
+        if let Some(call) = self.local_call.take() {
+            self.net.send(NetCmd::AvLeave {
+                channel: call.channel,
+                session_id: call.session_id,
+                instance: call.instance,
+            });
+            self.net.send(NetCmd::AvMediaStop);
+            widgets.call_status.set_text("Call ended");
+            self.render_call_controls(widgets);
+            return;
+        }
+
+        let Some(channel) = self.active_channel.clone() else {
+            widgets.status.set_text("Select a channel before calling");
+            return;
+        };
+        let existing = self.channel_calls.get(&channel);
+        let session_id = existing
+            .map(|call| call.session_id.clone())
+            .unwrap_or_default();
+        self.local_call = Some(LocalCall {
+            channel: channel.clone(),
+            session_id: session_id.clone(),
+            instance: String::new(),
+            muted: false,
+            speaker_muted: false,
+            camera: false,
+            media_started: false,
+        });
+        if session_id.is_empty() {
+            self.net.send(NetCmd::AvStart { channel });
+        } else {
+            self.net.send(NetCmd::AvJoin {
+                channel,
+                session_id,
+            });
+        }
+        widgets.call_status.set_text("Joining call…");
+        self.render_call_controls(widgets);
+    }
+
+    fn try_start_media(&mut self, widgets: &Widgets) {
+        let Some(call) = self.local_call.as_mut() else {
+            return;
+        };
+        if call.media_started || call.session_id.is_empty() || call.instance.is_empty() {
+            return;
+        }
+        let sfu_url = match sleek::av::sfu_moq_url(&self.server, None) {
+            Ok(url) => url.to_string(),
+            Err(error) => {
+                widgets.call_status.set_text(&format!("Media error: {error}"));
+                return;
+            }
+        };
+        call.media_started = true;
+        self.net.send(NetCmd::AvMediaConnect {
+            sfu_url,
+            session_id: call.session_id.clone(),
+            nick: self.nick.clone(),
+            instance: call.instance.clone(),
+            muted: call.muted,
+            speaker_muted: call.speaker_muted,
+            camera: call.camera,
+            camera_id: None,
+            mic_id: None,
+            speaker_id: None,
+        });
+        widgets.call_status.set_text("Connecting media…");
+    }
+
+    fn render_call_controls(&self, widgets: &Widgets) {
+        let Some(channel) = self.active_channel.as_deref() else {
+            widgets.call_button.set_sensitive(false);
+            widgets.call_bar.set_visible(false);
+            return;
+        };
+        widgets.call_button.set_sensitive(true);
+        if let Some(call) = &self.local_call {
+            widgets.call_button.set_label("Leave Call");
+            widgets.call_button.remove_css_class("suggested-action");
+            widgets.call_button.add_css_class("destructive-action");
+            widgets.call_bar.set_visible(true);
+            widgets
+                .mute_button
+                .set_label(if call.muted { "Unmute" } else { "Mute" });
+            widgets.speaker_button.set_label(if call.speaker_muted {
+                "Unmute Speaker"
+            } else {
+                "Mute Speaker"
+            });
+            widgets
+                .camera_button
+                .set_label(if call.camera { "Camera Off" } else { "Camera On" });
+        } else {
+            widgets.call_button.remove_css_class("destructive-action");
+            widgets.call_button.add_css_class("suggested-action");
+            widgets.call_bar.set_visible(false);
+            if let Some(call) = self.channel_calls.get(channel) {
+                widgets
+                    .call_button
+                    .set_label(&format!("Join Call ({})", call.participants));
+            } else {
+                widgets.call_button.set_label("Start Call");
+            }
         }
     }
 
