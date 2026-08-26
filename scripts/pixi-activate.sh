@@ -109,7 +109,16 @@ fi
 # so mold fails with "undefined symbol: __isoc23_sscanf" at final link.
 # Point CC (generic + cc-rs's per-target var) at conda's own compiler so
 # every C shim in the graph is compiled *and* linked against the same libc.
-if [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-cc" ]]; then
+if [[ "${SLEEK_RBE:-}" == "1" ]]; then
+  # GTK is supplied by the Ubuntu worker image. Link the whole host graph
+  # against that same system libc; mixing conda's older Scrt1.o with Ubuntu
+  # GTK/glib produces unresolved __libc_csu_init/__libc_csu_fini symbols.
+  export CC=/usr/bin/cc
+  export CC_x86_64_unknown_linux_gnu="${CC}"
+  export AR=/usr/bin/ar
+  export AR_x86_64_unknown_linux_gnu="${AR}"
+  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CC}"
+elif [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-cc" ]]; then
   export CC="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-cc"
   export CC_x86_64_unknown_linux_gnu="${CC}"
   export AR="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-ar"

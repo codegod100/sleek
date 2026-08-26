@@ -14,6 +14,8 @@
 # to build + push it.
 FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
 
+ENV SLEEK_RBE=1
+
 # build-essential: pixi's own clang/libclang (bindgen's dependency, see
 # pixi.toml) still needs a real /usr/include with libc's own headers
 # (stdint.h etc.) present on the system to successfully parse C headers —
