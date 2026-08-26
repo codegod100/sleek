@@ -41,6 +41,7 @@ enum Input {
 
 struct Widgets {
     stack: gtk::Stack,
+    header: gtk::HeaderBar,
     status: gtk::Label,
     heading: gtk::Label,
     channel_list: gtk::ListBox,
@@ -155,7 +156,6 @@ impl Component for App {
         split.set_resize_start_child(false);
         split.set_shrink_start_child(false);
 
-        shell.append(&header);
         shell.append(&status);
         shell.append(&split);
         stack.add_named(&shell, Some("shell"));
@@ -205,6 +205,7 @@ impl Component for App {
         };
         let widgets = Widgets {
             stack,
+            header,
             status,
             heading,
             channel_list,
@@ -219,7 +220,7 @@ impl Component for App {
         widgets: &mut Widgets,
         message: Input,
         _sender: ComponentSender<Self>,
-        _root: &Self::Root,
+        root: &Self::Root,
     ) {
         match message {
             Input::Connect { nick, server } => {
@@ -232,6 +233,7 @@ impl Component for App {
                 self.channels.clear();
                 self.messages.clear();
                 self.active_channel = None;
+                root.set_titlebar(Some(&widgets.header));
                 widgets.stack.set_visible_child_name("shell");
                 widgets.status.set_text("Connecting…");
                 self.net.send(NetCmd::Connect {
@@ -250,6 +252,7 @@ impl Component for App {
                 self.channels.clear();
                 self.messages.clear();
                 self.active_channel = None;
+                root.set_titlebar(None::<&gtk::Widget>);
                 widgets.stack.set_visible_child_name("connect");
             }
             Input::SelectChannel(channel) => {
