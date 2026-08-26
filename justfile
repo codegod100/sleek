@@ -44,6 +44,13 @@ codespace-host *args:
 host *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Local credentials are optional and never committed. Export dotenv values
+    # before Buck parses .buckconfig's BuildBuddy header.
+    if [[ -f .env ]]; then
+      set -a
+      source .env
+      set +a
+    fi
     if [[ -z "${SLEEK_LD_LIBRARY_PATH:-}" ]]; then
       exec pixi run -- just host {{args}}
     fi
@@ -80,6 +87,10 @@ host *args:
     tail_pid=$!
     trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
     buck2 run -v={{buck_verbosity}} //:sleek-host -- "${app_args[@]}"
+
+# Transitional egui frontend while screens move to Relm4.
+host-egui:
+    cargo run --manifest-path host/Cargo.toml --bin sleek-egui
 
 # Gleam Wasm slash parser smoke (matches native Rust oracle; no GUI)
 gleam-slash:

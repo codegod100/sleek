@@ -34,3 +34,5 @@ result-*
 /sleek.sif
 /result-sif
 .wrangler/
+.env
+.env.*

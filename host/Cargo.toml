@@ -21,6 +21,10 @@ debug = false
 
 [[bin]]
 name = "sleek"
+path = "src/relm4.rs"
+
+[[bin]]
+name = "sleek-egui"
 path = "src/main.rs"
 
 [dependencies]
@@ -37,6 +41,7 @@ wasmtime = { version = "29", default-features = false, features = [
     "cranelift",
     "runtime",
 ] }
+relm4 = "0.9"
 
 # Same patches as android/ (host is its own workspace root).
 [patch.crates-io]

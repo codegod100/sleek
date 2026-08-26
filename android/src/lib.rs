@@ -8,7 +8,7 @@ mod avatar_cache;
 mod bsky;
 mod clipboard;
 mod message_store;
-mod net;
+pub mod net;
 mod policy;
 mod preview;
 mod reconnect;

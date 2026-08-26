@@ -13,6 +13,12 @@ cargo_genrule(
     executable = True,
 )
 
+# Short local spelling: `buck2 run :sleek`.
+alias(
+    name = "sleek",
+    actual = ":sleek-host",
+)
+
 # `buck2 build //:sleek-android-lib`
 # Equivalent to `just lib` — the android/ package built as a library for the
 # desktop target (sanity-check build; NOT the cross-compiled aarch64 APK —

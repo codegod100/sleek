@@ -3,6 +3,16 @@
 # enterShell. Sourced (not exec'd) by `pixi shell` / `pixi run`, so it must
 # only export vars, never `set -e` or otherwise take over the shell.
 
+# Keep local credentials in the conventional ignored dotenv file. Pixi runs
+# this hook before Buck2, so direct `pixi run buck2 ...` and `just host` both
+# receive BuildBuddy credentials without manual `source` commands.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 # bindgen (v4l2r, libspa-sys/cpal's pipewire feature, etc.) needs the clang
 # resource-dir headers alongside libclang, *and* the real libc headers
 # (stdint.h etc.) from conda's own bundled sysroot: it parses headers

@@ -81,6 +81,8 @@
           alsa-lib
           # Optional PipeWire backends
           pipewire
+          # Relm4 desktop frontend.
+          gtk4
         ];
 
       # Build-only extras for v4l2r bindgen (iroh-live capture-camera).
@@ -89,6 +91,7 @@
           pkg-config
           llvmPackages.libclang
           linuxHeaders
+          wrapGAppsHook4
         ];
 
       # rusty-capture/v4l2r bindgen on NixOS: must use nix libclang (not Android

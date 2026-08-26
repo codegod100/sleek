@@ -23,6 +23,7 @@ FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
+    libgtk-4-dev \
     openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 

@@ -12,6 +12,7 @@
     llvmPackages.libclang
     pipewire
     alsa-lib
+    gtk4
     libx11
     libxkbcommon
     libGL
@@ -25,14 +26,14 @@
   ];
 
   env.OPENSSL_NO_VENDOR = "1";
-  env.PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.pipewire.dev pkgs.alsa-lib.dev ];
+  env.PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.pipewire.dev pkgs.alsa-lib.dev pkgs.gtk4.dev ];
   env.SLEEK_BROWSER_PROFILE = "${builtins.getEnv "TMPDIR"}/sleek-chromium";
   env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
   env.SLEEK_LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
   env.BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.llvmPackages.libclang.version}/include";
   env.SLEEK_LD_LIBRARY_PATH = lib.makeLibraryPath [
     pkgs.libx11 pkgs.libxkbcommon pkgs.libGL pkgs.libxcursor pkgs.libxi
-    pkgs.libxrandr pkgs.mesa pkgs.pipewire pkgs.alsa-lib
+    pkgs.libxrandr pkgs.mesa pkgs.pipewire pkgs.alsa-lib pkgs.gtk4
   ];
 
   enterShell = ''
