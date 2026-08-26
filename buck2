@@ -1,19 +1,13 @@
-#!/usr/bin/env dotslash
+#!/usr/bin/env bash
+set -euo pipefail
 
-{
-  "name": "buck2",
-  "platforms": {
-    "linux-x86_64": {
-      "size": 39303524,
-      "hash": "blake3",
-      "digest": "afff180bc257de220f393ed4551693d877849cda012ac39cf9d4f7a27693848e",
-      "format": "zst",
-      "path": "buck2-x86_64-unknown-linux-musl",
-      "providers": [
-        {
-          "url": "https://github.com/facebook/buck2/releases/download/2026-08-22/buck2-x86_64-unknown-linux-musl.zst"
-        }
-      ]
-    }
-  }
-}
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ -f "${repo_root}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${repo_root}/.env"
+  set +a
+fi
+
+exec dotslash "${repo_root}/buck2.dotslash" "$@"
