@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use freeq_sdk::event::Event;
+use libadwaita as adw;
+use adw::prelude::*;
 use relm4::gtk;
 use relm4::gtk::prelude::*;
 use relm4::{Component, ComponentParts, ComponentSender, RelmApp};
@@ -75,6 +77,7 @@ impl Component for App {
             .build();
 
         let connect = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        connect.add_css_class("card");
         connect.set_halign(gtk::Align::Center);
         connect.set_valign(gtk::Align::Center);
         connect.set_width_request(360);
@@ -99,7 +102,12 @@ impl Component for App {
         connect.append(&nick);
         connect.append(&server);
         connect.append(&connect_button);
-        stack.add_named(&connect, Some("connect"));
+        let connect_clamp = adw::Clamp::builder()
+            .maximum_size(440)
+            .tightening_threshold(360)
+            .child(&connect)
+            .build();
+        stack.add_named(&connect_clamp, Some("connect"));
 
         let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = gtk::HeaderBar::new();
@@ -107,6 +115,7 @@ impl Component for App {
         heading.add_css_class("title-2");
         header.set_title_widget(Some(&heading));
         let disconnect = gtk::Button::with_label("Disconnect");
+        disconnect.add_css_class("flat");
         header.pack_end(&disconnect);
         let status = gtk::Label::new(Some("Connecting…"));
         status.set_margin_top(6);
@@ -122,6 +131,7 @@ impl Component for App {
             .child(&channel_list)
             .vexpand(true)
             .build();
+        channel_scroll.add_css_class("sidebar");
 
         let message_list = gtk::ListBox::new();
         message_list.set_selection_mode(gtk::SelectionMode::None);
@@ -131,6 +141,7 @@ impl Component for App {
             .hexpand(true)
             .vexpand(true)
             .build();
+        message_scroll.add_css_class("view");
 
         let compose = gtk::Entry::builder()
             .placeholder_text("Message")
@@ -139,10 +150,10 @@ impl Component for App {
         let send_button = gtk::Button::with_label("Send");
         send_button.add_css_class("suggested-action");
         let compose_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        compose_row.set_margin_top(8);
-        compose_row.set_margin_bottom(8);
-        compose_row.set_margin_start(8);
-        compose_row.set_margin_end(8);
+        compose_row.set_margin_top(12);
+        compose_row.set_margin_bottom(12);
+        compose_row.set_margin_start(12);
+        compose_row.set_margin_end(12);
         compose_row.append(&compose);
         compose_row.append(&send_button);
 
@@ -405,8 +416,8 @@ impl App {
                 let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
-                row.set_margin_start(10);
-                row.set_margin_end(10);
+                row.set_margin_start(12);
+                row.set_margin_end(12);
                 let author = gtk::Label::new(Some(&message.from));
                 author.set_halign(gtk::Align::Start);
                 author.add_css_class("heading");
@@ -434,6 +445,8 @@ fn default_nick() -> String {
 }
 
 fn main() {
+    adw::init().expect("failed to initialize libadwaita");
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
     let app = RelmApp::new("uk.nandi.sleek");
     app.run::<App>(());
 }

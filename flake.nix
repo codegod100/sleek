@@ -83,6 +83,7 @@
           pipewire
           # Relm4 desktop frontend.
           gtk4
+          libadwaita
         ];
 
       # Build-only extras for v4l2r bindgen (iroh-live capture-camera).

@@ -28,7 +28,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Keep that rewritten path equivalent to the canonical apt path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
-    libgtk-4-dev \
+    libgtk-4-dev libadwaita-1-dev \
     openjdk-17-jdk-headless \
     && mkdir -p /usr/lib/lib \
     && ln -s ../x86_64-linux-gnu /usr/lib/lib/x86_64-linux-gnu \
