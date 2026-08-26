@@ -60,6 +60,12 @@ fi
 # regardless of how many other different-target compiler invocations
 # share this same activated env.
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  # conda's pkg-config does not include Debian/Ubuntu's multiarch directory
+  # in its built-in search path. The RBE image supplies GTK4 through apt, so
+  # gio-2.0.pc can otherwise be found while its zlib.pc dependency cannot.
+  # Search both package ecosystems explicitly.
+  export PKG_CONFIG_PATH="${CONDA_PREFIX}/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
   clang_res_dir=$(find "${CONDA_PREFIX}/lib/clang" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
   sysroot_include="${CONDA_PREFIX}/x86_64-conda-linux-gnu/sysroot/usr/include"
   args=""
