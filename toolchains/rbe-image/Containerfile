@@ -21,10 +21,15 @@ FROM gcr.io/flame-public/rbe-ubuntu22-04:latest
 # among others) fails with "unknown type name 'uint32_t'". Confirmed by
 # hitting exactly that error without this.
 ENV DEBIAN_FRONTEND=noninteractive
+# conda's x86_64-linux-gnu linker treats pkg-config's Debian multiarch
+# libdir as sysroot-relative and resolves it through /usr/lib/lib/....
+# Keep that rewritten path equivalent to the canonical apt path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
     libgtk-4-dev \
     openjdk-17-jdk-headless \
+    && mkdir -p /usr/lib/lib \
+    && ln -s ../x86_64-linux-gnu /usr/lib/lib/x86_64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
 # scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,
