@@ -29,6 +29,11 @@ path = "src/main.rs"
 
 [dependencies]
 sleek = { path = "../android" }
+freeq-sdk = { path = "../patched-crates/freeq/freeq-sdk", default-features = false, features = [
+    "aws-lc-rs",
+    "rustls-tls",
+    "websocket",
+] }
 # Host needs winit backends; android package only enables glow in its base deps.
 eframe = { version = "0.31", default-features = false, features = [
     "default_fonts",
