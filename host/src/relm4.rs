@@ -4,7 +4,7 @@
 //! migrated screen by screen. The Android/egui frontend remains available as
 //! `sleek-egui` during the transition.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use freeq_sdk::av::{parse_av_state, AvAction};
@@ -32,8 +32,10 @@ struct App {
 }
 
 struct ChatLine {
+    id: String,
     from: String,
     text: String,
+    reactions: HashMap<String, HashSet<String>>,
 }
 
 struct ChannelCall {
@@ -64,6 +66,11 @@ enum Input {
     ToggleMute,
     ToggleSpeaker,
     ToggleCamera,
+    React {
+        target: String,
+        msgid: String,
+        emoji: String,
+    },
     Tick,
 }
 
@@ -400,7 +407,7 @@ impl Component for App {
             }
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
-                self.render_messages(widgets);
+                self.render_messages(widgets, &_sender);
                 self.render_users(widgets);
                 self.render_call_controls(widgets);
             }
@@ -444,6 +451,36 @@ impl Component for App {
                     });
                     self.render_call_controls(widgets);
                 }
+            }
+            Input::React {
+                target,
+                msgid,
+                emoji,
+            } => {
+                let reacted = self
+                    .messages
+                    .get(&target)
+                    .and_then(|messages| messages.iter().find(|message| message.id == msgid))
+                    .and_then(|message| message.reactions.get(&emoji))
+                    .is_some_and(|nicks| {
+                        nicks.iter().any(|nick| nick.eq_ignore_ascii_case(&self.nick))
+                    });
+                if reacted {
+                    self.net.send(NetCmd::Unreact {
+                        target: target.clone(),
+                        emoji: emoji.clone(),
+                        msgid: msgid.clone(),
+                    });
+                } else {
+                    self.net.send(NetCmd::React {
+                        target: target.clone(),
+                        emoji: emoji.clone(),
+                        msgid: msgid.clone(),
+                    });
+                }
+                let nick = self.nick.clone();
+                self.apply_reaction(&target, &msgid, &emoji, &nick, !reacted);
+                self.render_messages(widgets, &_sender);
             }
             Input::Tick => {
                 for event in self.net.poll() {
@@ -519,7 +556,7 @@ impl App {
                         self.active_channel = Some(channel.clone());
                     }
                     self.render_channels(widgets, sender);
-                    self.render_messages(widgets);
+                    self.render_messages(widgets, sender);
                 }
                 if self.active_channel.as_deref() == Some(channel.as_str()) {
                     self.render_users(widgets);
@@ -535,7 +572,7 @@ impl App {
                         self.active_channel = self.channels.first().cloned();
                     }
                     self.render_channels(widgets, sender);
-                    self.render_messages(widgets);
+                    self.render_messages(widgets, sender);
                 }
                 self.render_users(widgets);
             }
@@ -576,7 +613,7 @@ impl App {
                 target,
                 text,
                 dm_key,
-                ..
+                tags,
             } => {
                 let channel = if let Some(dm_key) = dm_key {
                     dm_key
@@ -588,15 +625,26 @@ impl App {
                     target
                 };
                 self.ensure_channel(&channel);
-                self.push_message(&channel, from, text);
+                let id = message_id(&tags);
+                let reactions = tags
+                    .get("+freeq.at/reactions")
+                    .map(|value| parse_reactions(value))
+                    .unwrap_or_default();
+                self.push_message(&channel, id, from, text, reactions);
                 self.render_channels(widgets, sender);
                 if self.active_channel.as_deref() == Some(channel.as_str()) {
-                    self.render_messages(widgets);
+                    self.render_messages(widgets, sender);
                 }
             }
             Event::TagMsg {
-                target, tags, ..
+                from, target, tags, ..
             } => {
+                if let Some((msgid, emoji, add)) = reaction_update(&tags) {
+                    self.apply_reaction(&target, &msgid, &emoji, &from, add);
+                    if self.active_channel.as_deref() == Some(target.as_str()) {
+                        self.render_messages(widgets, sender);
+                    }
+                }
                 if let Some(state) = parse_av_state(&tags) {
                     match state.action {
                         AvAction::Started | AvAction::Joined => {
@@ -827,11 +875,52 @@ impl App {
         }
     }
 
-    fn push_message(&mut self, channel: &str, from: String, text: String) {
+    fn push_message(
+        &mut self,
+        channel: &str,
+        id: String,
+        from: String,
+        text: String,
+        reactions: HashMap<String, HashSet<String>>,
+    ) {
         let messages = self.messages.entry(channel.to_owned()).or_default();
-        messages.push(ChatLine { from, text });
+        messages.push(ChatLine {
+            id,
+            from,
+            text,
+            reactions,
+        });
         if messages.len() > 500 {
             messages.remove(0);
+        }
+    }
+
+    fn apply_reaction(
+        &mut self,
+        channel: &str,
+        msgid: &str,
+        emoji: &str,
+        nick: &str,
+        add: bool,
+    ) {
+        let Some(message) = self
+            .messages
+            .get_mut(channel)
+            .and_then(|messages| messages.iter_mut().find(|message| message.id == msgid))
+        else {
+            return;
+        };
+        if add {
+            message
+                .reactions
+                .entry(emoji.to_owned())
+                .or_default()
+                .insert(nick.to_owned());
+        } else if let Some(nicks) = message.reactions.get_mut(emoji) {
+            nicks.retain(|reactor| !reactor.eq_ignore_ascii_case(nick));
+            if nicks.is_empty() {
+                message.reactions.remove(emoji);
+            }
         }
     }
 
@@ -876,7 +965,7 @@ impl App {
         }
     }
 
-    fn render_messages(&self, widgets: &Widgets) {
+    fn render_messages(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.message_list);
         let Some(channel) = self.active_channel.as_deref() else {
             widgets.heading.set_text("Chats");
@@ -901,6 +990,47 @@ impl App {
                 body.set_selectable(true);
                 row.append(&author);
                 row.append(&body);
+
+                let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                for (emoji, nicks) in &message.reactions {
+                    let button = gtk::Button::with_label(&format!("{emoji} {}", nicks.len()));
+                    button.add_css_class("flat");
+                    button.connect_clicked({
+                        let sender = sender.clone();
+                        let target = channel.to_owned();
+                        let msgid = message.id.clone();
+                        let emoji = emoji.clone();
+                        move |_| {
+                            sender.input(Input::React {
+                                target: target.clone(),
+                                msgid: msgid.clone(),
+                                emoji: emoji.clone(),
+                            })
+                        }
+                    });
+                    reactions.append(&button);
+                }
+                if !message.id.is_empty() {
+                    for emoji in ["👍", "❤️", "😂", "🎉"] {
+                        let button = gtk::Button::with_label(emoji);
+                        button.add_css_class("flat");
+                        button.connect_clicked({
+                            let sender = sender.clone();
+                            let target = channel.to_owned();
+                            let msgid = message.id.clone();
+                            let emoji = emoji.to_owned();
+                            move |_| {
+                                sender.input(Input::React {
+                                    target: target.clone(),
+                                    msgid: msgid.clone(),
+                                    emoji: emoji.clone(),
+                                })
+                            }
+                        });
+                        reactions.append(&button);
+                    }
+                }
+                row.append(&reactions);
                 widgets.message_list.append(&row);
             }
         }
@@ -925,6 +1055,55 @@ fn clear_flow_box(flow_box: &gtk::FlowBox) {
 
 fn clean_nick(nick: &str) -> &str {
     nick.trim_start_matches(['~', '&', '@', '%', '+'])
+}
+
+fn message_id(tags: &HashMap<String, String>) -> String {
+    tags.get("msgid")
+        .or_else(|| tags.get("+msgid"))
+        .or_else(|| tags.get("draft/msgid"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn parse_reactions(raw: &str) -> HashMap<String, HashSet<String>> {
+    raw.split(';')
+        .filter_map(|entry| {
+            let (emoji, nicks) = entry.split_once(':')?;
+            if emoji.is_empty() {
+                return None;
+            }
+            Some((
+                emoji.to_owned(),
+                nicks
+                    .split(',')
+                    .filter(|nick| !nick.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+fn reaction_update(tags: &HashMap<String, String>) -> Option<(String, String, bool)> {
+    let msgid = tags
+        .get("+reply")
+        .or_else(|| tags.get("reply"))
+        .or_else(|| tags.get("+draft/reply"))
+        .or_else(|| tags.get("draft/reply"))?
+        .clone();
+    if let Some(emoji) = tags
+        .get("+freeq.at/unreact")
+        .or_else(|| tags.get("freeq.at/unreact"))
+    {
+        return Some((msgid, emoji.clone(), false));
+    }
+    let emoji = tags
+        .get("+react")
+        .or_else(|| tags.get("react"))
+        .or_else(|| tags.get("+draft/react"))
+        .or_else(|| tags.get("draft/react"))?
+        .clone();
+    Some((msgid, emoji, true))
 }
 
 fn default_nick() -> String {
