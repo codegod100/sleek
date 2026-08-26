@@ -26,6 +26,8 @@ struct App {
     active_channel: Option<String>,
     channel_calls: HashMap<String, ChannelCall>,
     local_call: Option<LocalCall>,
+    video: Option<sleek::av::VideoFrameStore>,
+    video_generations: HashMap<String, u64>,
 }
 
 struct ChatLine {
@@ -71,6 +73,7 @@ struct Widgets {
     heading: gtk::Label,
     channel_list: gtk::ListBox,
     message_list: gtk::ListBox,
+    video_grid: gtk::FlowBox,
     compose: gtk::Entry,
     call_button: gtk::Button,
     call_bar: gtk::Box,
@@ -190,6 +193,18 @@ impl Component for App {
         compose_row.append(&send_button);
 
         let conversation = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let video_grid = gtk::FlowBox::builder()
+            .column_spacing(8)
+            .row_spacing(8)
+            .max_children_per_line(3)
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        video_grid.set_margin_top(8);
+        video_grid.set_margin_bottom(8);
+        video_grid.set_margin_start(12);
+        video_grid.set_margin_end(12);
+        video_grid.set_visible(false);
+        conversation.append(&video_grid);
         conversation.append(&message_scroll);
 
         let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -290,6 +305,8 @@ impl Component for App {
             active_channel: None,
             channel_calls: HashMap::new(),
             local_call: None,
+            video: None,
+            video_generations: HashMap::new(),
         };
         let widgets = Widgets {
             stack,
@@ -298,6 +315,7 @@ impl Component for App {
             heading,
             channel_list,
             message_list,
+            video_grid,
             compose,
             call_button,
             call_bar,
@@ -330,6 +348,8 @@ impl Component for App {
                 self.active_channel = None;
                 self.channel_calls.clear();
                 self.local_call = None;
+                self.video = None;
+                self.video_generations.clear();
                 root.set_titlebar(Some(&widgets.header));
                 widgets.stack.set_visible_child_name("shell");
                 widgets.status.set_text("Connecting…");
@@ -351,6 +371,10 @@ impl Component for App {
                 self.active_channel = None;
                 self.channel_calls.clear();
                 self.local_call = None;
+                self.video = None;
+                self.video_generations.clear();
+                clear_flow_box(&widgets.video_grid);
+                widgets.video_grid.set_visible(false);
                 widgets.call_bar.set_visible(false);
                 root.set_titlebar(None::<&gtk::Widget>);
                 widgets.stack.set_visible_child_name("connect");
@@ -429,6 +453,7 @@ impl Component for App {
                         }
                         NetEvent::AvMediaStatus {
                             status,
+                            video,
                             has_camera,
                             has_mic,
                             ..
@@ -436,10 +461,14 @@ impl Component for App {
                             widgets.call_status.set_text(&status.label());
                             widgets.camera_button.set_sensitive(has_camera);
                             widgets.mute_button.set_sensitive(has_mic);
+                            if let Some(video) = video {
+                                self.video = Some(video);
+                            }
                         }
                         _ => {}
                     }
                 }
+                self.render_video(widgets);
             }
         }
     }
@@ -564,6 +593,10 @@ impl App {
                 instance: call.instance,
             });
             self.net.send(NetCmd::AvMediaStop);
+            self.video = None;
+            self.video_generations.clear();
+            clear_flow_box(&widgets.video_grid);
+            widgets.video_grid.set_visible(false);
             widgets.call_status.set_text("Call ended");
             self.render_call_controls(widgets);
             return;
@@ -665,6 +698,51 @@ impl App {
         }
     }
 
+    fn render_video(&mut self, widgets: &Widgets) {
+        let frames = self
+            .video
+            .as_ref()
+            .map(sleek::av::VideoFrameStore::snapshot)
+            .unwrap_or_default();
+        let generations: HashMap<_, _> = frames
+            .iter()
+            .map(|(nick, frame)| (nick.clone(), frame.gen))
+            .collect();
+        if generations == self.video_generations {
+            return;
+        }
+        self.video_generations = generations;
+        clear_flow_box(&widgets.video_grid);
+        widgets.video_grid.set_visible(!frames.is_empty());
+
+        for (nick, frame) in frames {
+            let bytes = gtk::glib::Bytes::from_owned(frame.rgba.to_vec());
+            let texture = gtk::gdk::MemoryTexture::new(
+                frame.width as i32,
+                frame.height as i32,
+                gtk::gdk::MemoryFormat::R8g8b8a8,
+                &bytes,
+                frame.width as usize * 4,
+            );
+            let picture = gtk::Picture::for_paintable(&texture);
+            picture.set_size_request(320, 180);
+            picture.set_can_shrink(true);
+
+            let tile = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            tile.add_css_class("card");
+            tile.set_margin_top(4);
+            tile.set_margin_bottom(4);
+            tile.set_margin_start(4);
+            tile.set_margin_end(4);
+            tile.append(&picture);
+            let label = gtk::Label::new(Some(&nick));
+            label.add_css_class("caption");
+            label.set_margin_bottom(6);
+            tile.append(&label);
+            widgets.video_grid.insert(&tile, -1);
+        }
+    }
+
     fn ensure_channel(&mut self, channel: &str) {
         if !self.channels.iter().any(|item| item == channel) {
             self.channels.push(channel.to_owned());
@@ -733,6 +811,16 @@ impl App {
 fn clear_list(list: &gtk::ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
+    }
+}
+
+fn clear_flow_box(flow_box: &gtk::FlowBox) {
+    while let Some(child) = flow_box.first_child() {
+        if let Ok(child) = child.downcast::<gtk::FlowBoxChild>() {
+            flow_box.remove(&child);
+        } else {
+            break;
+        }
     }
 }
 
