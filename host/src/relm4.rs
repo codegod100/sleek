@@ -16,6 +16,11 @@ use relm4::gtk::prelude::*;
 use relm4::{Component, ComponentParts, ComponentSender, RelmApp};
 use sleek::net::{NetBridge, NetCmd, NetEvent};
 
+const REACTION_EMOJI: &[&str] = &[
+    "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🔥", "👏", "🙏", "💯", "👀", "🤔",
+    "✅", "🚀", "✨", "💪", "🤝", "🥳", "😍",
+];
+
 struct App {
     net: NetBridge,
     connected: bool,
@@ -1011,24 +1016,43 @@ impl App {
                     reactions.append(&button);
                 }
                 if !message.id.is_empty() {
-                    for emoji in ["👍", "❤️", "😂", "🎉"] {
+                    let picker_button = gtk::MenuButton::builder()
+                        .label("😊")
+                        .tooltip_text("Add reaction")
+                        .build();
+                    picker_button.add_css_class("flat");
+                    let picker = gtk::Popover::new();
+                    let grid = gtk::Grid::builder()
+                        .column_spacing(4)
+                        .row_spacing(4)
+                        .margin_top(8)
+                        .margin_bottom(8)
+                        .margin_start(8)
+                        .margin_end(8)
+                        .build();
+                    for (index, emoji) in REACTION_EMOJI.iter().enumerate() {
                         let button = gtk::Button::with_label(emoji);
                         button.add_css_class("flat");
                         button.connect_clicked({
                             let sender = sender.clone();
                             let target = channel.to_owned();
                             let msgid = message.id.clone();
-                            let emoji = emoji.to_owned();
+                            let emoji = (*emoji).to_owned();
+                            let picker = picker.clone();
                             move |_| {
                                 sender.input(Input::React {
                                     target: target.clone(),
                                     msgid: msgid.clone(),
                                     emoji: emoji.clone(),
-                                })
+                                });
+                                picker.popdown();
                             }
                         });
-                        reactions.append(&button);
+                        grid.attach(&button, (index % 7) as i32, (index / 7) as i32, 1, 1);
                     }
+                    picker.set_child(Some(&grid));
+                    picker_button.set_popover(Some(&picker));
+                    reactions.append(&picker_button);
                 }
                 row.append(&reactions);
                 widgets.message_list.append(&row);
