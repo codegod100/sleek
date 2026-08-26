@@ -23,6 +23,7 @@ struct App {
     server: String,
     channels: Vec<String>,
     messages: HashMap<String, Vec<ChatLine>>,
+    members: HashMap<String, Vec<String>>,
     active_channel: Option<String>,
     channel_calls: HashMap<String, ChannelCall>,
     local_call: Option<LocalCall>,
@@ -72,6 +73,7 @@ struct Widgets {
     status: gtk::Label,
     heading: gtk::Label,
     channel_list: gtk::ListBox,
+    user_list: gtk::ListBox,
     message_list: gtk::ListBox,
     video_grid: gtk::FlowBox,
     compose: gtk::Entry,
@@ -230,14 +232,27 @@ impl Component for App {
         conversation.append(&call_bar);
         conversation.append(&compose_row);
 
-        let split = gtk::Paned::new(gtk::Orientation::Horizontal);
-        split.set_start_child(Some(&channel_scroll));
-        split.set_end_child(Some(&conversation));
-        split.set_resize_start_child(false);
-        split.set_shrink_start_child(false);
+        let user_list = gtk::ListBox::new();
+        user_list.set_selection_mode(gtk::SelectionMode::None);
+        user_list.add_css_class("navigation-sidebar");
+        let user_scroll = gtk::ScrolledWindow::builder()
+            .child(&user_list)
+            .vexpand(true)
+            .width_request(180)
+            .build();
+        user_scroll.add_css_class("sidebar");
+
+        let layout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        channel_scroll.set_width_request(220);
+        layout.append(&channel_scroll);
+        layout.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        conversation.set_hexpand(true);
+        layout.append(&conversation);
+        layout.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        layout.append(&user_scroll);
 
         shell.append(&status);
-        shell.append(&split);
+        shell.append(&layout);
         stack.add_named(&shell, Some("shell"));
 
         root.set_child(Some(&stack));
@@ -302,6 +317,7 @@ impl Component for App {
             server: String::new(),
             channels: Vec::new(),
             messages: HashMap::new(),
+            members: HashMap::new(),
             active_channel: None,
             channel_calls: HashMap::new(),
             local_call: None,
@@ -314,6 +330,7 @@ impl Component for App {
             status,
             heading,
             channel_list,
+            user_list,
             message_list,
             video_grid,
             compose,
@@ -345,6 +362,7 @@ impl Component for App {
                 self.server = server.clone();
                 self.channels.clear();
                 self.messages.clear();
+                self.members.clear();
                 self.active_channel = None;
                 self.channel_calls.clear();
                 self.local_call = None;
@@ -368,6 +386,7 @@ impl Component for App {
                 self.connected = false;
                 self.channels.clear();
                 self.messages.clear();
+                self.members.clear();
                 self.active_channel = None;
                 self.channel_calls.clear();
                 self.local_call = None;
@@ -382,6 +401,7 @@ impl Component for App {
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
                 self.render_messages(widgets);
+                self.render_users(widgets);
                 self.render_call_controls(widgets);
             }
             Input::SendMessage(text) => {
@@ -488,6 +508,7 @@ impl App {
                 widgets.status.set_text(&format!("Online as {nick}"));
             }
             Event::Joined { channel, nick, .. } => {
+                self.add_member(&channel, &nick);
                 if nick.eq_ignore_ascii_case(&self.nick) {
                     self.ensure_channel(&channel);
                     self.net.send(NetCmd::HistoryLatest {
@@ -495,22 +516,60 @@ impl App {
                         count: 100,
                     });
                     if self.active_channel.is_none() {
-                        self.active_channel = Some(channel);
+                        self.active_channel = Some(channel.clone());
                     }
                     self.render_channels(widgets, sender);
                     self.render_messages(widgets);
                 }
+                if self.active_channel.as_deref() == Some(channel.as_str()) {
+                    self.render_users(widgets);
+                }
             }
             Event::Parted { channel, nick } => {
+                self.remove_member(&channel, &nick);
                 if nick.eq_ignore_ascii_case(&self.nick) {
                     self.channels.retain(|item| item != &channel);
                     self.messages.remove(&channel);
+                    self.members.remove(&channel);
                     if self.active_channel.as_deref() == Some(channel.as_str()) {
                         self.active_channel = self.channels.first().cloned();
                     }
                     self.render_channels(widgets, sender);
                     self.render_messages(widgets);
                 }
+                self.render_users(widgets);
+            }
+            Event::Names { channel, nicks } => {
+                for nick in nicks {
+                    self.add_member(&channel, clean_nick(&nick));
+                }
+                if self.active_channel.as_deref() == Some(channel.as_str()) {
+                    self.render_users(widgets);
+                }
+            }
+            Event::Kicked { channel, nick, .. } => {
+                self.remove_member(&channel, &nick);
+                self.render_users(widgets);
+            }
+            Event::NickChanged { old_nick, new_nick } => {
+                for members in self.members.values_mut() {
+                    if let Some(nick) = members
+                        .iter_mut()
+                        .find(|nick| nick.eq_ignore_ascii_case(&old_nick))
+                    {
+                        *nick = new_nick.clone();
+                    }
+                }
+                if self.nick.eq_ignore_ascii_case(&old_nick) {
+                    self.nick = new_nick;
+                }
+                self.render_users(widgets);
+            }
+            Event::UserQuit { nick, .. } => {
+                for members in self.members.values_mut() {
+                    members.retain(|member| !member.eq_ignore_ascii_case(&nick));
+                }
+                self.render_users(widgets);
             }
             Event::Message {
                 from,
@@ -748,6 +807,24 @@ impl App {
             self.channels.push(channel.to_owned());
         }
         self.messages.entry(channel.to_owned()).or_default();
+        self.members.entry(channel.to_owned()).or_default();
+    }
+
+    fn add_member(&mut self, channel: &str, nick: &str) {
+        let members = self.members.entry(channel.to_owned()).or_default();
+        if !members
+            .iter()
+            .any(|member| member.eq_ignore_ascii_case(nick))
+        {
+            members.push(nick.to_owned());
+            members.sort_by_key(|member| member.to_ascii_lowercase());
+        }
+    }
+
+    fn remove_member(&mut self, channel: &str, nick: &str) {
+        if let Some(members) = self.members.get_mut(channel) {
+            members.retain(|member| !member.eq_ignore_ascii_case(nick));
+        }
     }
 
     fn push_message(&mut self, channel: &str, from: String, text: String) {
@@ -774,6 +851,28 @@ impl App {
                 move |_| sender.input(Input::SelectChannel(channel.clone()))
             });
             widgets.channel_list.append(&button);
+        }
+    }
+
+    fn render_users(&self, widgets: &Widgets) {
+        clear_list(&widgets.user_list);
+        let Some(channel) = self.active_channel.as_deref() else {
+            return;
+        };
+        for nick in self.members.get(channel).into_iter().flatten() {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_top(6);
+            row.set_margin_bottom(6);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            let presence = gtk::Label::new(Some("●"));
+            presence.add_css_class("success");
+            let label = gtk::Label::new(Some(nick));
+            label.set_halign(gtk::Align::Start);
+            label.set_hexpand(true);
+            row.append(&presence);
+            row.append(&label);
+            widgets.user_list.append(&row);
         }
     }
 
@@ -822,6 +921,10 @@ fn clear_flow_box(flow_box: &gtk::FlowBox) {
             break;
         }
     }
+}
+
+fn clean_nick(nick: &str) -> &str {
+    nick.trim_start_matches(['~', '&', '@', '%', '+'])
 }
 
 fn default_nick() -> String {
