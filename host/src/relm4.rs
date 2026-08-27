@@ -180,7 +180,6 @@ impl Component for App {
             .child(&channel_list)
             .vexpand(true)
             .build();
-        channel_scroll.add_css_class("sidebar");
 
         let message_list = gtk::ListBox::new();
         message_list.set_selection_mode(gtk::SelectionMode::None);
@@ -252,7 +251,6 @@ impl Component for App {
             .vexpand(true)
             .width_request(180)
             .build();
-        user_scroll.add_css_class("sidebar");
 
         let layout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         channel_scroll.set_width_request(220);
@@ -939,7 +937,7 @@ impl App {
             button.set_halign(gtk::Align::Fill);
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
             if selected {
-                button.add_css_class("accent");
+                button.add_css_class("suggested-action");
             }
             button.connect_clicked({
                 let sender = sender.clone();
