@@ -412,9 +412,11 @@ impl Component for App {
             }
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
+                self.render_channels(widgets, &_sender);
                 self.render_messages(widgets, &_sender);
                 self.render_users(widgets);
                 self.render_call_controls(widgets);
+                widgets.compose.grab_focus();
             }
             Input::SendMessage(text) => {
                 let text = text.trim();
