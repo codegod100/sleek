@@ -84,7 +84,7 @@ struct Widgets {
     header: gtk::HeaderBar,
     status: gtk::Label,
     heading: gtk::Label,
-    channel_list: gtk::ListBox,
+    channel_list: gtk::Box,
     user_list: gtk::ListBox,
     message_list: gtk::ListBox,
     message_scroll: gtk::ScrolledWindow,
@@ -172,10 +172,8 @@ impl Component for App {
         status.set_margin_bottom(6);
         status.add_css_class("dim-label");
 
-        let channel_list = gtk::ListBox::new();
-        channel_list.set_selection_mode(gtk::SelectionMode::None);
+        let channel_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
         channel_list.set_width_request(220);
-        channel_list.add_css_class("navigation-sidebar");
 
         let channel_scroll = gtk::ScrolledWindow::builder()
             .child(&channel_list)
@@ -930,7 +928,7 @@ impl App {
     }
 
     fn render_channels(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
-        clear_list(&widgets.channel_list);
+        clear_box(&widgets.channel_list);
         for channel in &self.channels {
             let button = gtk::ToggleButton::with_label(channel);
             button.set_has_frame(false);
@@ -1078,6 +1076,12 @@ fn clear_list(list: &gtk::ListBox) {
     }
 }
 
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
 fn clear_flow_box(flow_box: &gtk::FlowBox) {
     while let Some(child) = flow_box.first_child() {
         if let Ok(child) = child.downcast::<gtk::FlowBoxChild>() {
@@ -1095,6 +1099,7 @@ fn clean_nick(nick: &str) -> &str {
 fn message_id(tags: &HashMap<String, String>) -> String {
     tags.get("msgid")
         .or_else(|| tags.get("+msgid"))
+        .or_else(|| tags.get("+draft/msgid"))
         .or_else(|| tags.get("draft/msgid"))
         .cloned()
         .unwrap_or_default()
