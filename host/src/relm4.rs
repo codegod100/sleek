@@ -488,6 +488,7 @@ impl Component for App {
                 self.render_messages(widgets, &_sender);
             }
             Input::Tick => {
+                let mut refresh_chat = false;
                 for event in self.net.poll() {
                     match event {
                         NetEvent::Status(message) => widgets.status.set_text(&message),
@@ -495,6 +496,7 @@ impl Component for App {
                             widgets.status.set_text(&format!("Connection failed: {error}"))
                         }
                         NetEvent::Sdk(event) if self.connected => {
+                            refresh_chat = true;
                             self.handle_sdk_event(event, widgets, &_sender)
                         }
                         NetEvent::AvSignalingSent {
@@ -529,6 +531,12 @@ impl Component for App {
                         }
                         _ => {}
                     }
+                }
+                if refresh_chat {
+                    self.render_channels(widgets, &_sender);
+                    self.render_messages(widgets, &_sender);
+                    self.render_users(widgets);
+                    self.render_call_controls(widgets);
                 }
                 self.render_video(widgets);
             }
@@ -585,9 +593,6 @@ impl App {
                 for nick in nicks {
                     self.add_member(&channel, clean_nick(&nick));
                 }
-                if self.active_channel.as_deref() == Some(channel.as_str()) {
-                    self.render_users(widgets);
-                }
             }
             Event::Kicked { channel, nick, .. } => {
                 self.remove_member(&channel, &nick);
@@ -636,19 +641,12 @@ impl App {
                     .map(|value| parse_reactions(value))
                     .unwrap_or_default();
                 self.push_message(&channel, id, from, text, reactions);
-                self.render_channels(widgets, sender);
-                if self.active_channel.as_deref() == Some(channel.as_str()) {
-                    self.render_messages(widgets, sender);
-                }
             }
             Event::TagMsg {
                 from, target, tags, ..
             } => {
                 if let Some((msgid, emoji, add)) = reaction_update(&tags) {
                     self.apply_reaction(&target, &msgid, &emoji, &from, add);
-                    if self.active_channel.as_deref() == Some(target.as_str()) {
-                        self.render_messages(widgets, sender);
-                    }
                 }
                 if let Some(state) = parse_av_state(&tags) {
                     match state.action {
