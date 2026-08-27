@@ -68,6 +68,7 @@ enum Input {
     ToggleCamera,
     React {
         target: String,
+        message_index: usize,
         msgid: String,
         emoji: String,
     },
@@ -454,13 +455,14 @@ impl Component for App {
             }
             Input::React {
                 target,
+                message_index,
                 msgid,
                 emoji,
             } => {
                 let reacted = self
                     .messages
                     .get(&target)
-                    .and_then(|messages| messages.iter().find(|message| message.id == msgid))
+                    .and_then(|messages| messages.get(message_index))
                     .and_then(|message| message.reactions.get(&emoji))
                     .is_some_and(|nicks| {
                         nicks.iter().any(|nick| nick.eq_ignore_ascii_case(&self.nick))
@@ -479,7 +481,7 @@ impl Component for App {
                     });
                 }
                 let nick = self.nick.clone();
-                self.apply_reaction(&target, &msgid, &emoji, &nick, !reacted);
+                self.apply_reaction_at(&target, message_index, &emoji, &nick, !reacted);
                 self.render_messages(widgets, &_sender);
             }
             Input::Tick => {
@@ -922,6 +924,35 @@ impl App {
         }
     }
 
+    fn apply_reaction_at(
+        &mut self,
+        channel: &str,
+        message_index: usize,
+        emoji: &str,
+        nick: &str,
+        add: bool,
+    ) {
+        let Some(message) = self
+            .messages
+            .get_mut(channel)
+            .and_then(|messages| messages.get_mut(message_index))
+        else {
+            return;
+        };
+        if add {
+            message
+                .reactions
+                .entry(emoji.to_owned())
+                .or_default()
+                .insert(nick.to_owned());
+        } else if let Some(nicks) = message.reactions.get_mut(emoji) {
+            nicks.retain(|reactor| !reactor.eq_ignore_ascii_case(nick));
+            if nicks.is_empty() {
+                message.reactions.remove(emoji);
+            }
+        }
+    }
+
     fn render_channels(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_box(&widgets.channel_list);
         for channel in &self.channels {
@@ -972,7 +1003,7 @@ impl App {
         widgets.heading.set_text(channel);
         widgets.compose.set_sensitive(true);
         if let Some(messages) = self.messages.get(channel) {
-            for message in messages {
+            for (message_index, message) in messages.iter().enumerate() {
                 let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
@@ -1005,6 +1036,7 @@ impl App {
                         move |_| {
                             sender.input(Input::React {
                                 target: target.clone(),
+                                message_index,
                                 msgid: msgid.clone(),
                                 emoji: emoji.clone(),
                             })
@@ -1027,6 +1059,7 @@ impl App {
                         move |_, emoji| {
                             sender.input(Input::React {
                                 target: target.clone(),
+                                message_index,
                                 msgid: msgid.clone(),
                                 emoji: emoji.to_owned(),
                             });
