@@ -66,6 +66,7 @@ enum Input {
     ToggleMute,
     ToggleSpeaker,
     ToggleCamera,
+    Viewport(i32),
     React {
         target: String,
         message_index: usize,
@@ -81,7 +82,12 @@ struct Widgets {
     status: gtk::Label,
     heading: gtk::Label,
     channel_list: gtk::Box,
+    channel_scroll: gtk::ScrolledWindow,
+    channel_separator: gtk::Separator,
+    channel_picker: gtk::ComboBoxText,
     user_list: gtk::ListBox,
+    user_scroll: gtk::ScrolledWindow,
+    user_separator: gtk::Separator,
     message_list: gtk::ListBox,
     message_scroll: gtk::ScrolledWindow,
     video_grid: gtk::FlowBox,
@@ -158,6 +164,10 @@ impl Component for App {
         let heading = gtk::Label::new(Some("Chats"));
         heading.add_css_class("title-2");
         header.set_title_widget(Some(&heading));
+        let channel_picker = gtk::ComboBoxText::new();
+        channel_picker.set_tooltip_text(Some("Select channel"));
+        channel_picker.set_visible(false);
+        header.pack_start(&channel_picker);
         let disconnect = gtk::Button::with_label("Disconnect");
         disconnect.add_css_class("flat");
         header.pack_end(&disconnect);
@@ -251,10 +261,12 @@ impl Component for App {
         let layout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         channel_scroll.set_width_request(220);
         layout.append(&channel_scroll);
-        layout.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let channel_separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        layout.append(&channel_separator);
         conversation.set_hexpand(true);
         layout.append(&conversation);
-        layout.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let user_separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        layout.append(&user_separator);
         layout.append(&user_scroll);
 
         shell.append(&status);
@@ -310,6 +322,18 @@ impl Component for App {
             let sender = sender.clone();
             move |_| sender.input(Input::ToggleCamera)
         });
+        channel_picker.connect_changed({
+            let sender = sender.clone();
+            move |picker| {
+                if let Some(channel) = picker.active_text() {
+                    sender.input(Input::SelectChannel(channel.to_string()));
+                }
+            }
+        });
+        root.connect_notify_local(Some("width"), {
+            let sender = sender.clone();
+            move |root, _| sender.input(Input::Viewport(root.width()))
+        });
 
         gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
             sender.input(Input::Tick);
@@ -336,7 +360,12 @@ impl Component for App {
             status,
             heading,
             channel_list,
+            channel_scroll,
+            channel_separator,
+            channel_picker,
             user_list,
+            user_scroll,
+            user_separator,
             message_list,
             message_scroll,
             video_grid,
@@ -454,6 +483,14 @@ impl Component for App {
                     });
                     self.render_call_controls(widgets);
                 }
+            }
+            Input::Viewport(width) => {
+                let mobile = width < 700;
+                widgets.channel_scroll.set_visible(!mobile);
+                widgets.channel_separator.set_visible(!mobile);
+                widgets.user_scroll.set_visible(!mobile);
+                widgets.user_separator.set_visible(!mobile);
+                widgets.channel_picker.set_visible(mobile);
             }
             Input::React {
                 target,
@@ -983,6 +1020,26 @@ impl App {
                 move |_| sender.input(Input::SelectChannel(channel.clone()))
             });
             widgets.channel_list.append(&button);
+        }
+        let picker_count = widgets
+            .channel_picker
+            .model()
+            .map(|model| model.iter_n_children(None) as usize)
+            .unwrap_or(0);
+        if picker_count != self.channels.len() {
+            widgets.channel_picker.remove_all();
+            for channel in &self.channels {
+                widgets.channel_picker.append_text(channel);
+            }
+        }
+        if let Some(index) = self
+            .active_channel
+            .as_ref()
+            .and_then(|active| self.channels.iter().position(|channel| channel == active))
+        {
+            if widgets.channel_picker.active() != Some(index as u32) {
+                widgets.channel_picker.set_active(Some(index as u32));
+            }
         }
     }
 
