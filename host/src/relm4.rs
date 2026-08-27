@@ -87,6 +87,7 @@ struct Widgets {
     channel_list: gtk::ListBox,
     user_list: gtk::ListBox,
     message_list: gtk::ListBox,
+    message_scroll: gtk::ScrolledWindow,
     video_grid: gtk::FlowBox,
     compose: gtk::Entry,
     call_button: gtk::Button,
@@ -342,6 +343,7 @@ impl Component for App {
             channel_list,
             user_list,
             message_list,
+            message_scroll,
             video_grid,
             compose,
             call_button,
@@ -1056,6 +1058,10 @@ impl App {
                 widgets.message_list.append(&row);
             }
         }
+        let adjustment = widgets.message_scroll.vadjustment();
+        gtk::glib::idle_add_local_once(move || {
+            adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+        });
     }
 }
 
