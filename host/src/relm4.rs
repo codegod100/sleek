@@ -92,6 +92,7 @@ struct Widgets {
     mute_button: gtk::Button,
     speaker_button: gtk::Button,
     camera_button: gtk::Button,
+    reaction_bars: HashMap<usize, gtk::Box>,
 }
 
 impl Component for App {
@@ -346,6 +347,7 @@ impl Component for App {
             mute_button,
             speaker_button,
             camera_button,
+            reaction_bars: HashMap::new(),
         };
         ComponentParts { model, widgets }
     }
@@ -482,7 +484,20 @@ impl Component for App {
                 }
                 let nick = self.nick.clone();
                 self.apply_reaction_at(&target, message_index, &emoji, &nick, !reacted);
-                self.render_messages(widgets, &_sender);
+                if let (Some(bar), Some(message)) = (
+                    widgets.reaction_bars.get(&message_index),
+                    self.messages
+                        .get(&target)
+                        .and_then(|messages| messages.get(message_index)),
+                ) {
+                    self.render_reaction_bar(
+                        bar,
+                        &target,
+                        message_index,
+                        message,
+                        &_sender,
+                    );
+                }
             }
             Input::Tick => {
                 let mut refresh_chat = false;
@@ -993,8 +1008,9 @@ impl App {
         }
     }
 
-    fn render_messages(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
+    fn render_messages(&self, widgets: &mut Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.message_list);
+        widgets.reaction_bars.clear();
         let Some(channel) = self.active_channel.as_deref() else {
             widgets.heading.set_text("Chats");
             widgets.compose.set_sensitive(false);
@@ -1025,50 +1041,9 @@ impl App {
                 row.append(&body);
 
                 let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                for (emoji, nicks) in &message.reactions {
-                    let button = gtk::Button::with_label(&format!("{emoji} {}", nicks.len()));
-                    button.add_css_class("flat");
-                    button.connect_clicked({
-                        let sender = sender.clone();
-                        let target = channel.to_owned();
-                        let msgid = message.id.clone();
-                        let emoji = emoji.clone();
-                        move |_| {
-                            sender.input(Input::React {
-                                target: target.clone(),
-                                message_index,
-                                msgid: msgid.clone(),
-                                emoji: emoji.clone(),
-                            })
-                        }
-                    });
-                    reactions.append(&button);
-                }
-                if !message.id.is_empty() {
-                    let picker_button = gtk::MenuButton::builder()
-                        .icon_name("face-smile-symbolic")
-                        .tooltip_text("Add reaction")
-                        .build();
-                    picker_button.add_css_class("flat");
-                    picker_button.add_css_class("circular");
-                    let picker = gtk::EmojiChooser::new();
-                    picker.connect_emoji_picked({
-                        let sender = sender.clone();
-                        let target = channel.to_owned();
-                        let msgid = message.id.clone();
-                        move |_, emoji| {
-                            sender.input(Input::React {
-                                target: target.clone(),
-                                message_index,
-                                msgid: msgid.clone(),
-                                emoji: emoji.to_owned(),
-                            });
-                        }
-                    });
-                    picker_button.set_popover(Some(&picker));
-                    reactions.append(&picker_button);
-                }
+                self.render_reaction_bar(&reactions, channel, message_index, message, sender);
                 row.append(&reactions);
+                widgets.reaction_bars.insert(message_index, reactions);
                 widgets.message_list.append(&row);
             }
         }
@@ -1076,6 +1051,60 @@ impl App {
         gtk::glib::idle_add_local_once(move || {
             adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
         });
+    }
+
+    fn render_reaction_bar(
+        &self,
+        reactions: &gtk::Box,
+        channel: &str,
+        message_index: usize,
+        message: &ChatLine,
+        sender: &ComponentSender<Self>,
+    ) {
+        clear_box(reactions);
+        for (emoji, nicks) in &message.reactions {
+            let button = gtk::Button::with_label(&format!("{emoji} {}", nicks.len()));
+            button.add_css_class("flat");
+            button.connect_clicked({
+                let sender = sender.clone();
+                let target = channel.to_owned();
+                let msgid = message.id.clone();
+                let emoji = emoji.clone();
+                move |_| {
+                    sender.input(Input::React {
+                        target: target.clone(),
+                        message_index,
+                        msgid: msgid.clone(),
+                        emoji: emoji.clone(),
+                    })
+                }
+            });
+            reactions.append(&button);
+        }
+        if !message.id.is_empty() {
+            let picker_button = gtk::MenuButton::builder()
+                .icon_name("face-smile-symbolic")
+                .tooltip_text("Add reaction")
+                .build();
+            picker_button.add_css_class("flat");
+            picker_button.add_css_class("circular");
+            let picker = gtk::EmojiChooser::new();
+            picker.connect_emoji_picked({
+                let sender = sender.clone();
+                let target = channel.to_owned();
+                let msgid = message.id.clone();
+                move |_, emoji| {
+                    sender.input(Input::React {
+                        target: target.clone(),
+                        message_index,
+                        msgid: msgid.clone(),
+                        emoji: emoji.to_owned(),
+                    });
+                }
+            });
+            picker_button.set_popover(Some(&picker));
+            reactions.append(&picker_button);
+        }
     }
 }
 
