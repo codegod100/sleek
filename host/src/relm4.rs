@@ -932,13 +932,12 @@ impl App {
     fn render_channels(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.channel_list);
         for channel in &self.channels {
-            let button = gtk::Button::with_label(channel);
+            let button = gtk::ToggleButton::with_label(channel);
             button.set_has_frame(false);
             button.set_halign(gtk::Align::Fill);
+            button.set_hexpand(true);
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
-            if selected {
-                button.add_css_class("suggested-action");
-            }
+            button.set_active(selected);
             button.connect_clicked({
                 let sender = sender.clone();
                 let channel = channel.clone();
@@ -991,7 +990,12 @@ impl App {
                 author.add_css_class("heading");
                 let body = gtk::Label::new(Some(&message.text));
                 body.set_halign(gtk::Align::Start);
+                body.set_xalign(0.0);
+                body.set_hexpand(true);
                 body.set_wrap(true);
+                body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                body.set_width_chars(1);
+                body.set_max_width_chars(80);
                 body.set_selectable(true);
                 row.append(&author);
                 row.append(&body);
@@ -1017,11 +1021,12 @@ impl App {
                 }
                 if !message.id.is_empty() {
                     let picker_button = gtk::MenuButton::builder()
-                        .label("😊")
+                        .icon_name("face-smile-symbolic")
                         .tooltip_text("Add reaction")
                         .build();
                     picker_button.add_css_class("flat");
-                    let picker = gtk::Popover::new();
+                    picker_button.add_css_class("circular");
+                    let picker = gtk::Popover::builder().autohide(true).build();
                     let grid = gtk::Grid::builder()
                         .column_spacing(4)
                         .row_spacing(4)
@@ -1030,9 +1035,11 @@ impl App {
                         .margin_start(8)
                         .margin_end(8)
                         .build();
+                    grid.set_tooltip_text(Some("Choose a reaction"));
                     for (index, emoji) in REACTION_EMOJI.iter().enumerate() {
                         let button = gtk::Button::with_label(emoji);
                         button.add_css_class("flat");
+                        button.add_css_class("circular");
                         button.connect_clicked({
                             let sender = sender.clone();
                             let target = channel.to_owned();
