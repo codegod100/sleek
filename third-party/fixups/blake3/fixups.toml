@@ -1,0 +1,7 @@
+buildscript.run = false
+features = ["pure"]
+cfgs = [
+    "blake3_sse2_rust",
+    "blake3_sse41_rust",
+    "blake3_avx2_rust",
+]

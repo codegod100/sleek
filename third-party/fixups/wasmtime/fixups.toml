@@ -1,1 +1,10 @@
-buildscript.run = true
+buildscript.run = false
+
+[[cxx_library]]
+name = "helpers"
+srcs = ["src/runtime/vm/helpers.c"]
+compiler_flags = [
+    "-DCFG_TARGET_OS_linux",
+    "-DCFG_TARGET_ARCH_x86_64",
+    "-DVERSIONED_SUFFIX=_29_0_1",
+]

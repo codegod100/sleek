@@ -58,12 +58,12 @@ def _cxx_zig_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     # `--target=<llvm-triple>` has to be filtered out and re-supplied by
     # the filter script instead of laid down as a flag here that cc-rs's
     # later, conflicting one would just override.
-    if ctx.attrs.target:
-        zig_cc = cmd_args(ctx.attrs._target_filter, zig, "cc", ctx.attrs.target)
-        zig_cxx = cmd_args(ctx.attrs._target_filter, zig, "c++", ctx.attrs.target)
-    else:
-        zig_cc = cmd_args(zig, "cc")
-        zig_cxx = cmd_args(zig, "c++")
+    # Keep compilation hermetic. In particular, cargo build scripts execute in
+    # a deliberately sparse environment where an unqualified `cc`/`c++` is not
+    # guaranteed to exist on either developer machines or remote workers.
+    zig_cc = cmd_args(ctx.attrs._zig_cc, zig, "cc")
+    zig_cxx = cmd_args(ctx.attrs._zig_cc, zig, "c++")
+    target_flags = cmd_args()
     zig_ar = cmd_args(zig, "ar")
     zig_ranlib = cmd_args(zig, "ranlib")
     return [ctx.attrs.distribution[DefaultInfo]] + cxx_toolchain_infos(
@@ -71,17 +71,21 @@ def _cxx_zig_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
         platform_name = dist.arch,
         c_compiler_info = CCompilerInfo(
             compiler = RunInfo(args = zig_cc),
-            compiler_type = "clang",
+            # cc-rs treats "clang" as a cross compiler and appends the Rust
+            # target `x86_64-unknown-linux-gnu`, which Zig intentionally does
+            # not accept (`x86_64-linux-gnu` is its spelling). The GCC command
+            # shape is compatible and avoids that invalid synthetic flag.
+            compiler_type = "gcc",
             # No `-target` here — zig_cc already carries it (see above);
             # duplicating it would just mean zig_target_filter.sh strips
             # its own re-add back out again as "yet another stray -target".
-            compiler_flags = cmd_args(ctx.attrs.c_compiler_flags),
+            compiler_flags = cmd_args(target_flags, ctx.attrs.c_compiler_flags),
             preprocessor_flags = cmd_args(ctx.attrs.c_preprocessor_flags),
         ),
         cxx_compiler_info = CxxCompilerInfo(
             compiler = RunInfo(args = zig_cxx),
-            compiler_type = "clang",
-            compiler_flags = cmd_args(ctx.attrs.cxx_compiler_flags),
+            compiler_type = "gcc",
+            compiler_flags = cmd_args(target_flags, ctx.attrs.cxx_compiler_flags),
             preprocessor_flags = cmd_args(ctx.attrs.cxx_preprocessor_flags),
         ),
         linker_info = LinkerInfo(
@@ -147,6 +151,7 @@ cxx_zig_toolchain = rule(
         "target": attrs.option(attrs.string(), default = None),
         "_cxx_internal_tools": attrs.default_only(attrs.dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
         "_target_filter": attrs.default_only(attrs.source(default = "toolchains//:zig_target_filter.sh")),
+        "_zig_cc": attrs.default_only(attrs.source(default = "toolchains//:zig_cc.py")),
     },
     is_toolchain_rule = True,
 )

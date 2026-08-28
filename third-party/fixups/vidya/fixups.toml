@@ -1,0 +1,4 @@
+extra_srcs = [
+    "assets/vidya-symbols.ttf",
+    "assets/emoji/twemoji-72x72.zip",
+]
