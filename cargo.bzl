@@ -83,7 +83,7 @@ def _srcs():
             "android/target/**",
         ],
     ) + [
-        "//third-party:patched-fork-srcs",
+        "//:patched-fork-srcs",
     ]
 
 # `//third-party:patched-fork-srcs` (see _srcs()) is a *target*, not a raw
@@ -99,7 +99,7 @@ def _srcs():
 # yet (that's the whole bug this works around), so the copy is what
 # actually populates it. Shared by every cargo-backed genrule below since
 # they all build off the same [patch]-carrying Cargo.tomls.
-_STAGE_PATCHED_FORKS = 'mkdir -p third-party\ncp -rn "$(location //third-party:patched-fork-srcs)"/* third-party/\n'
+_STAGE_PATCHED_FORKS = 'mkdir -p third-party\ncp -rn "$(location //:patched-fork-srcs)"/* third-party/\n'
 
 def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = None, default_outs = None, executable = False):
     """A genrule that shells out to `cargo build` (via `pixi run`) and copies its artifact(s) to $OUT.

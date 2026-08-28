@@ -51,6 +51,25 @@ system_python_bootstrap_toolchain(
     visibility = ["PUBLIC"],
 )
 
+http_archive(
+    name = "zstd-src",
+    urls = ["https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"],
+    sha256 = "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+    strip_prefix = "zstd-1.5.7",
+)
+
+# GNU tar delegates .tar.zst decoding to a `zstd` executable. Build that small
+# bootstrap tool from source so conda package extraction is hermetic on remote
+# workers instead of depending on the worker image's PATH.
+genrule(
+    name = "zstd",
+    srcs = [":zstd-src"],
+    out = "zstd",
+    cmd = "mkdir zstd-build && cp -R $(location :zstd-src)/. zstd-build/ && make -C zstd-build/programs -j2 zstd && cp zstd-build/programs/zstd $OUT",
+    executable = True,
+    visibility = ["PUBLIC"],
+)
+
 download_zig_distribution(
     name = "zig-dist",
     version = "0.14.0",

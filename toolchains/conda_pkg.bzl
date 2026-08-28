@@ -35,7 +35,7 @@ def conda_pkg(name, url, sha256, visibility = None):
         cmd = (
             "set -euo pipefail; " +
             "payload=$(location :{a})/pkg-*.tar.zst; ".format(a = archive_name) +
-            "mkdir -p $OUT && tar --zstd -xf $payload -C $OUT; " +
+            "mkdir -p $OUT && tar --use-compress-program=$(exe toolchains//:zstd) -xf $payload -C $OUT; " +
             # \$(...) (not $(...)): buck2 itself parses genrule cmd strings
             # for $(...) macros — has to be escaped to reach the shell as a
             # literal command substitution instead.

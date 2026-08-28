@@ -7,7 +7,12 @@
 ## `reindeer vendor` first, if Cargo.lock changed) after any Cargo.toml/
 ## Cargo.lock edit — third-party/BUCK is generated, not hand-maintained.
 manifest_path = "host/Cargo.toml"
-third_party_dir = "third-party"
+# Generate in the repository-root package so Reindeer can model Cargo path
+# dependencies (`android`, `patched-crates/freeq`, and `patched-crates/vidya`)
+# as native targets. A BUCK package cannot reference source files owned by a
+# parent package, which made the old third-party/BUCK graph inherently unable
+# to represent these crates.
+third_party_dir = "."
 
 # Cargo always injects CARGO_PKG_* (and friends) at compile time when
 # building a crate's build.rs — including for the build.rs binary itself.
@@ -50,10 +55,10 @@ load("@prelude//rust:cargo_package.bzl", "cargo")
 filegroup(
     name = "patched-fork-srcs",
     srcs = glob([
-        "cpal/**",
-        "egui-winit/**",
-        "egui_glow/**",
-        "khronos_api/**",
+        "third-party/cpal/**",
+        "third-party/egui-winit/**",
+        "third-party/egui_glow/**",
+        "third-party/khronos_api/**",
     ]),
     visibility = ["PUBLIC"],
 )

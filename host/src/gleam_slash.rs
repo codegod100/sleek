@@ -6,7 +6,10 @@ use wasmtime::{Caller, Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::gleam_string::{self, HostStringArena};
 
-const SLASH_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gleam_slash.wasm"));
+// Keep the checked-in guest as a normal Buck input. Cargo's build.rs copies
+// this file into OUT_DIR, but native Buck targets intentionally have no Cargo
+// build-script phase.
+const SLASH_WASM: &[u8] = include_bytes!("../gleam/slash/prebuilt/gleam_slash.wasm");
 
 /// Mirrors `sleek::slash::SlashCommand` without depending on the android crate
 /// layout from build scripts. Converted at the host boundary.

@@ -1,7 +1,0 @@
-# android/ (path dep) — stays an opaque cargo_genrule dependency
-# (//:sleek-android-lib) rather than a native target: its own deps
-# (vidya, freeq-sdk — sibling repos entirely outside this repo) can't be
-# reached from third-party/BUCK, and everything only reachable through this
-# subtree (iroh, tokio, moq, web-transport) is correctly absent from this
-# generated file as a result — it stays handled inside that genrule instead.
-omit_targets = ["sleek"]
