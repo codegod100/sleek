@@ -11,4 +11,7 @@ if [[ -f "${repo_root}/.env" ]]; then
   set +a
 fi
 
-exec dotslash "${repo_root}/buck2.dotslash" "$@"
+# Keep this repository on a daemon started by this wrapper. A daemon launched
+# earlier by a system `buck2` binary retains its original environment and
+# therefore cannot expand credentials loaded from this repository's `.env`.
+exec dotslash "${repo_root}/buck2.dotslash" --isolation-dir sleek-buildbuddy "$@"
