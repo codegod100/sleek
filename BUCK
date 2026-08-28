@@ -38,6 +38,7 @@ git_fetch(
     name = "iroh-c398ca6ee96438f7.git",
     repo = "https://github.com/n0-computer/iroh",
     rev = "8af8370b567d9e9a89aaf25929b327a6a5b96de1",
+    sub_targets = ["iroh"],
     visibility = [],
 )
 
@@ -675,6 +676,8 @@ buildscript_run(
         "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
         "PKG_CONFIG_PATH": "$(location toolchains//:alsa-lib)/lib/pkgconfig",
     },
+    rustc_link_lib = True,
+    rustc_link_search = True,
     version = "0.4.0",
 )
 
@@ -1779,7 +1782,8 @@ buildscript_run(
     buildscript_rule = ":aws-lc-sys-0.43-build-script-main",
     env = {
         "CRATE_CC_NO_DEFAULTS": "1",
-        "SLEEK_AWSLC_FIX": "1",
+        "PYTHONPATH": "buck-out/sleek-buildbuddy/art/toolchains/a8ac7ec86a6bee54/__python-compat__/out/python-compat",
+        "SLEEK_PYTHON_COMPAT": "$(location toolchains//:python-compat)",
         "CARGO_MANIFEST_LINKS": "aws_lc_0_43_0",
         "CARGO_PKG_AUTHORS": "AWS-LC",
         "CARGO_PKG_DESCRIPTION": "AWS-LC is a general-purpose cryptographic library maintained by the AWS Cryptography team for AWS and their customers. It іs based on code from the Google BoringSSL project and the OpenSSL project.",
@@ -1793,6 +1797,8 @@ buildscript_run(
         "CARGO_PKG_VERSION_PRE": "",
     },
     features = ["prebuilt-nasm"],
+    rustc_link_lib = True,
+    rustc_link_search = True,
     version = "0.43.0",
 )
 
@@ -13352,6 +13358,7 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_MINOR": "97",
         "CARGO_PKG_VERSION_PATCH": "0",
         "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :iroh-0.97-build-script-run[out_dir])",
     },
     features = [
         "fast-apple-datapath",
@@ -13362,6 +13369,7 @@ cargo.rust_library(
     named_deps = {
         "webpki_types": ":rustls-pki-types-1",
     },
+    rustc_flags = ["@$(location :iroh-0.97-build-script-run[rustc_flags])"],
     visibility = [],
     deps = [
         ":backon-1",
@@ -13407,6 +13415,65 @@ cargo.rust_library(
         ":url-2",
         ":webpki-roots-1",
     ],
+)
+
+cargo.rust_binary(
+    name = "iroh-0.97-build-script-build",
+    srcs = [":iroh-c398ca6ee96438f7.git"],
+    crate = "build_script_build",
+    crate_root = "iroh-c398ca6ee96438f7/iroh/build.rs",
+    edition = "2024",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "iroh-c398ca6ee96438f7",
+        "CARGO_PKG_AUTHORS": "dignifiedquire <me@dignifiedquire.com>:n0 team",
+        "CARGO_PKG_DESCRIPTION": "p2p quic connections dialed by public key",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "iroh",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/n0-computer/iroh",
+        "CARGO_PKG_RUST_VERSION": "1.89",
+        "CARGO_PKG_VERSION": "0.97.0",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "97",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "fast-apple-datapath",
+        "metrics",
+        "portmapper",
+        "tls-aws-lc-rs",
+    ],
+    visibility = [],
+    deps = [":cfg_aliases-0.2"],
+)
+
+buildscript_run(
+    name = "iroh-0.97-build-script-run",
+    package_name = "iroh",
+    buildscript_rule = ":iroh-0.97-build-script-build",
+    env = {
+        "CARGO_PKG_AUTHORS": "dignifiedquire <me@dignifiedquire.com>:n0 team",
+        "CARGO_PKG_DESCRIPTION": "p2p quic connections dialed by public key",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/n0-computer/iroh",
+        "CARGO_PKG_RUST_VERSION": "1.89",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "97",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    features = [
+        "fast-apple-datapath",
+        "metrics",
+        "portmapper",
+        "tls-aws-lc-rs",
+    ],
+    manifest_dir = ":iroh-c398ca6ee96438f7.git[iroh]",
+    version = "0.97.0",
 )
 
 cargo.rust_library(
@@ -14945,13 +15012,15 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
-        "CC_ENABLE_DEBUG_OUTPUT": "1",
         "CRATE_CC_NO_DEFAULTS": "1",
         "LD_LIBRARY_PATH": "$(location toolchains//:libclang)",
         "LIBCLANG_PATH": "$(location toolchains//:libclang)",
         "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
         "PKG_CONFIG_PATH": "$(location toolchains//:pipewire)/lib/pkgconfig",
+        "PYTHONPATH": "$(location toolchains//:python-compat)",
     },
+    rustc_link_lib = True,
+    rustc_link_search = True,
     version = "0.9.2",
 )
 
@@ -15967,6 +16036,11 @@ cargo.rust_library(
         "h264",
         "opus",
     ],
+    rustc_flags = [
+        "--cfg=any_audio_codec",
+        "--cfg=any_video_codec",
+        "--cfg=any_codec",
+    ],
     visibility = [],
     deps = [
         ":anyhow-1",
@@ -16314,6 +16388,41 @@ cargo.rust_library(
     ],
     visibility = [],
     deps = [":getrandom-0.2"],
+)
+
+http_archive(
+    name = "nasm-rs-0.3.2.crate",
+    sha256 = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149",
+    strip_prefix = "nasm-rs-0.3.2",
+    urls = ["https://static.crates.io/crates/nasm-rs/0.3.2/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "nasm-rs-0.3",
+    srcs = [":nasm-rs-0.3.2.crate"],
+    crate = "nasm_rs",
+    crate_root = "nasm-rs-0.3.2.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "nasm_rs",
+        "CARGO_CRATE_NAME": "nasm_rs",
+        "CARGO_MANIFEST_DIR": "nasm-rs-0.3.2.crate",
+        "CARGO_PKG_AUTHORS": "Allen Goodman <allen@goodman.io>:Gavin Massey <mdk@mystacktrace.org>:Jerome Rasky <jyrome.112@gmail.com>:Justinas Stankevičius <justinas@users.noreply.github.com>:Kornel Lesinski <kornel@geekhood.net>",
+        "CARGO_PKG_DESCRIPTION": "Run NASM during your Cargo build.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/medek/nasm-rs",
+        "CARGO_PKG_NAME": "nasm-rs",
+        "CARGO_PKG_README": "README.markdown",
+        "CARGO_PKG_REPOSITORY": "https://github.com/medek/nasm-rs",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "0.3.2",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "3",
+        "CARGO_PKG_VERSION_PATCH": "2",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+    deps = [":log-0.4"],
 )
 
 http_archive(
@@ -17978,9 +18087,68 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "7",
         "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :openh264-sys2-0.9-build-script-run[out_dir])",
+    },
+    features = ["source"],
+    rustc_flags = ["@$(location :openh264-sys2-0.9-build-script-run[rustc_flags])"],
+    visibility = [],
+)
+
+cargo.rust_binary(
+    name = "openh264-sys2-0.9-build-script-build",
+    srcs = [":openh264-sys2-0.9.7.crate"],
+    crate = "build_script_build",
+    crate_root = "openh264-sys2-0.9.7.crate/build.rs",
+    edition = "2024",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "openh264-sys2-0.9.7.crate",
+        "CARGO_PKG_AUTHORS": "Ralf Biedert <rb@xr.io>",
+        "CARGO_PKG_DESCRIPTION": "Low-level bindings for OpenH264.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "openh264-sys2",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/ralfbiedert/openh264-rs",
+        "CARGO_PKG_RUST_VERSION": "1.85",
+        "CARGO_PKG_VERSION": "0.9.7",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "9",
+        "CARGO_PKG_VERSION_PATCH": "7",
+        "CARGO_PKG_VERSION_PRE": "",
     },
     features = ["source"],
     visibility = [],
+    deps = [
+        ":cc-1",
+        ":nasm-rs-0.3",
+        ":walkdir-2",
+    ],
+)
+
+buildscript_run(
+    name = "openh264-sys2-0.9-build-script-run",
+    package_name = "openh264-sys2",
+    buildscript_rule = ":openh264-sys2-0.9-build-script-build",
+    env = {
+        "CARGO_PKG_AUTHORS": "Ralf Biedert <rb@xr.io>",
+        "CARGO_PKG_DESCRIPTION": "Low-level bindings for OpenH264.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/ralfbiedert/openh264-rs",
+        "CARGO_PKG_RUST_VERSION": "1.85",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "9",
+        "CARGO_PKG_VERSION_PATCH": "7",
+        "CARGO_PKG_VERSION_PRE": "",
+        "CRATE_CC_NO_DEFAULTS": "1",
+        "PYTHONPATH": "buck-out/sleek-buildbuddy/art/toolchains/a8ac7ec86a6bee54/__python-compat__/out/python-compat",
+        "SLEEK_PYTHON_COMPAT": "$(location toolchains//:python-compat)",
+    },
+    features = ["source"],
+    rustc_link_lib = True,
+    rustc_link_search = True,
+    version = "0.9.7",
 )
 
 http_archive(
@@ -19195,7 +19363,10 @@ buildscript_run(
         "LIBCLANG_PATH": "$(location toolchains//:libclang)",
         "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
         "PKG_CONFIG_PATH": "$(location toolchains//:pipewire)/lib/pkgconfig",
+        "PYTHONPATH": "$(location toolchains//:python-compat)",
     },
+    rustc_link_lib = True,
+    rustc_link_search = True,
     version = "0.9.2",
 )
 
@@ -21785,6 +21956,45 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_MINOR": "17",
         "CARGO_PKG_VERSION_PATCH": "14",
         "CARGO_PKG_VERSION_PRE": "",
+        "OUT_DIR": "$(location :ring-0.17-build-script-run[out_dir])",
+    },
+    features = [
+        "alloc",
+        "default",
+        "dev_urandom_fallback",
+        "std",
+    ],
+    rustc_flags = ["@$(location :ring-0.17-build-script-run[rustc_flags])"],
+    visibility = [],
+    deps = [
+        ":cfg-if-1",
+        ":getrandom-0.2",
+        ":untrusted-0.9",
+    ],
+)
+
+cargo.rust_binary(
+    name = "ring-0.17-build-script-build",
+    srcs = [":ring-0.17.14.crate"],
+    crate = "build_script_build",
+    crate_root = "ring-0.17.14.crate/build.rs",
+    edition = "2021",
+    env = {
+        "CARGO_BIN_NAME": "build-script-build",
+        "CARGO_CRATE_NAME": "build_script_build",
+        "CARGO_MANIFEST_DIR": "ring-0.17.14.crate",
+        "CARGO_PKG_AUTHORS": "",
+        "CARGO_PKG_DESCRIPTION": "An experiment.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_NAME": "ring",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/briansmith/ring",
+        "CARGO_PKG_RUST_VERSION": "1.66.0",
+        "CARGO_PKG_VERSION": "0.17.14",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "17",
+        "CARGO_PKG_VERSION_PATCH": "14",
+        "CARGO_PKG_VERSION_PRE": "",
     },
     features = [
         "alloc",
@@ -21793,11 +22003,38 @@ cargo.rust_library(
         "std",
     ],
     visibility = [],
-    deps = [
-        ":cfg-if-1",
-        ":getrandom-0.2",
-        ":untrusted-0.9",
+    deps = [":cc-1"],
+)
+
+buildscript_run(
+    name = "ring-0.17-build-script-run",
+    package_name = "ring",
+    buildscript_rule = ":ring-0.17-build-script-build",
+    env = {
+        "CARGO_MANIFEST_LINKS": "ring_core_0_17_14_",
+        "CARGO_PKG_AUTHORS": "",
+        "CARGO_PKG_DESCRIPTION": "An experiment.",
+        "CARGO_PKG_HOMEPAGE": "",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/briansmith/ring",
+        "CARGO_PKG_RUST_VERSION": "1.66.0",
+        "CARGO_PKG_VERSION_MAJOR": "0",
+        "CARGO_PKG_VERSION_MINOR": "17",
+        "CARGO_PKG_VERSION_PATCH": "14",
+        "CARGO_PKG_VERSION_PRE": "",
+        "CRATE_CC_NO_DEFAULTS": "1",
+        "PYTHONPATH": "buck-out/sleek-buildbuddy/art/toolchains/a8ac7ec86a6bee54/__python-compat__/out/python-compat",
+        "SLEEK_PYTHON_COMPAT": "$(location toolchains//:python-compat)",
+    },
+    features = [
+        "alloc",
+        "default",
+        "dev_urandom_fallback",
+        "std",
     ],
+    rustc_link_lib = True,
+    rustc_link_search = True,
+    version = "0.17.14",
 )
 
 http_archive(
@@ -22931,6 +23168,11 @@ cargo.rust_library(
         "hang",
         "opus",
     ],
+    rustc_flags = [
+        "--cfg=any_audio_codec",
+        "--cfg=any_video_codec",
+        "--cfg=any_codec",
+    ],
     visibility = [],
     deps = [
         ":anyhow-1",
@@ -23024,6 +23266,40 @@ cargo.rust_library(
     ],
     visibility = [],
     deps = [":bytemuck-1"],
+)
+
+http_archive(
+    name = "same-file-1.0.6.crate",
+    sha256 = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502",
+    strip_prefix = "same-file-1.0.6",
+    urls = ["https://static.crates.io/crates/same-file/1.0.6/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "same-file-1",
+    srcs = [":same-file-1.0.6.crate"],
+    crate = "same_file",
+    crate_root = "same-file-1.0.6.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "same_file",
+        "CARGO_CRATE_NAME": "same_file",
+        "CARGO_MANIFEST_DIR": "same-file-1.0.6.crate",
+        "CARGO_PKG_AUTHORS": "Andrew Gallant <jamslam@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "A simple crate for determining whether two file paths point to the same file.\n",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/BurntSushi/same-file",
+        "CARGO_PKG_NAME": "same-file",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/BurntSushi/same-file",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "1.0.6",
+        "CARGO_PKG_VERSION_MAJOR": "1",
+        "CARGO_PKG_VERSION_MINOR": "0",
+        "CARGO_PKG_VERSION_PATCH": "6",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
 )
 
 http_archive(
@@ -24552,6 +24828,7 @@ cargo.rust_library(
         "android/src/ui/settings.rs",
         "android/src/ui/widgets.rs",
         "android/src/v4l2cam.rs",
+        "assets/icons/uk.nandi.sleek-256.png",
     ],
     crate = "sleek",
     crate_root = "android/src/lib.rs",
@@ -29110,6 +29387,41 @@ cargo.rust_library(
 )
 
 http_archive(
+    name = "walkdir-2.5.0.crate",
+    sha256 = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b",
+    strip_prefix = "walkdir-2.5.0",
+    urls = ["https://static.crates.io/crates/walkdir/2.5.0/download"],
+    visibility = [],
+)
+
+cargo.rust_library(
+    name = "walkdir-2",
+    srcs = [":walkdir-2.5.0.crate"],
+    crate = "walkdir",
+    crate_root = "walkdir-2.5.0.crate/src/lib.rs",
+    edition = "2018",
+    env = {
+        "CARGO_BIN_NAME": "walkdir",
+        "CARGO_CRATE_NAME": "walkdir",
+        "CARGO_MANIFEST_DIR": "walkdir-2.5.0.crate",
+        "CARGO_PKG_AUTHORS": "Andrew Gallant <jamslam@gmail.com>",
+        "CARGO_PKG_DESCRIPTION": "Recursively walk a directory.",
+        "CARGO_PKG_HOMEPAGE": "https://github.com/BurntSushi/walkdir",
+        "CARGO_PKG_NAME": "walkdir",
+        "CARGO_PKG_README": "README.md",
+        "CARGO_PKG_REPOSITORY": "https://github.com/BurntSushi/walkdir",
+        "CARGO_PKG_RUST_VERSION": "",
+        "CARGO_PKG_VERSION": "2.5.0",
+        "CARGO_PKG_VERSION_MAJOR": "2",
+        "CARGO_PKG_VERSION_MINOR": "5",
+        "CARGO_PKG_VERSION_PATCH": "0",
+        "CARGO_PKG_VERSION_PRE": "",
+    },
+    visibility = [],
+    deps = [":same-file-1"],
+)
+
+http_archive(
     name = "want-0.3.1.crate",
     sha256 = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e",
     strip_prefix = "want-0.3.1",
@@ -32608,6 +32920,23 @@ cargo.rust_binary(
     crate = "sleek",
     crate_root = "host/src/relm4.rs",
     edition = "2021",
+    linker_flags = [
+        "-L$(location toolchains//:pipewire)/lib",
+        "-L$(location toolchains//:alsa-lib)/lib",
+        "-L/home/linuxbrew/.linuxbrew/lib",
+        "-ladwaita-1",
+        "-lgtk-4",
+        "-lpangocairo-1.0",
+        "-lpango-1.0",
+        "-lharfbuzz",
+        "-lgdk_pixbuf-2.0",
+        "-lcairo-gobject",
+        "-lcairo",
+        "-lgraphene-1.0",
+        "-lgio-2.0",
+        "-lgobject-2.0",
+        "-lglib-2.0",
+    ],
     env = {
         "CARGO_BIN_NAME": "sleek",
         "CARGO_CRATE_NAME": "sleek",
@@ -32630,6 +32959,15 @@ alias(
     name = "sleek",
     actual = ":sleek-host",
 )
+
+
+
+
+
+
+
+
+
 
 
 

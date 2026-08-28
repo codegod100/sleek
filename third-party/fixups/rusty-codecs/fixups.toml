@@ -1,0 +1,8 @@
+# These are exactly the cfgs emitted by build.rs for the enabled h264 + opus
+# features. The git workspace's implicit build script is not represented in
+# its Cargo package metadata, so Reindeer cannot generate a buildscript target.
+rustc_flags = [
+    "--cfg=any_audio_codec",
+    "--cfg=any_video_codec",
+    "--cfg=any_codec",
+]

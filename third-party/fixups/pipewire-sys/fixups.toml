@@ -9,4 +9,6 @@
 overlay = "overlay"
 
 [buildscript.run]
-env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:pipewire)/lib/pkgconfig", LIBCLANG_PATH = "$(location toolchains//:libclang)", LD_LIBRARY_PATH = "$(location toolchains//:libclang)", BINDGEN_EXTRA_CLANG_ARGS = "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include" }
+env = { PYTHONPATH = "$(location toolchains//:python-compat)", PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:pipewire)/lib/pkgconfig", LIBCLANG_PATH = "$(location toolchains//:libclang)", LD_LIBRARY_PATH = "$(location toolchains//:libclang)", BINDGEN_EXTRA_CLANG_ARGS = "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include" }
+rustc_link_lib = true
+rustc_link_search = true

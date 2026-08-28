@@ -1,0 +1,8 @@
+# These cfgs are normally emitted by moq-media's build.rs after inspecting the
+# enabled rusty-codecs features. Reindeer's git-workspace metadata does not
+# expose that implicit build script.
+rustc_flags = [
+    "--cfg=any_audio_codec",
+    "--cfg=any_video_codec",
+    "--cfg=any_codec",
+]

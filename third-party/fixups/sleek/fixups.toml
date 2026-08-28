@@ -1,0 +1,3 @@
+extra_srcs = [
+    "../assets/icons/uk.nandi.sleek-256.png",
+]

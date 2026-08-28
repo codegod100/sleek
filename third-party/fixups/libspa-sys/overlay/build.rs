@@ -2,6 +2,10 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    if let Ok(python_path) = env::var("PYTHONPATH") {
+        let absolute = std::fs::canonicalize(python_path).expect("resolve PYTHONPATH");
+        env::set_var("PYTHONPATH", absolute);
+    }
     let libs = system_deps::Config::new()
         .probe()
         .expect("Cannot find libraries");
@@ -67,10 +71,10 @@ typedef __UINTPTR_TYPE__ uintptr_t;
     .expect("add standard integer types to generated wrappers");
 
     const FILES: &[&str] = &["src/type-info.c"];
-    let cc_files = &[PathBuf::from(FILES[0]), static_fns];
+    let cc_files = &[PathBuf::from(FILES[0]), static_fns.clone()];
     let mut cc = cc::Build::new();
     cc.files(cc_files);
-    cc.include(env!("CARGO_MANIFEST_DIR"));
+    cc.include(".");
     cc.includes(libs.all_include_paths());
     cc.flag("-target");
     cc.flag("x86_64-linux-gnu");

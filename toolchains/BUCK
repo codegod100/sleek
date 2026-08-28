@@ -37,6 +37,20 @@ export_file(
     visibility = [],
 )
 
+export_file(
+    name = "sitecustomize.py",
+    src = "python_compat/sitecustomize.py",
+    visibility = [],
+)
+
+genrule(
+    name = "python-compat",
+    srcs = [":sitecustomize.py"],
+    out = "python-compat",
+    cmd = "mkdir -p $OUT && cp $(location :sitecustomize.py) $OUT/sitecustomize.py",
+    visibility = ["PUBLIC"],
+)
+
 rust_dist_sysroot(
     name = "rust-sysroot",
     visibility = [],

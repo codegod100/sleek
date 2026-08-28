@@ -31,6 +31,31 @@ while :; do
     (( changed )) || break
 done
 
+# Remote workers and developer machines can expose different CPU feature sets.
+# Never let Zig select its host CPU: artifacts produced remotely must run on the
+# x86-64 baseline used by the Buck platform. Drop cc-rs/Buck target overrides;
+# leaving the OS target native preserves system-library discovery for GTK while
+# `-mcpu=baseline` keeps generated code portable.
+filtered=()
+skip_next=0
+for arg in "${args[@]}"; do
+    if (( skip_next )); then
+        skip_next=0
+        continue
+    fi
+    case "$arg" in
+        -target|--target)
+            skip_next=1
+            ;;
+        -target=*|--target=*)
+            ;;
+        *)
+            filtered+=("$arg")
+            ;;
+    esac
+done
+args=("-mcpu=baseline" "${filtered[@]}")
+
 "$zig" "$subcommand" "${args[@]}" && exit 0
 status=$?
 echo "zig $subcommand failed; retrying verbosely" >&2

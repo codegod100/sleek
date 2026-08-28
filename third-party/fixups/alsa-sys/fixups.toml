@@ -6,3 +6,5 @@
 # prefix= rewritten.
 [buildscript.run]
 env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:alsa-lib)/lib/pkgconfig" }
+rustc_link_lib = true
+rustc_link_search = true
