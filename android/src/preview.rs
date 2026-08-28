@@ -4,6 +4,7 @@
 //! video URLs (`.mp4`/`.webm`/…) get an inline video card; other http(s) links
 //! get an Open Graph card (title/description/thumb).
 
+use anyhow::{Context, Result, bail};
 use freeq_sdk::media::{LinkPreview, MediaAttachment};
 use std::collections::HashMap;
 
@@ -16,6 +17,28 @@ pub const MAX_IMAGE_DIM: u32 = 720;
 /// Downscale long edge for the full-screen lightbox (pixels). Much larger than
 /// the chat thumb so the zoomed view is sharp; still capped to bound memory.
 pub const MAX_FULL_IMAGE_DIM: u32 = 4096;
+
+/// Download an image preview with the same size limit used by the egui client.
+pub async fn fetch_image_preview(url: &str) -> Result<Vec<u8>> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("image preview client")?
+        .get(url)
+        .send()
+        .await
+        .context("image preview request")?
+        .error_for_status()
+        .context("image preview response")?;
+    if response.content_length().is_some_and(|len| len > MAX_IMAGE_BYTES as u64) {
+        bail!("image preview exceeds {} bytes", MAX_IMAGE_BYTES);
+    }
+    let bytes = response.bytes().await.context("read image preview")?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        bail!("image preview exceeds {} bytes", MAX_IMAGE_BYTES);
+    }
+    Ok(bytes.to_vec())
+}
 
 /// What kind of embed a message body should show under the text.
 #[derive(Debug, Clone, PartialEq, Eq)]

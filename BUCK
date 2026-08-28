@@ -32921,6 +32921,11 @@ cargo.rust_binary(
     crate_root = "host/src/relm4.rs",
     edition = "2021",
     linker_flags = [
+        # Prefer the host PipeWire runtime and its matching SPA plugin set.
+        # The hermetic conda library below is needed by remote link actions,
+        # but loading it on the desktop without its relocated plugin tree makes
+        # every call fail with "can't make support.system handle".
+        "-Wl,-rpath,/usr/lib/x86_64-linux-gnu",
         "-L$(location toolchains//:pipewire)/lib",
         "-L$(location toolchains//:alsa-lib)/lib",
         "-L/home/linuxbrew/.linuxbrew/lib",

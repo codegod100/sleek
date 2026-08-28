@@ -1,16 +1,16 @@
 //! Sleek — freeq mobile client (desktop + Android NativeActivity).
 
 mod app;
-mod auth;
+pub mod auth;
 pub mod av;
 mod av_media;
 mod avatar_cache;
-mod bsky;
+pub mod bsky;
 mod clipboard;
 mod message_store;
 pub mod net;
 mod policy;
-mod preview;
+pub mod preview;
 mod reconnect;
 pub mod slash;
 mod state;

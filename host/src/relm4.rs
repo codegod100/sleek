@@ -21,7 +21,9 @@ struct App {
     connected: bool,
     nick: String,
     server: String,
+    pending_auth_server: Option<String>,
     channels: Vec<String>,
+    topics: HashMap<String, String>,
     messages: HashMap<String, Vec<ChatLine>>,
     members: HashMap<String, Vec<String>>,
     active_channel: Option<String>,
@@ -29,6 +31,9 @@ struct App {
     local_call: Option<LocalCall>,
     video: Option<sleek::av::VideoFrameStore>,
     video_generations: HashMap<String, u64>,
+    image_previews: HashMap<String, gtk::gdk::Texture>,
+    pending_image_previews: HashSet<String>,
+    pending_edit: Option<(String, usize, String)>,
 }
 
 struct ChatLine {
@@ -59,7 +64,13 @@ enum Input {
         nick: String,
         server: String,
     },
+    AtprotoLogin {
+        handle: String,
+        server: String,
+    },
     Disconnect,
+    ToggleChannels,
+    ToggleUsers,
     SelectChannel(String),
     SendMessage(String),
     ToggleCall,
@@ -73,6 +84,16 @@ enum Input {
         msgid: String,
         emoji: String,
     },
+    Edit {
+        target: String,
+        message_index: usize,
+        msgid: String,
+    },
+    CancelEdit,
+    ImagePreviewLoaded {
+        url: String,
+        bytes: Result<Vec<u8>, String>,
+    },
     Tick,
 }
 
@@ -80,11 +101,18 @@ struct Widgets {
     stack: gtk::Stack,
     header: gtk::HeaderBar,
     status: gtk::Label,
+    topic: gtk::Label,
+    login_status: gtk::Label,
     heading: gtk::Label,
     channel_list: gtk::Box,
     channel_scroll: gtk::ScrolledWindow,
     channel_separator: gtk::Separator,
-    channel_picker: gtk::ComboBoxText,
+    compact_channel_list: gtk::Box,
+    compact_channels: gtk::Revealer,
+    compact_channels_button: gtk::Button,
+    compact_user_list: gtk::ListBox,
+    compact_users: gtk::Revealer,
+    compact_users_button: gtk::Button,
     user_list: gtk::ListBox,
     user_scroll: gtk::ScrolledWindow,
     user_separator: gtk::Separator,
@@ -92,6 +120,7 @@ struct Widgets {
     message_scroll: gtk::ScrolledWindow,
     video_grid: gtk::FlowBox,
     compose: gtk::Entry,
+    edit_cancel_button: gtk::Button,
     call_button: gtk::Button,
     call_bar: gtk::Box,
     call_status: gtk::Label,
@@ -112,7 +141,7 @@ impl Component for App {
     fn init_root() -> Self::Root {
         gtk::ApplicationWindow::builder()
             .title("Sleek")
-            .default_width(960)
+            .default_width(320)
             .default_height(680)
             .build()
     }
@@ -127,10 +156,16 @@ impl Component for App {
             .build();
 
         let connect = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        connect.add_css_class("card");
-        connect.set_halign(gtk::Align::Center);
-        connect.set_valign(gtk::Align::Center);
-        connect.set_width_request(360);
+        connect.set_margin_top(18);
+        connect.set_margin_bottom(18);
+        connect.set_margin_start(18);
+        connect.set_margin_end(18);
+        let connect_card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        connect_card.add_css_class("card");
+        connect_card.set_halign(gtk::Align::Center);
+        connect_card.set_valign(gtk::Align::Center);
+        connect_card.set_width_request(280);
+        connect_card.append(&connect);
 
         let title = gtk::Label::new(Some("Sleek"));
         title.add_css_class("title-1");
@@ -146,16 +181,48 @@ impl Component for App {
             .build();
         let connect_button = gtk::Button::with_label("Continue as guest");
         connect_button.add_css_class("suggested-action");
+        let saved_prefs = sleek::auth::SavedPrefs::load();
+        let handle = gtk::Entry::builder()
+            .placeholder_text("Bluesky handle")
+            .text(saved_prefs.last_bsky_handle.as_deref().unwrap_or(""))
+            .build();
+        let atproto_button = gtk::Button::with_label("Sign in with ATProto");
+        let login_status = gtk::Label::new(None);
+        login_status.add_css_class("dim-label");
+        login_status.set_wrap(true);
+        let recent_handles = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        if !saved_prefs.recent_handles.is_empty() {
+            let recent_label = gtk::Label::new(Some("Previous accounts"));
+            recent_label.add_css_class("caption");
+            recent_label.set_halign(gtk::Align::Start);
+            recent_handles.append(&recent_label);
+            for saved_handle in saved_prefs.recent_handles.iter().take(5) {
+                let button = gtk::Button::with_label(saved_handle);
+                button.add_css_class("flat");
+                button.set_halign(gtk::Align::Fill);
+                button.connect_clicked({
+                    let handle = handle.clone();
+                    let saved_handle = saved_handle.clone();
+                    move |_| handle.set_text(&saved_handle)
+                });
+                recent_handles.append(&button);
+            }
+        }
 
         connect.append(&title);
         connect.append(&subtitle);
         connect.append(&nick);
         connect.append(&server);
         connect.append(&connect_button);
+        connect.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        connect.append(&handle);
+        connect.append(&recent_handles);
+        connect.append(&atproto_button);
+        connect.append(&login_status);
         let connect_clamp = adw::Clamp::builder()
             .maximum_size(440)
             .tightening_threshold(360)
-            .child(&connect)
+            .child(&connect_card)
             .build();
         stack.add_named(&connect_clamp, Some("connect"));
 
@@ -163,11 +230,55 @@ impl Component for App {
         let header = gtk::HeaderBar::new();
         let heading = gtk::Label::new(Some("Chats"));
         heading.add_css_class("title-2");
-        header.set_title_widget(Some(&heading));
-        let channel_picker = gtk::ComboBoxText::new();
-        channel_picker.set_tooltip_text(Some("Select channel"));
-        channel_picker.set_visible(false);
-        header.pack_start(&channel_picker);
+        let title = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        title.append(&heading);
+        let topic = gtk::Label::new(None);
+        topic.add_css_class("caption");
+        topic.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        topic.set_visible(false);
+        title.append(&topic);
+        header.set_title_widget(Some(&title));
+        let compact_channel_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        compact_channel_list.set_margin_top(6);
+        compact_channel_list.set_margin_bottom(6);
+        compact_channel_list.set_margin_start(6);
+        compact_channel_list.set_margin_end(6);
+        let compact_channel_scroll = gtk::ScrolledWindow::builder()
+            .child(&compact_channel_list)
+            .min_content_width(220)
+            .vexpand(true)
+            .build();
+        let compact_channels = gtk::Revealer::builder()
+            .child(&compact_channel_scroll)
+            .transition_type(gtk::RevealerTransitionType::SlideRight)
+            .build();
+        compact_channels.set_reveal_child(false);
+        compact_channels.set_visible(false);
+        let compact_channels_button = gtk::Button::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text("Open channel list")
+            .build();
+        compact_channels_button.set_visible(false);
+        header.pack_start(&compact_channels_button);
+        let compact_user_list = gtk::ListBox::new();
+        compact_user_list.set_selection_mode(gtk::SelectionMode::None);
+        compact_user_list.add_css_class("navigation-sidebar");
+        let compact_user_scroll = gtk::ScrolledWindow::builder()
+            .child(&compact_user_list)
+            .min_content_width(180)
+            .vexpand(true)
+            .build();
+        let compact_users = gtk::Revealer::builder()
+            .child(&compact_user_scroll)
+            .transition_type(gtk::RevealerTransitionType::SlideLeft)
+            .build();
+        compact_users.set_visible(false);
+        let compact_users_button = gtk::Button::builder()
+            .icon_name("system-users-symbolic")
+            .tooltip_text("Open user list")
+            .build();
+        compact_users_button.set_visible(false);
+        header.pack_end(&compact_users_button);
         let disconnect = gtk::Button::with_label("Disconnect");
         disconnect.add_css_class("flat");
         header.pack_end(&disconnect);
@@ -181,9 +292,14 @@ impl Component for App {
 
         let channel_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
         channel_list.set_width_request(220);
+        channel_list.set_margin_top(8);
+        channel_list.set_margin_bottom(8);
+        channel_list.set_margin_start(8);
+        channel_list.set_margin_end(8);
 
         let channel_scroll = gtk::ScrolledWindow::builder()
             .child(&channel_list)
+            .max_content_width(220)
             .vexpand(true)
             .build();
 
@@ -192,6 +308,7 @@ impl Component for App {
         message_list.add_css_class("boxed-list");
         let message_scroll = gtk::ScrolledWindow::builder()
             .child(&message_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .hexpand(true)
             .vexpand(true)
             .build();
@@ -201,6 +318,10 @@ impl Component for App {
             .placeholder_text("Message")
             .hexpand(true)
             .build();
+        let edit_cancel_button = gtk::Button::with_label("Cancel");
+        edit_cancel_button.add_css_class("flat");
+        edit_cancel_button.set_tooltip_text(Some("Cancel message edit"));
+        edit_cancel_button.set_visible(false);
         let send_button = gtk::Button::with_label("Send");
         send_button.add_css_class("suggested-action");
         let compose_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -209,6 +330,7 @@ impl Component for App {
         compose_row.set_margin_start(12);
         compose_row.set_margin_end(12);
         compose_row.append(&compose);
+        compose_row.append(&edit_cancel_button);
         compose_row.append(&send_button);
 
         let conversation = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -252,14 +374,20 @@ impl Component for App {
         let user_list = gtk::ListBox::new();
         user_list.set_selection_mode(gtk::SelectionMode::None);
         user_list.add_css_class("navigation-sidebar");
+        user_list.set_margin_top(8);
+        user_list.set_margin_bottom(8);
+        user_list.set_margin_start(8);
+        user_list.set_margin_end(8);
         let user_scroll = gtk::ScrolledWindow::builder()
             .child(&user_list)
             .vexpand(true)
-            .width_request(180)
+            .max_content_width(180)
             .build();
 
         let layout = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        channel_scroll.set_width_request(220);
+        layout.set_margin_start(8);
+        layout.set_margin_end(8);
+        layout.append(&compact_channels);
         layout.append(&channel_scroll);
         let channel_separator = gtk::Separator::new(gtk::Orientation::Vertical);
         layout.append(&channel_separator);
@@ -268,6 +396,7 @@ impl Component for App {
         let user_separator = gtk::Separator::new(gtk::Orientation::Vertical);
         layout.append(&user_separator);
         layout.append(&user_scroll);
+        layout.append(&compact_users);
 
         shell.append(&status);
         shell.append(&layout);
@@ -277,6 +406,8 @@ impl Component for App {
 
         connect_button.connect_clicked({
             let sender = sender.clone();
+            let nick = nick.clone();
+            let server = server.clone();
             move |_| {
                 sender.input(Input::Connect {
                     nick: nick.text().to_string(),
@@ -284,9 +415,28 @@ impl Component for App {
                 });
             }
         });
+        atproto_button.connect_clicked({
+            let sender = sender.clone();
+            let handle = handle.clone();
+            let server = server.clone();
+            move |_| {
+                sender.input(Input::AtprotoLogin {
+                    handle: handle.text().to_string(),
+                    server: server.text().to_string(),
+                });
+            }
+        });
         disconnect.connect_clicked({
             let sender = sender.clone();
             move |_| sender.input(Input::Disconnect)
+        });
+        compact_channels_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleChannels)
+        });
+        compact_users_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::ToggleUsers)
         });
         send_button.connect_clicked({
             let sender = sender.clone();
@@ -301,6 +451,10 @@ impl Component for App {
             move |_| {
                 sender.input(Input::SendMessage(compose.text().to_string()));
             }
+        });
+        edit_cancel_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::CancelEdit)
         });
         call_button.connect_clicked({
             let sender = sender.clone();
@@ -322,17 +476,13 @@ impl Component for App {
             let sender = sender.clone();
             move |_| sender.input(Input::ToggleCamera)
         });
-        channel_picker.connect_changed({
-            let sender = sender.clone();
-            move |picker| {
-                if let Some(channel) = picker.active_text() {
-                    sender.input(Input::SelectChannel(channel.to_string()));
-                }
-            }
-        });
         root.connect_notify_local(Some("width"), {
             let sender = sender.clone();
             move |root, _| sender.input(Input::Viewport(root.width()))
+        });
+        root.connect_map({
+            let sender = sender.clone();
+            move |root| sender.input(Input::Viewport(root.width()))
         });
 
         gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -340,12 +490,31 @@ impl Component for App {
             gtk::glib::ControlFlow::Continue
         });
 
+        let net = NetBridge::start();
+        let saved_session =
+            sleek::auth::SavedSession::load().filter(sleek::auth::SavedSession::has_session);
+        let pending_auth_server = saved_session.as_ref().map(|session| {
+            if session.server.trim().is_empty() {
+                sleek::auth::DEFAULT_IRC_SERVER.into()
+            } else {
+                session.server.clone()
+            }
+        });
+        if let Some(session) = &saved_session {
+            login_status.set_text("Restoring your ATProto session…");
+            net.send(NetCmd::ReconnectSession {
+                broker_token: session.broker_token.clone(),
+                auth_broker: sleek::auth::DEFAULT_AUTH_BROKER.into(),
+            });
+        }
         let model = App {
-            net: NetBridge::start(),
+            net,
             connected: false,
             nick: String::new(),
             server: String::new(),
+            pending_auth_server,
             channels: Vec::new(),
+            topics: HashMap::new(),
             messages: HashMap::new(),
             members: HashMap::new(),
             active_channel: None,
@@ -353,16 +522,26 @@ impl Component for App {
             local_call: None,
             video: None,
             video_generations: HashMap::new(),
+            image_previews: HashMap::new(),
+            pending_image_previews: HashSet::new(),
+            pending_edit: None,
         };
         let widgets = Widgets {
             stack,
             header,
             status,
+            topic,
+            login_status,
             heading,
             channel_list,
             channel_scroll,
             channel_separator,
-            channel_picker,
+            compact_channel_list,
+            compact_channels,
+            compact_channels_button,
+            compact_user_list,
+            compact_users,
+            compact_users_button,
             user_list,
             user_scroll,
             user_separator,
@@ -370,6 +549,7 @@ impl Component for App {
             message_scroll,
             video_grid,
             compose,
+            edit_cancel_button,
             call_button,
             call_bar,
             call_status,
@@ -398,6 +578,7 @@ impl Component for App {
                 self.nick = nick.clone();
                 self.server = server.clone();
                 self.channels.clear();
+                self.topics.clear();
                 self.messages.clear();
                 self.members.clear();
                 self.active_channel = None;
@@ -417,11 +598,31 @@ impl Component for App {
                     web_token: None,
                 });
             }
+            Input::AtprotoLogin { handle, server } => {
+                let handle = sleek::bsky::normalize_handle_query(&handle);
+                if handle.is_empty() || server.trim().is_empty() {
+                    widgets
+                        .status
+                        .set_text("Bluesky handle and server are required");
+                    return;
+                }
+                self.pending_auth_server = Some(server.trim().to_owned());
+                widgets
+                    .login_status
+                    .set_text("Opening ATProto sign-in in your browser…");
+                self.net.send(NetCmd::BlueskyLogin {
+                    handle,
+                    auth_broker: sleek::auth::DEFAULT_AUTH_BROKER.into(),
+                });
+            }
             Input::Disconnect => {
                 self.net.send(NetCmd::Quit);
                 self.net = NetBridge::start();
                 self.connected = false;
+                self.pending_edit = None;
+                widgets.edit_cancel_button.set_visible(false);
                 self.channels.clear();
+                self.topics.clear();
                 self.messages.clear();
                 self.members.clear();
                 self.active_channel = None;
@@ -435,9 +636,30 @@ impl Component for App {
                 root.set_titlebar(None::<&gtk::Widget>);
                 widgets.stack.set_visible_child_name("connect");
             }
+            Input::ToggleChannels => {
+                let open = !widgets.compact_channels.is_visible();
+                widgets.compact_users.set_reveal_child(false);
+                widgets.compact_users.set_visible(false);
+                widgets.compact_channels.set_visible(open);
+                widgets.compact_channels.set_reveal_child(open);
+            }
+            Input::ToggleUsers => {
+                let open = !widgets.compact_users.is_visible();
+                widgets.compact_channels.set_reveal_child(false);
+                widgets.compact_channels.set_visible(false);
+                widgets.compact_users.set_visible(open);
+                widgets.compact_users.set_reveal_child(open);
+            }
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
+                self.pending_edit = None;
+                widgets.compose.set_placeholder_text(Some("Message"));
+                widgets.compose.set_text("");
+                widgets.edit_cancel_button.set_visible(false);
+                widgets.compact_channels.set_reveal_child(false);
+                widgets.compact_channels.set_visible(false);
                 self.render_channels(widgets, &_sender);
+                self.render_topic(widgets);
                 self.render_messages(widgets, &_sender);
                 self.render_users(widgets);
                 self.render_call_controls(widgets);
@@ -446,6 +668,25 @@ impl Component for App {
             Input::SendMessage(text) => {
                 let text = text.trim();
                 if text.is_empty() {
+                    return;
+                }
+                if let Some((target, message_index, msgid)) = self.pending_edit.take() {
+                    self.net.send(NetCmd::EditMessage {
+                        target: target.clone(),
+                        msgid,
+                        text: text.to_owned(),
+                    });
+                    if let Some(message) = self
+                        .messages
+                        .get_mut(&target)
+                        .and_then(|messages| messages.get_mut(message_index))
+                    {
+                        message.text = text.to_owned();
+                    }
+                    widgets.compose.set_placeholder_text(Some("Message"));
+                    widgets.compose.set_text("");
+                    widgets.edit_cancel_button.set_visible(false);
+                    self.render_messages(widgets, &_sender);
                     return;
                 }
                 let Some(target) = self.active_channel.clone() else {
@@ -457,6 +698,32 @@ impl Component for App {
                     text: text.to_owned(),
                 });
                 widgets.compose.set_text("");
+            }
+            Input::Edit {
+                target,
+                message_index,
+                msgid,
+            } => {
+                let Some(message) = self
+                    .messages
+                    .get(&target)
+                    .and_then(|messages| messages.get(message_index))
+                else {
+                    return;
+                };
+                self.pending_edit = Some((target, message_index, msgid));
+                widgets.compose.set_placeholder_text(Some("Edit message"));
+                widgets.compose.set_text(&message.text);
+                widgets.edit_cancel_button.set_visible(true);
+                widgets.compose.grab_focus();
+                widgets.compose.set_position(-1);
+            }
+            Input::CancelEdit => {
+                self.pending_edit = None;
+                widgets.compose.set_placeholder_text(Some("Message"));
+                widgets.compose.set_text("");
+                widgets.edit_cancel_button.set_visible(false);
+                widgets.compose.grab_focus();
             }
             Input::ToggleCall => self.toggle_call(widgets),
             Input::ToggleMute => {
@@ -485,12 +752,24 @@ impl Component for App {
                 }
             }
             Input::Viewport(width) => {
+                // Collapse one secondary column at a time so the conversation
+                // retains useful space instead of abruptly switching layouts.
+                let compact = width < 980;
                 let mobile = width < 700;
                 widgets.channel_scroll.set_visible(!mobile);
                 widgets.channel_separator.set_visible(!mobile);
-                widgets.user_scroll.set_visible(!mobile);
-                widgets.user_separator.set_visible(!mobile);
-                widgets.channel_picker.set_visible(mobile);
+                widgets.user_scroll.set_visible(!compact);
+                widgets.user_separator.set_visible(!compact);
+                widgets.compact_channels_button.set_visible(mobile);
+                widgets.compact_users_button.set_visible(compact);
+                if !mobile {
+                    widgets.compact_channels.set_reveal_child(false);
+                    widgets.compact_channels.set_visible(false);
+                }
+                if !compact {
+                    widgets.compact_users.set_reveal_child(false);
+                    widgets.compact_users.set_visible(false);
+                }
             }
             Input::React {
                 target,
@@ -536,13 +815,87 @@ impl Component for App {
                     );
                 }
             }
+            Input::ImagePreviewLoaded { url, bytes } => {
+                self.pending_image_previews.remove(&url);
+                match bytes.and_then(|bytes| {
+                    let bytes = gtk::glib::Bytes::from_owned(bytes);
+                    gtk::gdk::Texture::from_bytes(&bytes).map_err(|error| error.to_string())
+                }) {
+                    Ok(texture) => {
+                        self.image_previews.insert(url, texture);
+                        self.render_messages(widgets, &_sender);
+                    }
+                    Err(error) => eprintln!("image preview failed for {url}: {error}"),
+                }
+            }
             Input::Tick => {
                 let mut refresh_chat = false;
                 for event in self.net.poll() {
                     match event {
-                        NetEvent::Status(message) => widgets.status.set_text(&message),
+                        NetEvent::Status(message) => {
+                            widgets.status.set_text(&message);
+                            if !self.connected {
+                                widgets.login_status.set_text(&message);
+                            }
+                        }
                         NetEvent::Failed(error) => {
-                            widgets.status.set_text(&format!("Connection failed: {error}"))
+                            let message = format!("Connection failed: {error}");
+                            widgets.status.set_text(&message);
+                            if !self.connected {
+                                widgets.login_status.set_text(&message);
+                            }
+                        }
+                        NetEvent::AuthReady(tokens) => {
+                            let server = self
+                                .pending_auth_server
+                                .take()
+                                .unwrap_or_else(|| sleek::auth::DEFAULT_IRC_SERVER.into());
+                            let session = sleek::auth::SavedSession {
+                                broker_token: tokens.broker_token.clone(),
+                                did: tokens.did.clone(),
+                                handle: tokens.handle.clone(),
+                                nick: tokens.nick.clone(),
+                                server: server.clone(),
+                                last_login_unix: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|duration| duration.as_secs() as i64)
+                                    .unwrap_or_default(),
+                                guest: false,
+                                use_tls: true,
+                                use_websocket: false,
+                            };
+                            if let Err(error) = session.save() {
+                                widgets
+                                    .status
+                                    .set_text(&format!("Could not save ATProto session: {error}"));
+                            }
+                            let mut prefs = sleek::auth::SavedPrefs::load();
+                            let handle = tokens.handle.trim().trim_start_matches('@');
+                            if !handle.is_empty() {
+                                prefs
+                                    .recent_handles
+                                    .retain(|saved| !saved.eq_ignore_ascii_case(handle));
+                                prefs.recent_handles.insert(0, handle.to_owned());
+                                prefs.recent_handles.truncate(8);
+                                prefs.last_bsky_handle = Some(handle.to_owned());
+                                if let Err(error) = prefs.save() {
+                                    eprintln!("could not save recent ATProto handle: {error}");
+                                }
+                            }
+                            self.connected = true;
+                            self.nick = tokens.nick.clone();
+                            self.server = server.clone();
+                            root.set_titlebar(Some(&widgets.header));
+                            widgets.stack.set_visible_child_name("shell");
+                            widgets.status.set_text("Signing in…");
+                            self.net.send(NetCmd::Connect {
+                                nick: tokens.nick,
+                                server,
+                                tls: true,
+                                websocket: false,
+                                auto_join: vec!["#general".into(), "#test".into()],
+                                web_token: Some(tokens.token),
+                            });
                         }
                         NetEvent::Sdk(event) if self.connected => {
                             refresh_chat = true;
@@ -641,6 +994,16 @@ impl App {
             Event::Names { channel, nicks } => {
                 for nick in nicks {
                     self.add_member(&channel, clean_nick(&nick));
+                }
+            }
+            Event::TopicChanged { channel, topic, .. } => {
+                if topic.trim().is_empty() {
+                    self.topics.remove(&channel);
+                } else {
+                    self.topics.insert(channel.clone(), topic);
+                }
+                if self.active_channel.as_deref() == Some(channel.as_str()) {
+                    self.render_topic(widgets);
                 }
             }
             Event::Kicked { channel, nick, .. } => {
@@ -1007,65 +1370,65 @@ impl App {
 
     fn render_channels(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_box(&widgets.channel_list);
+        clear_box(&widgets.compact_channel_list);
         for channel in &self.channels {
-            let button = gtk::ToggleButton::with_label(channel);
-            button.set_has_frame(false);
-            button.set_halign(gtk::Align::Fill);
-            button.set_hexpand(true);
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
-            button.set_active(selected);
-            button.connect_clicked({
-                let sender = sender.clone();
-                let channel = channel.clone();
-                move |_| sender.input(Input::SelectChannel(channel.clone()))
-            });
-            widgets.channel_list.append(&button);
-        }
-        let picker_count = widgets
-            .channel_picker
-            .model()
-            .map(|model| model.iter_n_children(None) as usize)
-            .unwrap_or(0);
-        if picker_count != self.channels.len() {
-            widgets.channel_picker.remove_all();
-            for channel in &self.channels {
-                widgets.channel_picker.append_text(channel);
-            }
-        }
-        if let Some(index) = self
-            .active_channel
-            .as_ref()
-            .and_then(|active| self.channels.iter().position(|channel| channel == active))
-        {
-            if widgets.channel_picker.active() != Some(index as u32) {
-                widgets.channel_picker.set_active(Some(index as u32));
+            for list in [&widgets.channel_list, &widgets.compact_channel_list] {
+                let button = gtk::ToggleButton::with_label(channel);
+                button.set_has_frame(false);
+                button.set_halign(gtk::Align::Fill);
+                button.set_hexpand(true);
+                button.set_active(selected);
+                button.connect_clicked({
+                    let sender = sender.clone();
+                    let channel = channel.clone();
+                    move |_| sender.input(Input::SelectChannel(channel.clone()))
+                });
+                list.append(&button);
             }
         }
     }
 
     fn render_users(&self, widgets: &Widgets) {
         clear_list(&widgets.user_list);
+        clear_list(&widgets.compact_user_list);
         let Some(channel) = self.active_channel.as_deref() else {
             return;
         };
         for nick in self.members.get(channel).into_iter().flatten() {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            row.set_margin_top(6);
-            row.set_margin_bottom(6);
-            row.set_margin_start(12);
-            row.set_margin_end(12);
-            let presence = gtk::Label::new(Some("●"));
-            presence.add_css_class("success");
-            let label = gtk::Label::new(Some(nick));
-            label.set_halign(gtk::Align::Start);
-            label.set_hexpand(true);
-            row.append(&presence);
-            row.append(&label);
-            widgets.user_list.append(&row);
+            for list in [&widgets.user_list, &widgets.compact_user_list] {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                row.set_margin_top(6);
+                row.set_margin_bottom(6);
+                row.set_margin_start(12);
+                row.set_margin_end(12);
+                let presence = gtk::Label::new(Some("●"));
+                presence.add_css_class("success");
+                let label = gtk::Label::new(Some(nick));
+                label.set_halign(gtk::Align::Start);
+                label.set_hexpand(true);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                label.set_max_width_chars(18);
+                row.append(&presence);
+                row.append(&label);
+                list.append(&row);
+            }
         }
     }
 
-    fn render_messages(&self, widgets: &mut Widgets, sender: &ComponentSender<Self>) {
+    fn render_topic(&self, widgets: &Widgets) {
+        let topic = self
+            .active_channel
+            .as_deref()
+            .and_then(|channel| self.topics.get(channel))
+            .map(String::as_str)
+            .unwrap_or("");
+        widgets.topic.set_text(topic);
+        widgets.topic.set_visible(!topic.is_empty());
+        widgets.topic.set_tooltip_text((!topic.is_empty()).then_some(topic));
+    }
+
+    fn render_messages(&mut self, widgets: &mut Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.message_list);
         widgets.reaction_bars.clear();
         let Some(channel) = self.active_channel.as_deref() else {
@@ -1081,11 +1444,16 @@ impl App {
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
                 row.set_margin_start(12);
-                row.set_margin_end(12);
+                // Keep trailing actions clear of the overlay scrollbar.
+                row.set_margin_end(24);
+                let message_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                content.set_hexpand(true);
                 let author = gtk::Label::new(Some(&message.from));
                 author.set_halign(gtk::Align::Start);
                 author.add_css_class("heading");
                 let body = gtk::Label::new(Some(&message.text));
+                body.set_markup(&linkify_message(&message.text));
                 body.set_halign(gtk::Align::Start);
                 body.set_xalign(0.0);
                 body.set_hexpand(true);
@@ -1094,12 +1462,45 @@ impl App {
                 body.set_width_chars(1);
                 body.set_max_width_chars(80);
                 body.set_selectable(true);
-                row.append(&author);
-                row.append(&body);
+                content.append(&author);
+                content.append(&body);
+
+                if let Some(sleek::preview::Embed::Image { url }) =
+                    sleek::preview::embed_from_text(&message.text)
+                {
+                    if let Some(texture) = self.image_previews.get(&url) {
+                        let picture = gtk::Picture::for_paintable(texture);
+                        picture.set_halign(gtk::Align::Start);
+                        picture.set_size_request(240, 180);
+                        picture.set_can_shrink(true);
+                        picture.set_tooltip_text(Some(&url));
+                        content.append(&picture);
+                    } else {
+                        let loading = gtk::Label::new(Some("Loading image preview…"));
+                        loading.add_css_class("dim-label");
+                        loading.set_halign(gtk::Align::Start);
+                        content.append(&loading);
+                        if self.pending_image_previews.insert(url.clone()) {
+                            let sender = sender.clone();
+                            gtk::glib::spawn_future_local(async move {
+                                let bytes = sleek::preview::fetch_image_preview(&url)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                sender.input(Input::ImagePreviewLoaded { url, bytes });
+                            });
+                        }
+                    }
+                }
 
                 let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 self.render_reaction_bar(&reactions, channel, message_index, message, sender);
-                row.append(&reactions);
+                content.append(&reactions);
+                let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                actions.set_valign(gtk::Align::Start);
+                self.render_message_actions(&actions, channel, message_index, message, sender);
+                message_line.append(&content);
+                message_line.append(&actions);
+                row.append(&message_line);
                 widgets.reaction_bars.insert(message_index, reactions);
                 widgets.message_list.append(&row);
             }
@@ -1138,29 +1539,69 @@ impl App {
             });
             reactions.append(&button);
         }
+    }
+
+    fn render_message_actions(
+        &self,
+        actions: &gtk::Box,
+        channel: &str,
+        message_index: usize,
+        message: &ChatLine,
+        sender: &ComponentSender<Self>,
+    ) {
         if !message.id.is_empty() {
-            let picker_button = gtk::MenuButton::builder()
+            if message.from.eq_ignore_ascii_case(&self.nick) {
+                let edit_button = gtk::Button::builder()
+                    .icon_name("document-edit-symbolic")
+                    .tooltip_text("Edit message")
+                    .build();
+                edit_button.add_css_class("flat");
+                edit_button.add_css_class("circular");
+                edit_button.connect_clicked({
+                    let sender = sender.clone();
+                    let target = channel.to_owned();
+                    let msgid = message.id.clone();
+                    move |_| {
+                        sender.input(Input::Edit {
+                            target: target.clone(),
+                            message_index,
+                            msgid: msgid.clone(),
+                        });
+                    }
+                });
+                actions.append(&edit_button);
+            }
+            let picker_button = gtk::Button::builder()
                 .icon_name("face-smile-symbolic")
                 .tooltip_text("Add reaction")
                 .build();
             picker_button.add_css_class("flat");
             picker_button.add_css_class("circular");
-            let picker = gtk::EmojiChooser::new();
-            picker.connect_emoji_picked({
+            picker_button.connect_clicked({
                 let sender = sender.clone();
                 let target = channel.to_owned();
                 let msgid = message.id.clone();
-                move |_, emoji| {
-                    sender.input(Input::React {
-                        target: target.clone(),
-                        message_index,
-                        msgid: msgid.clone(),
-                        emoji: emoji.to_owned(),
+                move |button| {
+                    let picker = gtk::EmojiChooser::new();
+                    picker.connect_emoji_picked({
+                        let sender = sender.clone();
+                        let target = target.clone();
+                        let msgid = msgid.clone();
+                        move |_, emoji| {
+                            sender.input(Input::React {
+                                target: target.clone(),
+                                message_index,
+                                msgid: msgid.clone(),
+                                emoji: emoji.to_owned(),
+                            });
+                        }
                     });
+                    picker.connect_closed(|picker| picker.unparent());
+                    picker.set_parent(button);
+                    picker.popup();
                 }
             });
-            picker_button.set_popover(Some(&picker));
-            reactions.append(&picker_button);
+            actions.append(&picker_button);
         }
     }
 }
@@ -1175,6 +1616,20 @@ fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+}
+
+fn linkify_message(text: &str) -> String {
+    let spans = sleek::preview::extract_url_spans(text);
+    let mut markup = String::new();
+    let mut cursor = 0;
+    for span in spans {
+        markup.push_str(&gtk::glib::markup_escape_text(&text[cursor..span.start]));
+        let url = gtk::glib::markup_escape_text(&span.url);
+        markup.push_str(&format!("<a href=\"{url}\">{url}</a>"));
+        cursor = span.end;
+    }
+    markup.push_str(&gtk::glib::markup_escape_text(&text[cursor..]));
+    markup
 }
 
 fn clear_flow_box(flow_box: &gtk::FlowBox) {
