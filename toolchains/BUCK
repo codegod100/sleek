@@ -33,7 +33,7 @@ export_file(
 )
 
 export_file(
-    name = "zig_cc.py",
+    name = "zig_cc.sh",
     visibility = [],
 )
 

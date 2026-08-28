@@ -6,5 +6,7 @@
 # would, so headers using stdbool.h/stddef.h/etc fail to parse without an
 # explicit -I (BINDGEN_EXTRA_CLANG_ARGS) — see toolchains/BUCK's
 # `libclang`/`clang-resource-dir` targets for where both come from.
+overlay = "overlay"
+
 [buildscript.run]
 env = { PKG_CONFIG = "$(location toolchains//:pkgconfig)/bin/pkg-config.bin", PKG_CONFIG_PATH = "$(location toolchains//:pipewire)/lib/pkgconfig", LIBCLANG_PATH = "$(location toolchains//:libclang)", LD_LIBRARY_PATH = "$(location toolchains//:libclang)", BINDGEN_EXTRA_CLANG_ARGS = "-I$(location toolchains//:clang-resource-dir)/lib/clang/22/include" }

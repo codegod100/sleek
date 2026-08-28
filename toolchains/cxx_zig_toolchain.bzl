@@ -151,7 +151,7 @@ cxx_zig_toolchain = rule(
         "target": attrs.option(attrs.string(), default = None),
         "_cxx_internal_tools": attrs.default_only(attrs.dep(providers = [CxxInternalTools], default = "prelude//cxx/tools:internal_tools")),
         "_target_filter": attrs.default_only(attrs.source(default = "toolchains//:zig_target_filter.sh")),
-        "_zig_cc": attrs.default_only(attrs.source(default = "toolchains//:zig_cc.py")),
+        "_zig_cc": attrs.default_only(attrs.source(default = "toolchains//:zig_cc.sh")),
     },
     is_toolchain_rule = True,
 )

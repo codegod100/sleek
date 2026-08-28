@@ -1779,6 +1779,7 @@ buildscript_run(
     buildscript_rule = ":aws-lc-sys-0.43-build-script-main",
     env = {
         "CRATE_CC_NO_DEFAULTS": "1",
+        "SLEEK_AWSLC_FIX": "1",
         "CARGO_MANIFEST_LINKS": "aws_lc_0_43_0",
         "CARGO_PKG_AUTHORS": "AWS-LC",
         "CARGO_PKG_DESCRIPTION": "AWS-LC is a general-purpose cryptographic library maintained by the AWS Cryptography team for AWS and their customers. It іs based on code from the Google BoringSSL project and the OpenSSL project.",
@@ -14886,6 +14887,9 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PRE": "",
         "OUT_DIR": "$(location :libspa-sys-0.9-build-script-run[out_dir])",
     },
+    mapped_srcs = {
+        "fixups/libspa-sys/overlay/build.rs": "libspa-sys-0.9.2.crate/build.rs",
+    },
     rustc_flags = ["@$(location :libspa-sys-0.9-build-script-run[rustc_flags])"],
     visibility = [],
 )
@@ -14913,6 +14917,9 @@ cargo.rust_binary(
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
     },
+    mapped_srcs = {
+        "fixups/libspa-sys/overlay/build.rs": "libspa-sys-0.9.2.crate/build.rs",
+    },
     visibility = [],
     deps = [
         ":bindgen-0.72",
@@ -14938,6 +14945,8 @@ buildscript_run(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
+        "CC_ENABLE_DEBUG_OUTPUT": "1",
+        "CRATE_CC_NO_DEFAULTS": "1",
         "LD_LIBRARY_PATH": "$(location toolchains//:libclang)",
         "LIBCLANG_PATH": "$(location toolchains//:libclang)",
         "PKG_CONFIG": "$(location toolchains//:pkgconfig)/bin/pkg-config.bin",
@@ -19120,6 +19129,10 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PRE": "",
         "OUT_DIR": "$(location :pipewire-sys-0.9-build-script-run[out_dir])",
     },
+    mapped_srcs = {
+        "fixups/pipewire-sys/overlay/build.rs": "pipewire-sys-0.9.2.crate/build.rs",
+        "fixups/pipewire-sys/overlay/wrapper.h": "pipewire-sys-0.9.2.crate/wrapper.h",
+    },
     named_deps = {
         "spa_sys": ":libspa-sys-0.9",
     },
@@ -19149,6 +19162,10 @@ cargo.rust_binary(
         "CARGO_PKG_VERSION_MINOR": "9",
         "CARGO_PKG_VERSION_PATCH": "2",
         "CARGO_PKG_VERSION_PRE": "",
+    },
+    mapped_srcs = {
+        "fixups/pipewire-sys/overlay/build.rs": "pipewire-sys-0.9.2.crate/build.rs",
+        "fixups/pipewire-sys/overlay/wrapper.h": "pipewire-sys-0.9.2.crate/wrapper.h",
     },
     visibility = [],
     deps = [
@@ -32613,6 +32630,13 @@ alias(
     name = "sleek",
     actual = ":sleek-host",
 )
+
+
+
+
+
+
+
 
 
 

@@ -14,23 +14,6 @@ the `android/` crate is the shared UI/logic library (also built for Android via
 `cargo-apk`/Waydroid, which is not runnable here — no binder/Waydroid kernel
 support).
 
-### Radicle patches (cloud agents — use boxci)
-**Every issue that produces commits must open a Radicle patch** (see
-`.cursor/rules/issues-require-radicle-patch.mdc`). A GitHub PR alone is not
-enough.
-
-Cloud / GitHub checkouts should **not** open Radicle patches with local
-`rad auth` / `git push rad` or radicle MCP `create_patch`. Push the commit to
-GitHub, then use the **boxci-github-patch** skill:
-
-Skill: [`.cursor/skills/boxci-github-patch/`](.cursor/skills/boxci-github-patch/)
-→ `POST https://boxci.boxd.sh/api/patches/from-github` with sleek RID
-`rad:z9mjPzpVK472QXaaP1picc5U9xBR` and `github_repo_url`
-`https://github.com/codegod100/sleek.git`.
-
-boxci cherry-picks the GitHub SHA onto the Garden checkout and runs
-`git push rad HEAD:refs/patches` with the CI Radicle identity.
-
 Optional local `rad` remote (Codespaces / manual rad CLI only):
 
 ```bash
