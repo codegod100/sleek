@@ -839,12 +839,11 @@ impl Component for App {
                         }
                     }
                 }
-                // GTK has no onNewIntent hook, so the callback always spawns a
-                // fresh ToplevelActivity with no toplevel to bind to — the user
-                // is left on a blank activity and has to switch back by hand.
-                // This at least guarantees the real window exists and is mapped
-                // (it matters on a cold start); it cannot re-front the activity.
-                root.present();
+                // ToplevelActivity.onCreate() delivered this URI through
+                // GApplication.open(), whose handler already activates and
+                // binds the existing window to the callback activity. Calling
+                // present() again here spawns a second Android activity and
+                // returns the user to the browser when that transient closes.
             }
             Input::AtprotoLogin { handle, server } => {
                 let handle = sleek::bsky::normalize_handle_query(&handle);
