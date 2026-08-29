@@ -892,22 +892,40 @@ impl Component for App {
                     .compact_channels
                     .set_hexpand(full_width && open);
                 if full_width {
+                    widgets
+                        .compact_channels
+                        .set_transition_type(gtk::RevealerTransitionType::None);
+                    widgets
+                        .compact_users
+                        .set_transition_type(gtk::RevealerTransitionType::None);
+                    widgets.conversation.set_visible(!open);
                     widgets.compact_users.set_reveal_child(false);
                     widgets.compact_users.set_hexpand(false);
                 }
                 widgets.compact_channels.set_reveal_child(open);
-                widgets.conversation.set_visible(!full_width || !open);
+                if !full_width {
+                    widgets.conversation.set_visible(true);
+                }
             }
             Input::ToggleUsers => {
                 let open = !widgets.compact_users.reveals_child();
                 let full_width = root.width() < 560;
                 widgets.compact_users.set_hexpand(full_width && open);
                 if full_width {
+                    widgets
+                        .compact_channels
+                        .set_transition_type(gtk::RevealerTransitionType::None);
+                    widgets
+                        .compact_users
+                        .set_transition_type(gtk::RevealerTransitionType::None);
+                    widgets.conversation.set_visible(!open);
                     widgets.compact_channels.set_reveal_child(false);
                     widgets.compact_channels.set_hexpand(false);
                 }
                 widgets.compact_users.set_reveal_child(open);
-                widgets.conversation.set_visible(!full_width || !open);
+                if !full_width {
+                    widgets.conversation.set_visible(true);
+                }
             }
             Input::MarkAllRead => {
                 let account = self.account_key();
@@ -1159,6 +1177,17 @@ impl Component for App {
                 // Compact drawers stay beside the conversation until phone
                 // width, where the open drawer expands to replace it.
                 self.mobile = width < 560;
+                let transition = if self.mobile {
+                    gtk::RevealerTransitionType::None
+                } else {
+                    gtk::RevealerTransitionType::SlideRight
+                };
+                widgets.compact_channels.set_transition_type(transition);
+                widgets.compact_users.set_transition_type(if self.mobile {
+                    gtk::RevealerTransitionType::None
+                } else {
+                    gtk::RevealerTransitionType::SlideLeft
+                });
                 widgets
                     .compact_channels
                     .set_hexpand(self.mobile && widgets.compact_channels.reveals_child());
