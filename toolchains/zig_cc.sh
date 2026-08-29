@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 
+stage=initializing
+report_failure() {
+    status=$?
+    if (( status != 0 )); then
+        {
+            echo "zig compiler wrapper failed: stage=${stage} status=${status}"
+            echo "  subcommand=${subcommand:-unset}"
+            echo "  cwd=$(pwd)"
+            echo "  cache=${zig_cache_root:-unset}"
+            echo "  zig=${zig:-unset}"
+        } >&2
+    fi
+}
+trap report_failure EXIT
+
 # Zig rejects nested response files. Expand Buck's response files before
 # handing the argument vector to Zig. Cargo build scripts normally pass no
 # response files, but using the same wrapper keeps one hermetic compiler.
@@ -9,14 +24,17 @@ shift 2
 
 # Cargo build scripts invoke the compiler outside Buck's normal action wrapper.
 # Give Zig an explicitly writable cache instead of relying on HOME in the
-# minimal remote-execution environment. Scope it to the build script's OUT_DIR:
-# /tmp is shared by otherwise-independent actions on a remote worker, and using
-# one worker-global cache lets concurrent crates corrupt Zig's cold cache.
-zig_cache_root="${OUT_DIR:-${TMPDIR:-/tmp}/sleek-zig-cache}"
+# minimal remote-execution environment. Share Zig's immutable global cache,
+# but isolate the per-compilation local cache: build scripts can launch many
+# compiler children concurrently, and each child owns different intermediate
+# state. The shell PID is unique within one buildscript action.
+zig_cache_root="${OUT_DIR:-${TMPDIR:-/tmp}/sleek-zig-cache}/zig-cache"
 export ZIG_GLOBAL_CACHE_DIR="$zig_cache_root/global"
-export ZIG_LOCAL_CACHE_DIR="$zig_cache_root/local"
-mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
+export ZIG_LOCAL_CACHE_DIR="$zig_cache_root/local/$$"
+stage=creating-cache
+mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" || exit $?
 
+stage=expanding-response-files
 args=("$@")
 while :; do
     expanded=()
@@ -60,12 +78,14 @@ for arg in "${args[@]}"; do
 done
 args=("-mcpu=baseline" "${filtered[@]}")
 
+stage=compiling
 "$zig" "$subcommand" "${args[@]}"
 status=$?
 if [[ $status -eq 0 ]]; then
     exit 0
 fi
-echo "zig $subcommand failed; retrying verbosely" >&2
+echo "zig $subcommand failed with status $status; retrying verbosely" >&2
+stage=verbose-retry
 "$zig" "$subcommand" -v "${args[@]}"
 retry_status=$?
 exit "$retry_status"

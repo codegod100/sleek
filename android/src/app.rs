@@ -986,15 +986,7 @@ impl SleekApp {
                 tags,
                 dm_key,
             } => {
-                // CTCP ACTION: \x01ACTION …\x01 (must be str prefixes, not char literals).
-                let is_action = text.starts_with("\u{1}ACTION ") && text.ends_with('\u{1}');
-                let body = if is_action {
-                    text.trim_start_matches("\u{1}ACTION ")
-                        .trim_end_matches('\u{1}')
-                        .to_string()
-                } else {
-                    text
-                };
+                let (body, is_action) = display_message_text(&text);
                 let msgid = tags
                     .get("msgid")
                     .cloned()
@@ -2774,6 +2766,75 @@ fn server_time_from_tags(
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Local))
+}
+
+/// Turn IRC wire text into safe display text and identify CTCP `/me` actions.
+///
+/// Formatting controls are allowed immediately outside the CTCP frame by some
+/// clients. Removing them before parsing avoids exposing SOH and style control
+/// characters as missing-glyph boxes in egui.
+fn display_message_text(text: &str) -> (String, bool) {
+    let clean: String = text
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{2}'  // bold
+                    | '\u{3}'  // colour
+                    | '\u{f}'  // reset
+                    | '\u{16}' // reverse
+                    | '\u{1d}' // italic
+                    | '\u{1e}' // strikethrough
+                    | '\u{1f}' // underline
+            )
+        })
+        .collect();
+
+    if let Some(action) = clean
+        .strip_prefix("\u{1}ACTION ")
+        .and_then(|body| body.strip_suffix('\u{1}'))
+    {
+        (action.to_string(), true)
+    } else {
+        // No C0 control character has a useful visible representation in a
+        // chat message. Keep whitespace that users reasonably expect.
+        (
+            clean
+                .chars()
+                .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                .collect(),
+            false,
+        )
+    }
+}
+
+#[cfg(test)]
+mod display_message_text_tests {
+    use super::display_message_text;
+
+    #[test]
+    fn unwraps_ctcp_action_without_displaying_delimiters() {
+        assert_eq!(
+            display_message_text("\u{1}ACTION takes off their mental health hat\u{1}"),
+            ("takes off their mental health hat".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn recognizes_action_surrounded_by_irc_formatting() {
+        assert_eq!(
+            display_message_text("\u{2}\u{1}ACTION waves\u{1}\u{f}"),
+            ("waves".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn removes_stray_controls_from_regular_messages() {
+        assert_eq!(
+            display_message_text("\u{1}hello\u{7} world\u{1}"),
+            ("hello world".to_owned(), false)
+        );
+    }
 }
 
 impl eframe::App for SleekApp {

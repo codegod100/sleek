@@ -1,4 +1,4 @@
-{ pkgs, lib, ... }:
+{ config, pkgs, lib, ... }:
 {
   packages = with pkgs; [
     rustc
@@ -26,6 +26,7 @@
   ];
 
   env.OPENSSL_NO_VENDOR = "1";
+  env.BUILDBUDDY_API_KEY = config.secretspec.secrets.BUILDBUDDY_API_KEY or "";
   env.PKG_CONFIG_PATH = lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.pipewire.dev pkgs.alsa-lib.dev pkgs.gtk4.dev ];
   env.SLEEK_BROWSER_PROFILE = "${builtins.getEnv "TMPDIR"}/sleek-chromium";
   env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";

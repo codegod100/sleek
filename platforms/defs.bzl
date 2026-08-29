@@ -24,15 +24,11 @@
 # actually lets those build.rs steps reach crates.io/git during a remote
 # run.
 #
-# `remote_cache_enabled` follows `[buildbuddy] enabled` (default true —
-# see .buckconfig; needs BUILDBUDDY_API_KEY in the environment, or opt out
-# in a git-ignored `.buckconfig.local`). When on, successful local runs also
-# get uploaded to BuildBuddy's CAS/Action Cache, so a second machine/CI run
-# with identical inputs gets a cache hit instead of re-running `cargo build`.
-# When off, buck2 never talks to `[buck2_re_client]` at all — important
-# because an unreachable/misconfigured RE client makes buck2 hard-fail the
-# action rather than silently skipping the cache check (verified: flipping
-# this to False is the only thing that avoids that failure without a key).
+# Remote execution and caching both follow `[buildbuddy] enabled` (default
+# true — see .buckconfig). The `./buck2` wrapper disables it when no
+# BUILDBUDDY_API_KEY is available. Both switches must be off in that case:
+# leaving `remote_enabled` on still initializes the RE client and expands its
+# credential header even when remote caching is disabled.
 def _platforms(ctx):
     # Empty constraints (the original version of this rule) leave
     # `ctx.attrs._exec_os_type` unresolvable for any rule that reads it —
@@ -55,7 +51,7 @@ def _platforms(ctx):
         configuration = configuration,
         executor_config = CommandExecutorConfig(
             local_enabled = True,
-            remote_enabled = True,
+            remote_enabled = buildbuddy_enabled,
             # Prefer a local run already in flight over racing a remote one —
             # matches buck2's own BuildBuddy example (examples/remote_execution/
             # buildbuddy/platforms/defs.bzl upstream).

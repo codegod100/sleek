@@ -1,4 +1,4 @@
 [buildscript.run]
-env = { CRATE_CC_NO_DEFAULTS = "1", PYTHONPATH = "buck-out/sleek-buildbuddy/art/toolchains/a8ac7ec86a6bee54/__python-compat__/out/python-compat", SLEEK_PYTHON_COMPAT = "$(location toolchains//:python-compat)" }
+env = { AR = "/usr/bin/ar", CC = "/usr/bin/cc", CRATE_CC_NO_DEFAULTS = "1", CXX = "/usr/bin/c++", PYTHONPATH = "$(location toolchains//:python-compat)" }
 rustc_link_lib = true
 rustc_link_search = true

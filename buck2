@@ -11,12 +11,58 @@ if [[ -f "${repo_root}/.env" ]]; then
   set +a
 fi
 
+# Resolve the same user-keyring entry from every Sleek clone/worktree. Keep an
+# explicitly exported or dotenv-provided value as the highest-precedence
+# source, and never print the resolved secret.
+if [[ -z "${BUILDBUDDY_API_KEY:-}" ]] && command -v secretspec >/dev/null 2>&1; then
+  if resolved_key="$(
+    cd "${repo_root}"
+    secretspec get BUILDBUDDY_API_KEY --provider keyring
+  )"; then
+    export BUILDBUDDY_API_KEY="${resolved_key}"
+  fi
+  unset resolved_key
+fi
+
+# `bb login` stores its key in this clone's local Git config. Support that
+# convention too, while preferring SecretSpec because it works across clones.
+if [[ -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  if resolved_key="$(git -C "${repo_root}" config --local --get buildbuddy.api-key)"; then
+    export BUILDBUDDY_API_KEY="${resolved_key}"
+  fi
+  unset resolved_key
+fi
+
+# Buck expands the BuildBuddy header before it can gracefully fall back from a
+# missing credential. Make the remote service optional for ordinary local
+# builds instead of requiring every contributor to create an `.env` file.
+buck_args=("$@")
+if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  # A Buck daemon retains the environment it had when it started. Include a
+  # one-way credential fingerprint in its isolation name so logging in or
+  # rotating the key cannot reconnect to a stale daemon that has no/old auth.
+  key_fingerprint="$(printf '%s' "${BUILDBUDDY_API_KEY}" | sha256sum)"
+  isolation_dir="sleek-buildbuddy-${key_fingerprint:0:12}"
+else
+  isolation_dir=sleek-local
+fi
+if [[ -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  # `--config` belongs to Buck's individual commands rather than its global
+  # options, so place it immediately after `run`, `build`, `test`, etc.
+  if (($# > 0)) && [[ "$1" != -* ]]; then
+    buck_args=("$1" --config buildbuddy.enabled=false "${@:2}")
+  fi
+fi
+
 # Keep this repository on a daemon started by this wrapper. A daemon launched
 # earlier by a system `buck2` binary retains its original environment and
 # therefore cannot expand credentials loaded from this repository's `.env`.
+# Keyed and keyless runs use separate daemons so adding or removing the key
+# takes effect immediately without requiring `buck2 kill`.
 #
 # Go through the vendored ./dotslash bootstrap rather than a bare `dotslash`
 # on PATH, so this works in a fully isolated checkout that has never had
 # dotslash installed (it transparently prefers a system dotslash when one is
 # already present).
-exec "${repo_root}/dotslash" "${repo_root}/buck2.dotslash" --isolation-dir sleek-buildbuddy "$@"
+exec "${repo_root}/dotslash" "${repo_root}/buck2.dotslash" \
+  --isolation-dir "${isolation_dir}" "${buck_args[@]}"

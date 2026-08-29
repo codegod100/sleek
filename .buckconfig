@@ -22,15 +22,14 @@
 [buck2]
     digest_algorithms = SHA256
 
-# BuildBuddy remote cache, on by default (see platforms/defs.bzl for how
-# `buildbuddy.enabled` gates `remote_cache_enabled` on the execution
-# platform — remote *execution* stays off always, see that file).
+# BuildBuddy remote execution and cache, on by default (see
+# platforms/defs.bzl for how `buildbuddy.enabled` gates both settings on the
+# execution platform).
 #
-# Needs BUILDBUDDY_API_KEY in the environment (an org key from
-# https://app.buildbuddy.io/ → Settings). Without it, buck2 hard-fails
-# every build the moment it tries to reach the cache — there's no graceful
-# "key missing, skip caching" fallback in buck2 itself. No BuildBuddy
-# account yet? Opt out locally (git-ignored, not this file):
+# `./buck2` loads BUILDBUDDY_API_KEY from the environment or an optional `.env`
+# file. When it is absent, the wrapper disables this setting automatically
+# because buck2 has no graceful "key missing, skip caching" fallback. Calls to
+# a system `buck2` binary can opt out locally (git-ignored, not this file):
 #   printf '[buildbuddy]\n    enabled = false\n' > .buckconfig.local
 [buildbuddy]
     enabled = true

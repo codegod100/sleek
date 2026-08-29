@@ -82,9 +82,23 @@ http_archive(
 # workers instead of depending on the worker image's PATH.
 genrule(
     name = "zstd",
-    srcs = [":zstd-src"],
+    srcs = [
+        ":zig-dist",
+        ":zstd-src",
+    ],
     out = "zstd",
-    cmd = "mkdir zstd-build && cp -R $(location :zstd-src)/. zstd-build/ && make -C zstd-build/programs -j2 zstd && cp zstd-build/programs/zstd $OUT",
+    cmd = """
+        $(location :zig-dist)/zig-linux-x86_64-0.14.0/zig cc \
+          -O2 -pthread -DZSTD_MULTITHREAD \
+          -I$(location :zstd-src)/lib -I$(location :zstd-src)/lib/common \
+          $(location :zstd-src)/programs/*.c \
+          $(location :zstd-src)/lib/common/*.c \
+          $(location :zstd-src)/lib/compress/*.c \
+          $(location :zstd-src)/lib/decompress/*.c \
+          $(location :zstd-src)/lib/decompress/*.S \
+          $(location :zstd-src)/lib/dictBuilder/*.c \
+          -o $OUT
+    """,
     executable = True,
     visibility = ["PUBLIC"],
 )
