@@ -1562,7 +1562,11 @@ impl App {
         for channel in &self.channels {
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
             for list in [&widgets.channel_list, &widgets.compact_channel_list] {
-                let button = gtk::ToggleButton::with_label(channel);
+                let label = gtk::Label::new(Some(channel));
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                label.set_width_chars(1);
+                label.set_max_width_chars(24);
+                let button = gtk::ToggleButton::builder().child(&label).build();
                 button.set_has_frame(false);
                 button.set_halign(gtk::Align::Fill);
                 button.set_hexpand(true);
@@ -1666,7 +1670,16 @@ impl App {
                             format!("↪ {}: {excerpt}", candidate.from)
                         })
                         .unwrap_or_else(|| "↪ Original message".into());
-                    let reply_context = gtk::Button::with_label(&original);
+                    // A Button's own label neither wraps nor ellipsizes, so the
+                    // excerpt would set a minimum width wider than the screen and
+                    // push the whole conversation out of view. Use a label child
+                    // that is allowed to shrink.
+                    let reply_label = gtk::Label::new(Some(&original));
+                    reply_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    reply_label.set_width_chars(1);
+                    reply_label.set_max_width_chars(32);
+                    reply_label.set_xalign(0.0);
+                    let reply_context = gtk::Button::builder().child(&reply_label).build();
                     reply_context.add_css_class("flat");
                     reply_context.add_css_class("pill");
                     reply_context.set_halign(gtk::Align::Fill);
@@ -1680,6 +1693,9 @@ impl App {
                 }
                 let author = gtk::Label::new(Some(&message.from));
                 author.set_halign(gtk::Align::Start);
+                author.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                author.set_width_chars(1);
+                author.set_max_width_chars(28);
                 author.add_css_class("heading");
                 let body = gtk::Label::new(Some(&message.text));
                 body.set_markup(&linkify_message(&message.text));
