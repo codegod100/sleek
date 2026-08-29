@@ -866,7 +866,7 @@ impl Component for App {
                     relm4::gtk::glib::g_warning!("sleek", "clear channel counts: {error:#}");
                 }
                 self.message_counts.clear();
-                self.render_channels(widgets, &_sender);
+                self.render_channels(widgets, &sender);
             }
             Input::SelectChannel(channel) => {
                 self.pinned_to_bottom.set(true);
@@ -1165,7 +1165,7 @@ impl Component for App {
             Input::Tick => {
                 #[cfg(target_os = "android")]
                 if let Some(url) = take_pending_deep_link() {
-                    _sender.input(Input::DeepLink(url));
+                    sender.input(Input::DeepLink(url));
                 }
                 let mut refresh_chat = false;
                 for event in self.net.poll() {
