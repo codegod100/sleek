@@ -30,12 +30,26 @@ if meson.is_cross_build()
   extra_env.set(linker_env, android_cc)
   extra_env.set('PKG_CONFIG_PATH', meson.global_build_root() / 'meson-uninstalled')
   extra_env.set('PKG_CONFIG_ALLOW_CROSS', '1')
+
+  # C++ deps in the crate graph link the NDK's shared C++ runtime, which
+  # Android does not ship. Package it or dlopen of our library fails with
+  # 'library "libc++_shared.so" not found'.
+  fs = import('fs')
+  ndk_sysroot_libs = fs.parent(fs.parent(android_cc)) / 'sysroot/usr/lib' / rust_target
+  custom_target(
+    'libc++_shared',
+    output: 'libc++_shared.so',
+    command: ['cp', ndk_sysroot_libs / 'libc++_shared.so', '@OUTPUT@'],
+    install: true,
+    install_dir: get_option('libdir'),
+    install_tag: 'runtime',
+  )
 endif
 
 profile = get_option('buildtype') == 'release' ? 'release' : 'dev'
 
 custom_target(
-  'sleek',
+  'sleek_relm4',
   output: 'libsleek_relm4.so',
   console: true,
   build_always_stale: true,

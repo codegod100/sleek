@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<component type="desktop-application">
+<component xmlns="https://specifications.freedesktop.org/metainfo/1.0" type="desktop-application">
   <id>uk.nandi.sleek</id>
   <name>Sleek</name>
   <summary>Freeq chat client — channels, DMs, and calls</summary>

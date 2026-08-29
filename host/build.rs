@@ -16,6 +16,14 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     println!("cargo:rerun-if-env-changed=GLEAM");
 
+    // The Android cdylib (`sleek_relm4`) links neither wasmtime nor the
+    // `gleam_slash` module — both are desktop-only — so the guest is dead
+    // weight there, and a stock `gleam` on PATH cannot build target = "wasm"
+    // and would fail the whole cross build.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        return;
+    }
+
     build_guest(
         &manifest_dir,
         &out_dir,
