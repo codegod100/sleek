@@ -5,7 +5,7 @@
 //! `sleek-egui` during the transition.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use freeq_sdk::av::{parse_av_state, AvAction};
 use freeq_sdk::event::Event;
@@ -34,12 +34,15 @@ struct App {
     image_previews: HashMap<String, gtk::gdk::Texture>,
     pending_image_previews: HashSet<String>,
     pending_edit: Option<(String, usize, String)>,
+    pending_reply: Option<(String, String, String)>,
+    history_settle_at: HashMap<String, Instant>,
 }
 
 struct ChatLine {
     id: String,
     from: String,
     text: String,
+    reply_to: Option<String>,
     reactions: HashMap<String, HashSet<String>>,
 }
 
@@ -72,6 +75,7 @@ enum Input {
     ToggleChannels,
     ToggleUsers,
     SelectChannel(String),
+    OpenDm(String),
     SendMessage(String),
     ToggleCall,
     ToggleMute,
@@ -89,6 +93,12 @@ enum Input {
         message_index: usize,
         msgid: String,
     },
+    Reply {
+        target: String,
+        msgid: String,
+        author: String,
+    },
+    JumpToMessage(String),
     CancelEdit,
     ImagePreviewLoaded {
         url: String,
@@ -128,6 +138,7 @@ struct Widgets {
     speaker_button: gtk::Button,
     camera_button: gtk::Button,
     reaction_bars: HashMap<usize, gtk::Box>,
+    message_rows: HashMap<String, gtk::Box>,
 }
 
 impl Component for App {
@@ -245,6 +256,7 @@ impl Component for App {
         compact_channel_list.set_margin_end(6);
         let compact_channel_scroll = gtk::ScrolledWindow::builder()
             .child(&compact_channel_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .min_content_width(220)
             .vexpand(true)
             .build();
@@ -299,6 +311,7 @@ impl Component for App {
 
         let channel_scroll = gtk::ScrolledWindow::builder()
             .child(&channel_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .max_content_width(220)
             .vexpand(true)
             .build();
@@ -306,6 +319,7 @@ impl Component for App {
         let message_list = gtk::ListBox::new();
         message_list.set_selection_mode(gtk::SelectionMode::None);
         message_list.add_css_class("boxed-list");
+        message_list.set_valign(gtk::Align::Start);
         let message_scroll = gtk::ScrolledWindow::builder()
             .child(&message_list)
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -313,6 +327,14 @@ impl Component for App {
             .vexpand(true)
             .build();
         message_scroll.add_css_class("view");
+        // GTK updates the adjustment only after wrapped rows have been
+        // measured. Follow that authoritative size change so live messages
+        // reach the bottom even when allocation takes multiple frames.
+        message_scroll
+            .vadjustment()
+            .connect_upper_notify(|adjustment| {
+                adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+            });
 
         let compose = gtk::Entry::builder()
             .placeholder_text("Message")
@@ -525,6 +547,8 @@ impl Component for App {
             image_previews: HashMap::new(),
             pending_image_previews: HashSet::new(),
             pending_edit: None,
+            pending_reply: None,
+            history_settle_at: HashMap::new(),
         };
         let widgets = Widgets {
             stack,
@@ -557,6 +581,7 @@ impl Component for App {
             speaker_button,
             camera_button,
             reaction_bars: HashMap::new(),
+            message_rows: HashMap::new(),
         };
         ComponentParts { model, widgets }
     }
@@ -620,6 +645,7 @@ impl Component for App {
                 self.net = NetBridge::start();
                 self.connected = false;
                 self.pending_edit = None;
+                self.pending_reply = None;
                 widgets.edit_cancel_button.set_visible(false);
                 self.channels.clear();
                 self.topics.clear();
@@ -630,6 +656,7 @@ impl Component for App {
                 self.local_call = None;
                 self.video = None;
                 self.video_generations.clear();
+                self.history_settle_at.clear();
                 clear_flow_box(&widgets.video_grid);
                 widgets.video_grid.set_visible(false);
                 widgets.call_bar.set_visible(false);
@@ -653,6 +680,7 @@ impl Component for App {
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
                 self.pending_edit = None;
+                self.pending_reply = None;
                 widgets.compose.set_placeholder_text(Some("Message"));
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
@@ -660,8 +688,46 @@ impl Component for App {
                 widgets.compact_channels.set_visible(false);
                 self.render_channels(widgets, &_sender);
                 self.render_topic(widgets);
-                self.render_messages(widgets, &_sender);
-                self.render_users(widgets);
+                if self.history_settle_at.contains_key(
+                    self.active_channel.as_deref().unwrap_or_default(),
+                ) {
+                    clear_list(&widgets.message_list);
+                } else {
+                    self.render_messages(widgets, &_sender);
+                }
+                self.render_users(widgets, &_sender);
+                self.render_call_controls(widgets);
+                widgets.compose.grab_focus();
+            }
+            Input::OpenDm(nick) => {
+                let is_new = !self.channels.iter().any(|target| target == &nick);
+                self.ensure_channel(&nick);
+                self.active_channel = Some(nick.clone());
+                self.pending_edit = None;
+                self.pending_reply = None;
+                widgets.compose.set_placeholder_text(Some("Message"));
+                widgets.compose.set_text("");
+                widgets.edit_cancel_button.set_visible(false);
+                widgets.compact_users.set_reveal_child(false);
+                widgets.compact_users.set_visible(false);
+                if is_new {
+                    self.history_settle_at
+                        .insert(nick.clone(), Instant::now() + Duration::from_millis(350));
+                    self.net.send(NetCmd::HistoryLatest {
+                        target: nick,
+                        count: 100,
+                    });
+                }
+                self.render_channels(widgets, &_sender);
+                self.render_topic(widgets);
+                if self.history_settle_at.contains_key(
+                    self.active_channel.as_deref().unwrap_or_default(),
+                ) {
+                    clear_list(&widgets.message_list);
+                } else {
+                    self.render_messages(widgets, &_sender);
+                }
+                self.render_users(widgets, &_sender);
                 self.render_call_controls(widgets);
                 widgets.compose.grab_focus();
             }
@@ -689,15 +755,46 @@ impl Component for App {
                     self.render_messages(widgets, &_sender);
                     return;
                 }
+                if let Some((target, msgid, _)) = self.pending_reply.take() {
+                    self.net.send(NetCmd::Reply {
+                        target: target.clone(),
+                        msgid: msgid.clone(),
+                        text: text.to_owned(),
+                    });
+                    let nick = self.nick.clone();
+                    self.push_message(
+                        &target,
+                        String::new(),
+                        nick,
+                        text.to_owned(),
+                        Some(msgid),
+                        HashMap::new(),
+                    );
+                    widgets.compose.set_placeholder_text(Some("Message"));
+                    widgets.compose.set_text("");
+                    widgets.edit_cancel_button.set_visible(false);
+                    self.render_messages(widgets, &_sender);
+                    return;
+                }
                 let Some(target) = self.active_channel.clone() else {
                     widgets.status.set_text("Select a chat before sending");
                     return;
                 };
                 self.net.send(NetCmd::Privmsg {
-                    target,
+                    target: target.clone(),
                     text: text.to_owned(),
                 });
+                let nick = self.nick.clone();
+                self.push_message(
+                    &target,
+                    String::new(),
+                    nick,
+                    text.to_owned(),
+                    None,
+                    HashMap::new(),
+                );
                 widgets.compose.set_text("");
+                self.render_messages(widgets, &_sender);
             }
             Input::Edit {
                 target,
@@ -712,14 +809,35 @@ impl Component for App {
                     return;
                 };
                 self.pending_edit = Some((target, message_index, msgid));
+                self.pending_reply = None;
                 widgets.compose.set_placeholder_text(Some("Edit message"));
                 widgets.compose.set_text(&message.text);
                 widgets.edit_cancel_button.set_visible(true);
                 widgets.compose.grab_focus();
                 widgets.compose.set_position(-1);
             }
+            Input::Reply {
+                target,
+                msgid,
+                author,
+            } => {
+                self.pending_edit = None;
+                self.pending_reply = Some((target, msgid, author.clone()));
+                widgets
+                    .compose
+                    .set_placeholder_text(Some(&format!("Reply to {author}")));
+                widgets.compose.set_text("");
+                widgets.edit_cancel_button.set_visible(true);
+                widgets.compose.grab_focus();
+            }
+            Input::JumpToMessage(msgid) => {
+                if let Some(row) = widgets.message_rows.get(&msgid) {
+                    row.grab_focus();
+                }
+            }
             Input::CancelEdit => {
                 self.pending_edit = None;
+                self.pending_reply = None;
                 widgets.compose.set_placeholder_text(Some("Message"));
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
@@ -934,11 +1052,31 @@ impl Component for App {
                         _ => {}
                     }
                 }
+                let history_ready = self
+                    .active_channel
+                    .as_ref()
+                    .is_some_and(|channel| {
+                        self.history_settle_at
+                            .get(channel)
+                            .is_some_and(|deadline| Instant::now() >= *deadline)
+                    });
+                if history_ready {
+                    if let Some(channel) = &self.active_channel {
+                        self.history_settle_at.remove(channel);
+                    }
+                }
                 if refresh_chat {
                     self.render_channels(widgets, &_sender);
-                    self.render_messages(widgets, &_sender);
-                    self.render_users(widgets);
+                    let active_is_loading = self.active_channel.as_ref().is_some_and(|channel| {
+                        self.history_settle_at.contains_key(channel)
+                    });
+                    if !active_is_loading {
+                        self.render_messages(widgets, &_sender);
+                    }
+                    self.render_users(widgets, &_sender);
                     self.render_call_controls(widgets);
+                } else if history_ready {
+                    self.render_messages(widgets, &_sender);
                 }
                 self.render_video(widgets);
             }
@@ -963,6 +1101,10 @@ impl App {
                 self.add_member(&channel, &nick);
                 if nick.eq_ignore_ascii_case(&self.nick) {
                     self.ensure_channel(&channel);
+                    self.history_settle_at.insert(
+                        channel.clone(),
+                        Instant::now() + Duration::from_millis(350),
+                    );
                     self.net.send(NetCmd::HistoryLatest {
                         target: channel.clone(),
                         count: 100,
@@ -974,7 +1116,7 @@ impl App {
                     self.render_messages(widgets, sender);
                 }
                 if self.active_channel.as_deref() == Some(channel.as_str()) {
-                    self.render_users(widgets);
+                    self.render_users(widgets, sender);
                 }
             }
             Event::Parted { channel, nick } => {
@@ -989,7 +1131,7 @@ impl App {
                     self.render_channels(widgets, sender);
                     self.render_messages(widgets, sender);
                 }
-                self.render_users(widgets);
+                self.render_users(widgets, sender);
             }
             Event::Names { channel, nicks } => {
                 for nick in nicks {
@@ -1008,7 +1150,7 @@ impl App {
             }
             Event::Kicked { channel, nick, .. } => {
                 self.remove_member(&channel, &nick);
-                self.render_users(widgets);
+                self.render_users(widgets, sender);
             }
             Event::NickChanged { old_nick, new_nick } => {
                 for members in self.members.values_mut() {
@@ -1022,29 +1164,33 @@ impl App {
                 if self.nick.eq_ignore_ascii_case(&old_nick) {
                     self.nick = new_nick;
                 }
-                self.render_users(widgets);
+                self.render_users(widgets, sender);
             }
             Event::UserQuit { nick, .. } => {
                 for members in self.members.values_mut() {
                     members.retain(|member| !member.eq_ignore_ascii_case(&nick));
                 }
-                self.render_users(widgets);
+                self.render_users(widgets, sender);
             }
             Event::Message {
                 from,
                 target,
                 text,
-                dm_key,
+                dm_key: _,
                 tags,
             } => {
-                let channel = if let Some(dm_key) = dm_key {
-                    dm_key
-                } else if target.starts_with('#') || target.starts_with('&') {
+                let channel = if target.starts_with('#') || target.starts_with('&') {
                     target
-                } else if target.eq_ignore_ascii_case(&self.nick) {
-                    from.clone()
+                } else if from.eq_ignore_ascii_case(&self.nick) {
+                    // Own DM echoes name the recipient in `target`. Keep the
+                    // UI thread keyed by that visible nick rather than the
+                    // optional canonical DID in `dm_key`.
+                    target
                 } else {
-                    target
+                    // Any non-channel message from another user belongs to
+                    // that visible peer, even when an authenticated server
+                    // addresses our DID rather than our current IRC nick.
+                    from.clone()
                 };
                 self.ensure_channel(&channel);
                 let id = message_id(&tags);
@@ -1052,7 +1198,31 @@ impl App {
                     .get("+freeq.at/reactions")
                     .map(|value| parse_reactions(value))
                     .unwrap_or_default();
-                self.push_message(&channel, id, from, text, reactions);
+                let reply_to = tags
+                    .get("+draft/reply")
+                    .or_else(|| tags.get("draft/reply"))
+                    .or_else(|| tags.get("+reply"))
+                    .or_else(|| tags.get("reply"))
+                    .cloned();
+                let pending_echo = from.eq_ignore_ascii_case(&self.nick)
+                    && self.messages.get_mut(&channel).is_some_and(|messages| {
+                        messages.iter_mut().rev().take(8).any(|message| {
+                            if message.id.is_empty() && message.text == text {
+                                message.id = id.clone();
+                                message.reply_to = reply_to.clone();
+                                message.reactions = reactions.clone();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                    });
+                if !pending_echo {
+                    self.push_message(&channel, id, from, text, reply_to, reactions);
+                }
+                if let Some(deadline) = self.history_settle_at.get_mut(&channel) {
+                    *deadline = Instant::now() + Duration::from_millis(150);
+                }
             }
             Event::TagMsg {
                 from, target, tags, ..
@@ -1296,6 +1466,7 @@ impl App {
         id: String,
         from: String,
         text: String,
+        reply_to: Option<String>,
         reactions: HashMap<String, HashSet<String>>,
     ) {
         let messages = self.messages.entry(channel.to_owned()).or_default();
@@ -1303,6 +1474,7 @@ impl App {
             id,
             from,
             text,
+            reply_to,
             reactions,
         });
         if messages.len() > 500 {
@@ -1389,7 +1561,7 @@ impl App {
         }
     }
 
-    fn render_users(&self, widgets: &Widgets) {
+    fn render_users(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.user_list);
         clear_list(&widgets.compact_user_list);
         let Some(channel) = self.active_channel.as_deref() else {
@@ -1411,7 +1583,23 @@ impl App {
                 label.set_max_width_chars(18);
                 row.append(&presence);
                 row.append(&label);
-                list.append(&row);
+                let button = gtk::Button::builder()
+                    .child(&row)
+                    .tooltip_text(format!("Message {nick}"))
+                    .build();
+                button.add_css_class("flat");
+                button.set_halign(gtk::Align::Fill);
+                button.set_hexpand(true);
+                button.connect_clicked({
+                    let sender = sender.clone();
+                    let nick = nick.clone();
+                    move |_| sender.input(Input::OpenDm(nick.clone()))
+                });
+                let list_row = gtk::ListBoxRow::new();
+                list_row.set_activatable(false);
+                list_row.set_selectable(false);
+                list_row.set_child(Some(&button));
+                list.append(&list_row);
             }
         }
     }
@@ -1431,6 +1619,7 @@ impl App {
     fn render_messages(&mut self, widgets: &mut Widgets, sender: &ComponentSender<Self>) {
         clear_list(&widgets.message_list);
         widgets.reaction_bars.clear();
+        widgets.message_rows.clear();
         let Some(channel) = self.active_channel.as_deref() else {
             widgets.heading.set_text("Chats");
             widgets.compose.set_sensitive(false);
@@ -1449,6 +1638,30 @@ impl App {
                 let message_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 content.set_hexpand(true);
+                if let Some(reply_to) = &message.reply_to {
+                    let original = messages
+                        .iter()
+                        .find(|candidate| candidate.id == *reply_to)
+                        .map(|candidate| {
+                            let mut excerpt: String = candidate.text.chars().take(72).collect();
+                            if candidate.text.chars().count() > 72 {
+                                excerpt.push('…');
+                            }
+                            format!("↪ {}: {excerpt}", candidate.from)
+                        })
+                        .unwrap_or_else(|| "↪ Original message".into());
+                    let reply_context = gtk::Button::with_label(&original);
+                    reply_context.add_css_class("flat");
+                    reply_context.add_css_class("pill");
+                    reply_context.set_halign(gtk::Align::Fill);
+                    reply_context.set_tooltip_text(Some("Go to original message"));
+                    reply_context.connect_clicked({
+                        let sender = sender.clone();
+                        let reply_to = reply_to.clone();
+                        move |_| sender.input(Input::JumpToMessage(reply_to.clone()))
+                    });
+                    content.append(&reply_context);
+                }
                 let author = gtk::Label::new(Some(&message.from));
                 author.set_halign(gtk::Align::Start);
                 author.add_css_class("heading");
@@ -1502,11 +1715,18 @@ impl App {
                 message_line.append(&actions);
                 row.append(&message_line);
                 widgets.reaction_bars.insert(message_index, reactions);
+                if !message.id.is_empty() {
+                    row.set_focusable(true);
+                    widgets.message_rows.insert(message.id.clone(), row.clone());
+                }
                 widgets.message_list.append(&row);
             }
         }
         let adjustment = widgets.message_scroll.vadjustment();
-        gtk::glib::idle_add_local_once(move || {
+        // ListBox geometry is not final during this render pass. Waiting for
+        // the next frame ensures `upper` includes newly appended/wrapped rows
+        // before moving the viewport, which matters most for live DMs.
+        gtk::glib::timeout_add_local_once(Duration::from_millis(32), move || {
             adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
         });
     }
@@ -1550,6 +1770,26 @@ impl App {
         sender: &ComponentSender<Self>,
     ) {
         if !message.id.is_empty() {
+            let reply_button = gtk::Button::builder()
+                .icon_name("mail-reply-sender-symbolic")
+                .tooltip_text("Reply to message")
+                .build();
+            reply_button.add_css_class("flat");
+            reply_button.add_css_class("circular");
+            reply_button.connect_clicked({
+                let sender = sender.clone();
+                let target = channel.to_owned();
+                let msgid = message.id.clone();
+                let author = message.from.clone();
+                move |_| {
+                    sender.input(Input::Reply {
+                        target: target.clone(),
+                        msgid: msgid.clone(),
+                        author: author.clone(),
+                    });
+                }
+            });
+            actions.append(&reply_button);
             if message.from.eq_ignore_ascii_case(&self.nick) {
                 let edit_button = gtk::Button::builder()
                     .icon_name("document-edit-symbolic")
