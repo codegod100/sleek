@@ -843,15 +843,27 @@ impl Component for App {
             }
             Input::ToggleChannels => {
                 let open = !widgets.compact_channels.reveals_child();
-                widgets.compact_users.set_reveal_child(false);
+                let full_width = root.width() < 560;
+                widgets
+                    .compact_channels
+                    .set_hexpand(full_width && open);
+                if full_width {
+                    widgets.compact_users.set_reveal_child(false);
+                    widgets.compact_users.set_hexpand(false);
+                }
                 widgets.compact_channels.set_reveal_child(open);
-                widgets.conversation.set_visible(true);
+                widgets.conversation.set_visible(!full_width || !open);
             }
             Input::ToggleUsers => {
                 let open = !widgets.compact_users.reveals_child();
-                widgets.compact_channels.set_reveal_child(false);
+                let full_width = root.width() < 560;
+                widgets.compact_users.set_hexpand(full_width && open);
+                if full_width {
+                    widgets.compact_channels.set_reveal_child(false);
+                    widgets.compact_channels.set_hexpand(false);
+                }
                 widgets.compact_users.set_reveal_child(open);
-                widgets.conversation.set_visible(true);
+                widgets.conversation.set_visible(!full_width || !open);
             }
             Input::MarkAllRead => {
                 let account = self.account_key();
@@ -898,6 +910,7 @@ impl Component for App {
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
                 widgets.compact_users.set_reveal_child(false);
+                widgets.compact_users.set_hexpand(false);
                 widgets.conversation.set_visible(true);
                 if is_new {
                     self.history_settle_at
@@ -1071,9 +1084,15 @@ impl Component for App {
                 // retains useful space instead of abruptly switching layouts.
                 let compact = width < 980;
                 let compact_channels = width < 700;
-                // Compact controls use icons, but the fixed-width drawers
-                // remain beside the conversation even at narrow allocations.
+                // Compact drawers stay beside the conversation until phone
+                // width, where the open drawer expands to replace it.
                 self.mobile = width < 560;
+                widgets
+                    .compact_channels
+                    .set_hexpand(self.mobile && widgets.compact_channels.reveals_child());
+                widgets
+                    .compact_users
+                    .set_hexpand(self.mobile && widgets.compact_users.reveals_child());
                 widgets.channel_panel.set_visible(!compact_channels);
                 widgets.channel_separator.set_visible(!compact_channels);
                 widgets.user_scroll.set_visible(!compact);
@@ -1082,7 +1101,10 @@ impl Component for App {
                     .compact_channels_button
                     .set_visible(compact_channels);
                 widgets.compact_users_button.set_visible(compact);
-                widgets.conversation.set_visible(true);
+                let mobile_drawer_open = self.mobile
+                    && (widgets.compact_channels.reveals_child()
+                        || widgets.compact_users.reveals_child());
+                widgets.conversation.set_visible(!mobile_drawer_open);
                 if compact_channels {
                     widgets.disconnect.set_icon_name("application-exit-symbolic");
                 } else {
@@ -1091,10 +1113,12 @@ impl Component for App {
                 widgets.disconnect.set_tooltip_text(Some("Disconnect"));
                 if !compact_channels {
                     widgets.compact_channels.set_reveal_child(false);
+                    widgets.compact_channels.set_hexpand(false);
                     widgets.conversation.set_visible(true);
                 }
                 if !compact {
                     widgets.compact_users.set_reveal_child(false);
+                    widgets.compact_users.set_hexpand(false);
                 }
                 self.render_call_controls(widgets);
             }
