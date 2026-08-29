@@ -125,7 +125,11 @@ pub(crate) fn storage_dir() -> PathBuf {
         if let Some(dir) = crate::android_media::app_storage_dir() {
             return dir;
         }
-        log::warn!("android: app storage dir unavailable; prefs may not persist");
+        // GTK's Android backend does not create an android_activity
+        // `AndroidApp`, so the egui/NativeActivity handle above is unavailable.
+        // `/data/data/<application-id>/files` is the stable private-files alias
+        // across Android users and is writable only by this application.
+        return PathBuf::from("/data/data/uk.nandi.sleek/files/sleek");
     }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
