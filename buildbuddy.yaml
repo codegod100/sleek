@@ -1,0 +1,11 @@
+actions:
+  - name: "Build sleek"
+    triggers:
+      push:
+        branches:
+          - "relm4-port"
+      pull_request:
+        branches:
+          - "*"
+    steps:
+      - run: "./buck2 build :sleek"
