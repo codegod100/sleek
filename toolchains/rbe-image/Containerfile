@@ -29,9 +29,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
     libgtk-4-dev libadwaita-1-dev \
-    openjdk-17-jdk-headless \
+    openjdk-17-jdk-headless python3-pip ninja-build cmake sassc glslc \
     && mkdir -p /usr/lib/lib \
     && ln -s ../x86_64-linux-gnu /usr/lib/lib/x86_64-linux-gnu \
+    && python3 -m pip install --no-cache-dir meson==1.9.1 \
     && rm -rf /var/lib/apt/lists/*
 
 # scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,

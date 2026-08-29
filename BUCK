@@ -1,4 +1,4 @@
-load(":cargo.bzl", "cargo_aab_genrule", "cargo_apk_genrule", "cargo_genrule")
+load(":cargo.bzl", "cargo_aab_genrule", "cargo_apk_genrule", "cargo_genrule", "relm4_apk_genrule")
 load(":flatpak.bzl", "flatpak_genrule")
 
 ##
@@ -33035,6 +33035,12 @@ cargo_apk_genrule(
     name = "sleek-android-apk",
     manifest = "android/Cargo.toml",
     package = "sleek",
+)
+
+# GTK4/Relm4 Android application. The Python driver replaces Pixiewood's Perl
+# frontend while reusing its cross files, GTK patches, and Android runtime glue.
+relm4_apk_genrule(
+    name = "sleek-relm4-apk",
 )
 
 # `buck2 build //:sleek-android-aab`

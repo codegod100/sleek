@@ -89,9 +89,9 @@ def _srcs():
 # `//third-party:patched-fork-srcs` (see _srcs()) is a *target*, not a raw
 # glob-matched file — repo_relative_root's genrule staging only remaps raw
 # file srcs onto their real repo-relative path; a target dependency
-# instead lands at its own buck-out artifact path (confirmed by hand:
-# buck-out/.../third-party/__patched-fork-srcs__/patched-fork-srcs/cpal/...,
-# not third-party/cpal/...). So stage it ourselves via $(location) before
+# instead lands at its own buck-out artifact path. Depending on the Buck
+# materializer, that artifact either starts at cpal/ or preserves the source
+# prefix as third-party/cpal/. So stage it ourselves via $(location) before
 # cargo ever runs. `-n` (no-clobber): locally repo_relative_root already
 # runs in the real repo root, where
 # third-party/{cpal,egui-winit,egui_glow,khronos_api} already exist for
@@ -99,7 +99,12 @@ def _srcs():
 # yet (that's the whole bug this works around), so the copy is what
 # actually populates it. Shared by every cargo-backed genrule below since
 # they all build off the same [patch]-carrying Cargo.tomls.
-_STAGE_PATCHED_FORKS = 'mkdir -p third-party\ncp -rn "$(location //:patched-fork-srcs)"/* third-party/\n'
+_STAGE_PATCHED_FORKS = (
+    'mkdir -p third-party\n' +
+    'forks="$(location //:patched-fork-srcs)"\n' +
+    '[ ! -d "$forks/third-party" ] || forks="$forks/third-party"\n' +
+    'cp -rn "$forks"/* third-party/\n'
+)
 
 def cargo_genrule(name, manifest, cargo_args, collect_cmd, out = None, outs = None, default_outs = None, executable = False):
     """A genrule that shells out to `cargo build` (via `pixi run`) and copies its artifact(s) to $OUT.
@@ -312,6 +317,30 @@ def cargo_apk_genrule(name, manifest, package, target = "aarch64-linux-android")
             inject_dex = inject_dex,
         ),
         # Same rationale as cargo_genrule — see its own comment.
+        repo_relative_root = True,
+        always_print_stderr = True,
+        visibility = ["PUBLIC"],
+    )
+
+def relm4_apk_genrule(name):
+    """Build the GTK/Relm4 Android application in the Android RBE image."""
+    native.genrule(
+        name = name,
+        srcs = _srcs() + native.glob([
+            "gtk-android-builder/**",
+            "meson.build",
+            "scripts/build-relm4-android.py",
+            "scripts/cargo-build-relm4-cdylib.sh",
+        ]),
+        out = "sleek-relm4.apk",
+        cmd = (
+            "set -euo pipefail\n" +
+            _STAGE_PATCHED_FORKS +
+            "python3 scripts/build-relm4-android.py " +
+            "--android-home /opt/android/sdk " +
+            "--ndk /opt/android/ndk " +
+            "--output \"$OUT\"\n"
+        ),
         repo_relative_root = True,
         always_print_stderr = True,
         visibility = ["PUBLIC"],
