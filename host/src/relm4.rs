@@ -289,6 +289,7 @@ impl Component for App {
             .vexpand(true)
             .build();
         let compact_channel_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        compact_channel_panel.set_width_request(220);
         compact_channel_panel.set_margin_top(6);
         compact_channel_panel.set_margin_start(6);
         compact_channel_panel.set_margin_end(6);
@@ -297,10 +298,9 @@ impl Component for App {
         let compact_channels = gtk::Revealer::builder()
             .child(&compact_channel_panel)
             .transition_type(gtk::RevealerTransitionType::SlideRight)
-            .hexpand(true)
+            .hexpand(false)
             .build();
         compact_channels.set_reveal_child(false);
-        compact_channels.set_visible(false);
         let compact_channels_button = gtk::Button::builder()
             .icon_name("sidebar-show-symbolic")
             .tooltip_text("Open channel list")
@@ -317,14 +317,15 @@ impl Component for App {
         let compact_user_scroll = gtk::ScrolledWindow::builder()
             .child(&compact_user_list)
             .min_content_width(180)
+            .max_content_width(220)
             .vexpand(true)
             .build();
         let compact_users = gtk::Revealer::builder()
             .child(&compact_user_scroll)
             .transition_type(gtk::RevealerTransitionType::SlideLeft)
-            .hexpand(true)
+            .hexpand(false)
             .build();
-        compact_users.set_visible(false);
+        compact_users.set_reveal_child(false);
         let compact_users_button = gtk::Button::builder()
             .icon_name("system-users-symbolic")
             .tooltip_text("Open user list")
@@ -841,24 +842,16 @@ impl Component for App {
                 widgets.stack.set_visible_child_name("connect");
             }
             Input::ToggleChannels => {
-                let open = !widgets.compact_channels.is_visible();
+                let open = !widgets.compact_channels.reveals_child();
                 widgets.compact_users.set_reveal_child(false);
-                widgets.compact_users.set_visible(false);
-                widgets.compact_channels.set_visible(open);
                 widgets.compact_channels.set_reveal_child(open);
-                if self.mobile {
-                    widgets.conversation.set_visible(!open);
-                }
+                widgets.conversation.set_visible(true);
             }
             Input::ToggleUsers => {
-                let open = !widgets.compact_users.is_visible();
+                let open = !widgets.compact_users.reveals_child();
                 widgets.compact_channels.set_reveal_child(false);
-                widgets.compact_channels.set_visible(false);
-                widgets.compact_users.set_visible(open);
                 widgets.compact_users.set_reveal_child(open);
-                if self.mobile {
-                    widgets.conversation.set_visible(!open);
-                }
+                widgets.conversation.set_visible(true);
             }
             Input::MarkAllRead => {
                 let account = self.account_key();
@@ -878,8 +871,6 @@ impl Component for App {
                 widgets.compose.set_placeholder_text(Some("Message"));
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
-                widgets.compact_channels.set_reveal_child(false);
-                widgets.compact_channels.set_visible(false);
                 widgets.conversation.set_visible(true);
                 self.render_channels(widgets, &sender);
                 self.render_topic(widgets);
@@ -907,7 +898,6 @@ impl Component for App {
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
                 widgets.compact_users.set_reveal_child(false);
-                widgets.compact_users.set_visible(false);
                 widgets.conversation.set_visible(true);
                 if is_new {
                     self.history_settle_at
@@ -1080,28 +1070,31 @@ impl Component for App {
                 // Collapse one secondary column at a time so the conversation
                 // retains useful space instead of abruptly switching layouts.
                 let compact = width < 980;
-                let mobile = width < 700;
-                self.mobile = mobile;
-                widgets.channel_panel.set_visible(!mobile);
-                widgets.channel_separator.set_visible(!mobile);
+                let compact_channels = width < 700;
+                // Compact controls use icons, but the fixed-width drawers
+                // remain beside the conversation even at narrow allocations.
+                self.mobile = width < 560;
+                widgets.channel_panel.set_visible(!compact_channels);
+                widgets.channel_separator.set_visible(!compact_channels);
                 widgets.user_scroll.set_visible(!compact);
                 widgets.user_separator.set_visible(!compact);
-                widgets.compact_channels_button.set_visible(mobile);
+                widgets
+                    .compact_channels_button
+                    .set_visible(compact_channels);
                 widgets.compact_users_button.set_visible(compact);
-                if mobile {
+                widgets.conversation.set_visible(true);
+                if compact_channels {
                     widgets.disconnect.set_icon_name("application-exit-symbolic");
                 } else {
                     widgets.disconnect.set_label("Disconnect");
                 }
                 widgets.disconnect.set_tooltip_text(Some("Disconnect"));
-                if !mobile {
+                if !compact_channels {
                     widgets.compact_channels.set_reveal_child(false);
-                    widgets.compact_channels.set_visible(false);
                     widgets.conversation.set_visible(true);
                 }
                 if !compact {
                     widgets.compact_users.set_reveal_child(false);
-                    widgets.compact_users.set_visible(false);
                 }
                 self.render_call_controls(widgets);
             }
