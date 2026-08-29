@@ -1860,29 +1860,84 @@ impl App {
                 let target = channel.to_owned();
                 let msgid = message.id.clone();
                 move |button| {
-                    let picker = gtk::EmojiChooser::new();
-                    picker.connect_emoji_picked({
-                        let sender = sender.clone();
-                        let target = target.clone();
-                        let msgid = msgid.clone();
-                        move |_, emoji| {
-                            sender.input(Input::React {
-                                target: target.clone(),
-                                message_index,
-                                msgid: msgid.clone(),
-                                emoji: emoji.to_owned(),
+                    #[cfg(target_os = "android")]
+                    {
+                        // GtkEmojiChooser focuses its search entry as it maps,
+                        // which raises the soft keyboard. The resulting inset
+                        // change resizes the popup surface and GDK's Android
+                        // backend destroys it, so the chooser vanishes the
+                        // instant it opens. A plain grid needs no text entry.
+                        let popover = gtk::Popover::new();
+                        // Plain boxes, not a GtkFlowBox: the flow box's own
+                        // click gesture swallows presses before they reach the
+                        // buttons, so picking an emoji did nothing.
+                        let grid = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                        let mut row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                        for (index, emoji) in REACTION_EMOJI.into_iter().enumerate() {
+                            if index > 0 && index % 6 == 0 {
+                                grid.append(&row);
+                                row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                            }
+                            let choice = gtk::Button::builder().label(emoji).build();
+                            choice.add_css_class("flat");
+                            choice.connect_clicked({
+                                let sender = sender.clone();
+                                let target = target.clone();
+                                let msgid = msgid.clone();
+                                let popover = popover.downgrade();
+                                move |_| {
+                                    sender.input(Input::React {
+                                        target: target.clone(),
+                                        message_index,
+                                        msgid: msgid.clone(),
+                                        emoji: emoji.to_owned(),
+                                    });
+                                    if let Some(popover) = popover.upgrade() {
+                                        popover.popdown();
+                                    }
+                                }
                             });
+                            row.append(&choice);
                         }
-                    });
-                    picker.connect_closed(|picker| picker.unparent());
-                    picker.set_parent(button);
-                    picker.popup();
+                        grid.append(&row);
+                        popover.set_child(Some(&grid));
+                        popover.connect_closed(|popover| popover.unparent());
+                        popover.set_parent(button);
+                        popover.popup();
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let picker = gtk::EmojiChooser::new();
+                        picker.connect_emoji_picked({
+                            let sender = sender.clone();
+                            let target = target.clone();
+                            let msgid = msgid.clone();
+                            move |_, emoji| {
+                                sender.input(Input::React {
+                                    target: target.clone(),
+                                    message_index,
+                                    msgid: msgid.clone(),
+                                    emoji: emoji.to_owned(),
+                                });
+                            }
+                        });
+                        picker.connect_closed(|picker| picker.unparent());
+                        picker.set_parent(button);
+                        picker.popup();
+                    }
                 }
             });
             actions.append(&picker_button);
         }
     }
 }
+
+/// Reaction choices for the Android popover, which cannot use GtkEmojiChooser.
+#[cfg(target_os = "android")]
+const REACTION_EMOJI: [&str; 12] = [
+    "\u{1f44d}", "\u{2764}\u{fe0f}", "\u{1f602}", "\u{1f389}", "\u{1f525}", "\u{1f62e}",
+    "\u{1f622}", "\u{1f64f}", "\u{1f440}", "\u{1f4af}", "\u{1f600}", "\u{1f629}",
+];
 
 fn clear_list(list: &gtk::ListBox) {
     while let Some(child) = list.first_child() {
