@@ -5,7 +5,6 @@
 //! `sleek-egui` during the transition.
 
 use std::cell::Cell;
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -29,6 +28,7 @@ struct App {
     topics: HashMap<String, String>,
     messages: HashMap<String, Vec<ChatLine>>,
     message_counts: HashMap<String, usize>,
+    channel_activity: HashMap<String, i64>,
     message_store: sleek::message_store::MessageStore,
     history_batches: HashSet<String>,
     members: HashMap<String, Vec<String>>,
@@ -39,6 +39,9 @@ struct App {
     video_generations: HashMap<String, u64>,
     image_previews: HashMap<String, gtk::gdk::Texture>,
     pending_image_previews: HashSet<String>,
+    avatar_textures: HashMap<String, gtk::gdk::Texture>,
+    pending_avatars: HashSet<String>,
+    avatar_actors: HashMap<String, String>,
     pending_edit: Option<(String, usize, String)>,
     pending_reply: Option<(String, String, String)>,
     history_settle_at: HashMap<String, Instant>,
@@ -56,6 +59,8 @@ struct ChatLine {
     id: String,
     from: String,
     text: String,
+    timestamp: String,
+    day: String,
     reply_to: Option<String>,
     reactions: HashMap<String, HashSet<String>>,
 }
@@ -121,6 +126,10 @@ enum Input {
     CancelEdit,
     ImagePreviewLoaded {
         url: String,
+        bytes: Result<Vec<u8>, String>,
+    },
+    AvatarLoaded {
+        nick: String,
         bytes: Result<Vec<u8>, String>,
     },
     Tick,
@@ -310,7 +319,6 @@ impl Component for App {
         let mark_all_read_button = gtk::Button::with_label("Mark all read");
         mark_all_read_button.add_css_class("flat");
         mark_all_read_button.set_sensitive(false);
-        header.pack_start(&mark_all_read_button);
         let compact_user_list = gtk::ListBox::new();
         compact_user_list.set_selection_mode(gtk::SelectionMode::None);
         compact_user_list.add_css_class("navigation-sidebar");
@@ -366,6 +374,7 @@ impl Component for App {
         channel_panel.set_margin_start(8);
         channel_panel.set_margin_end(8);
         channel_panel.append(&channel_search);
+        channel_panel.append(&mark_all_read_button);
         channel_panel.append(&channel_scroll);
 
         let message_list = gtk::ListBox::new();
@@ -672,6 +681,7 @@ impl Component for App {
             topics: HashMap::new(),
             messages: HashMap::new(),
             message_counts: HashMap::new(),
+            channel_activity: HashMap::new(),
             message_store: sleek::message_store::MessageStore::open_default(),
             history_batches: HashSet::new(),
             members: HashMap::new(),
@@ -682,6 +692,9 @@ impl Component for App {
             video_generations: HashMap::new(),
             image_previews: HashMap::new(),
             pending_image_previews: HashSet::new(),
+            avatar_textures: HashMap::new(),
+            pending_avatars: HashSet::new(),
+            avatar_actors: HashMap::new(),
             pending_edit: None,
             pending_reply: None,
             history_settle_at: HashMap::new(),
@@ -756,6 +769,7 @@ impl Component for App {
                 self.topics.clear();
                 self.messages.clear();
                 self.message_counts.clear();
+                self.channel_activity.clear();
                 self.history_batches.clear();
                 self.members.clear();
                 self.active_channel = None;
@@ -827,6 +841,7 @@ impl Component for App {
                 self.topics.clear();
                 self.messages.clear();
                 self.message_counts.clear();
+                self.channel_activity.clear();
                 self.history_batches.clear();
                 self.members.clear();
                 self.active_channel = None;
@@ -877,6 +892,7 @@ impl Component for App {
                 self.pinned_to_bottom.set(true);
                 widgets.jump_to_present.set_visible(false);
                 self.set_message_count(&channel, 0);
+                self.touch_channel(&channel);
                 self.active_channel = Some(channel);
                 self.pending_edit = None;
                 self.pending_reply = None;
@@ -903,6 +919,7 @@ impl Component for App {
                 let is_new = !self.channels.iter().any(|target| target == &nick);
                 self.ensure_channel(&nick);
                 self.set_message_count(&nick, 0);
+                self.touch_channel(&nick);
                 self.active_channel = Some(nick.clone());
                 self.pending_edit = None;
                 self.pending_reply = None;
@@ -971,6 +988,7 @@ impl Component for App {
                         String::new(),
                         nick,
                         text.to_owned(),
+                        None,
                         Some(msgid),
                         HashMap::new(),
                     );
@@ -998,6 +1016,7 @@ impl Component for App {
                     String::new(),
                     nick,
                     text.to_owned(),
+                    None,
                     None,
                     HashMap::new(),
                 );
@@ -1177,6 +1196,19 @@ impl Component for App {
                         self.render_messages(widgets, &sender);
                     }
                     Err(error) => eprintln!("image preview failed for {url}: {error}"),
+                }
+            }
+            Input::AvatarLoaded { nick, bytes } => {
+                self.pending_avatars.remove(&nick);
+                match bytes.and_then(|bytes| {
+                    let bytes = gtk::glib::Bytes::from_owned(bytes);
+                    gtk::gdk::Texture::from_bytes(&bytes).map_err(|error| error.to_string())
+                }) {
+                    Ok(texture) => {
+                        self.avatar_textures.insert(nick, texture);
+                        self.render_messages(widgets, &sender);
+                    }
+                    Err(error) => eprintln!("ATProto avatar failed for {nick}: {error}"),
                 }
             }
             Input::Tick => {
@@ -1428,6 +1460,13 @@ impl App {
                     .or_else(|| tags.get("+reply"))
                     .or_else(|| tags.get("reply"))
                     .cloned();
+                if let Some(actor) = tags
+                    .get("account")
+                    .filter(|actor| sleek::bsky::is_atproto_did(actor))
+                {
+                    self.avatar_actors
+                        .insert(from.to_lowercase(), actor.to_string());
+                }
                 let pending_echo = from.eq_ignore_ascii_case(&self.nick)
                     && self.messages.get_mut(&channel).is_some_and(|messages| {
                         messages.iter_mut().rev().take(8).any(|message| {
@@ -1448,7 +1487,15 @@ impl App {
                     if !is_history {
                         self.increment_message_count(&channel);
                     }
-                    self.push_message(&channel, id, from, text, reply_to, reactions);
+                    self.push_message(
+                        &channel,
+                        id,
+                        from,
+                        text,
+                        tags.get("time").map(String::as_str),
+                        reply_to,
+                        reactions,
+                    );
                 }
                 if let Some(deadline) = self.history_settle_at.get_mut(&channel) {
                     *deadline = Instant::now() + Duration::from_millis(150);
@@ -1697,6 +1744,19 @@ impl App {
                 }
             }
         }
+        if !self.channel_activity.contains_key(channel) {
+            let account = self.account_key();
+            match self.message_store.channel_activity(&account, channel) {
+                Ok(last_used_ms) if last_used_ms > 0 => {
+                    self.channel_activity
+                        .insert(channel.to_owned(), last_used_ms);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    relm4::gtk::glib::g_warning!("sleek", "load channel activity: {error:#}");
+                }
+            }
+        }
         self.messages.entry(channel.to_owned()).or_default();
         self.members.entry(channel.to_owned()).or_default();
     }
@@ -1724,19 +1784,56 @@ impl App {
         id: String,
         from: String,
         text: String,
+        server_time: Option<&str>,
         reply_to: Option<String>,
         reactions: HashMap<String, HashSet<String>>,
     ) {
         let messages = self.messages.entry(channel.to_owned()).or_default();
+        let (timestamp, day) = format_message_datetime(server_time);
         messages.push(ChatLine {
             id,
             from,
             text,
+            timestamp,
+            day,
             reply_to,
             reactions,
         });
         if messages.len() > 500 {
             messages.remove(0);
+        }
+        let activity_ms = server_time
+            .and_then(|value| gtk::glib::DateTime::from_iso8601(value, None).ok())
+            .map(|value| value.to_unix().saturating_mul(1000));
+        self.touch_channel_at(channel, activity_ms);
+    }
+
+    fn touch_channel(&mut self, channel: &str) {
+        self.touch_channel_at(channel, None);
+    }
+
+    fn touch_channel_at(&mut self, channel: &str, last_used_ms: Option<i64>) {
+        let last_used_ms = last_used_ms.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or_default()
+        });
+        if self
+            .channel_activity
+            .get(channel)
+            .is_some_and(|current| *current >= last_used_ms)
+        {
+            return;
+        }
+        self.channel_activity
+            .insert(channel.to_owned(), last_used_ms);
+        let account = self.account_key();
+        if let Err(error) =
+            self.message_store
+                .set_channel_activity(&account, channel, last_used_ms)
+        {
+            relm4::gtk::glib::g_warning!("sleek", "save channel activity: {error:#}");
         }
     }
 
@@ -1810,13 +1907,19 @@ impl App {
             .iter()
             .filter(|channel| channel.to_lowercase().contains(&query))
             .collect();
-        channels.sort_by_key(|channel| {
-            Reverse(
-                self.message_counts
-                    .get(channel.as_str())
-                    .copied()
-                    .unwrap_or_default(),
-            )
+        channels.sort_by(|left, right| {
+            self.channel_activity
+                .get(right.as_str())
+                .copied()
+                .unwrap_or_default()
+                .cmp(
+                    &self
+                        .channel_activity
+                        .get(left.as_str())
+                        .copied()
+                        .unwrap_or_default(),
+                )
+                .then_with(|| left.to_lowercase().cmp(&right.to_lowercase()))
         });
         for channel in channels {
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
@@ -1920,7 +2023,18 @@ impl App {
         widgets.heading.set_text(channel);
         widgets.compose.set_sensitive(true);
         if let Some(messages) = self.messages.get(channel) {
+            let mut previous_day: Option<&str> = None;
             for (message_index, message) in messages.iter().enumerate() {
+                if previous_day != Some(message.day.as_str()) {
+                    let separator = gtk::Label::new(Some(&message.day));
+                    separator.set_halign(gtk::Align::Center);
+                    separator.set_margin_top(12);
+                    separator.set_margin_bottom(6);
+                    separator.add_css_class("dim-label");
+                    separator.add_css_class("caption");
+                    widgets.message_list.append(&separator);
+                    previous_day = Some(&message.day);
+                }
                 let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
@@ -1968,6 +2082,41 @@ impl App {
                 author.set_width_chars(1);
                 author.set_max_width_chars(28);
                 author.add_css_class("heading");
+                let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let avatar_key = message.from.to_lowercase();
+                if let Some(texture) = self.avatar_textures.get(&avatar_key) {
+                    let avatar = gtk::Picture::for_paintable(texture);
+                    avatar.set_size_request(32, 32);
+                    avatar.set_can_shrink(true);
+                    avatar.add_css_class("circular");
+                    header.append(&avatar);
+                } else if let Some(actor) = self.avatar_actors.get(&avatar_key).cloned() {
+                    if self.pending_avatars.insert(avatar_key.clone()) {
+                        let sender = sender.clone();
+                        gtk::glib::spawn_future_local(async move {
+                            let bytes = match sleek::bsky::fetch_actor_profile(&actor).await {
+                                Ok(profile) => match profile.avatar {
+                                    Some(url) => sleek::preview::fetch_image_preview(&url)
+                                        .await
+                                        .map_err(|error| error.to_string()),
+                                    None => Err("profile has no avatar".into()),
+                                },
+                                Err(error) => Err(error.to_string()),
+                            };
+                            sender.input(Input::AvatarLoaded {
+                                nick: avatar_key,
+                                bytes,
+                            });
+                        });
+                    }
+                }
+                header.append(&author);
+                let timestamp = gtk::Label::new(Some(&message.timestamp));
+                timestamp.set_halign(gtk::Align::End);
+                timestamp.set_hexpand(true);
+                timestamp.add_css_class("dim-label");
+                timestamp.add_css_class("caption");
+                header.append(&timestamp);
                 let body = gtk::Label::new(Some(&message.text));
                 body.set_markup(&linkify_message(&message.text));
                 body.set_halign(gtk::Align::Start);
@@ -1978,7 +2127,7 @@ impl App {
                 body.set_width_chars(1);
                 body.set_max_width_chars(80);
                 body.set_selectable(true);
-                content.append(&author);
+                content.append(&header);
                 content.append(&body);
 
                 if let Some(sleek::preview::Embed::Image { url }) =
@@ -2273,6 +2422,25 @@ const REACTION_EMOJI: [&str; 12] = [
     "\u{1f44d}", "\u{2764}\u{fe0f}", "\u{1f602}", "\u{1f389}", "\u{1f525}", "\u{1f62e}",
     "\u{1f622}", "\u{1f64f}", "\u{1f440}", "\u{1f4af}", "\u{1f600}", "\u{1f629}",
 ];
+
+fn format_message_datetime(server_time: Option<&str>) -> (String, String) {
+   let parsed = server_time.and_then(|value| {
+       gtk::glib::DateTime::from_iso8601(value, None)
+           .ok()
+           .and_then(|value| value.to_local().ok())
+   });
+   let time = parsed.or_else(|| gtk::glib::DateTime::now_local().ok());
+   let timestamp = time
+       .as_ref()
+       .and_then(|value| value.format("%-I:%M %p").ok())
+       .map(|value| value.to_string())
+       .unwrap_or_default();
+   let day = time
+       .and_then(|value| value.format("%A, %B %-d, %Y").ok())
+       .map(|value| value.to_string())
+       .unwrap_or_default();
+   (timestamp, day)
+}
 
 fn clear_list(list: &gtk::ListBox) {
     while let Some(child) = list.first_child() {

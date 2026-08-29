@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS channel_counts (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account, channel)
 );
+CREATE TABLE IF NOT EXISTS channel_activity (
+    account TEXT NOT NULL,
+    channel TEXT NOT NULL COLLATE NOCASE,
+    last_used_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (account, channel)
+);
 "#;
 
 #[derive(Debug)]
@@ -225,6 +231,37 @@ impl MessageStore {
             .optional()?
             .unwrap_or_default()
             .max(0) as u32)
+    }
+
+    /// Persist the last time a channel was opened or received activity.
+    pub fn set_channel_activity(
+        &self,
+        account: &str,
+        channel: &str,
+        last_used_ms: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO channel_activity(account, channel, last_used_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(account, channel) DO UPDATE SET
+               last_used_ms=MAX(channel_activity.last_used_ms, excluded.last_used_ms)",
+            params![account, channel, last_used_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Load a channel's persisted last-use time.
+    pub fn channel_activity(&self, account: &str, channel: &str) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT last_used_ms FROM channel_activity
+                 WHERE account=?1 AND channel=?2",
+                params![account, channel],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default())
     }
 
     /// Clear every activity count for one account.
