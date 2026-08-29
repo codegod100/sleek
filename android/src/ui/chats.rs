@@ -51,10 +51,20 @@ pub fn chats_tab(
     });
     ui.add_space(sp.md);
 
+    let search_resp = ui.add(
+        egui::TextEdit::singleline(&mut state.channel_search)
+            .margin(th.text_edit_margin())
+            .desired_width(f32::INFINITY)
+            .min_size(egui::vec2(0.0, th.spacing.control_height))
+            .hint_text("Search channels"),
+    );
+    text_edit_clipboard_menu(ui, th, &search_resp);
+    ui.add_space(sp.md);
+
     if pinned_join {
-        // In the wide master panel, keep the join controls pinned and scroll
-        // only the conversation list. The narrow layout already has one
-        // outer scroll area, so do not nest another scrollbar there.
+        // In the wide master panel, keep the join and search controls pinned
+        // and scroll only the conversation list. The narrow layout already
+        // has one outer scroll area, so do not nest another scrollbar there.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .id_salt("chats_conversation_scroll")
@@ -70,13 +80,21 @@ pub fn chats_list(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsA
     let mut action = ChatsAction::None;
     let sp = &th.spacing;
     let p = &th.palette;
+    let query = state.channel_search.trim().to_lowercase();
     let conversations: Vec<(String, String, bool, u32, String, String, i64)> = state
         .sorted_conversations()
         .into_iter()
-        .map(|b| {
-            (
+        .filter_map(|b| {
+            let display = state.display_name_for(&b.name);
+            if !query.is_empty()
+                && !b.name.to_lowercase().contains(&query)
+                && !display.to_lowercase().contains(&query)
+            {
+                return None;
+            }
+            Some((
                 b.name.clone(),
-                state.display_name_for(&b.name),
+                display,
                 state
                     .active_channel
                     .as_ref()
@@ -85,20 +103,29 @@ pub fn chats_list(ui: &mut egui::Ui, th: &Theme, state: &mut AppState) -> ChatsA
                 b.last_preview(),
                 b.topic.clone(),
                 b.last_activity,
-            )
+            ))
         })
         .collect();
 
     if conversations.is_empty() {
-        empty_state(
-            ui,
-            th,
-            "No chats yet",
-            "Join a channel from Discover or use the field above.",
-        );
-        ui.add_space(sp.md);
-        if button(ui, th, "Open Discover").clicked() {
-            state.tab = crate::state::Tab::Discover;
+        if query.is_empty() {
+            empty_state(
+                ui,
+                th,
+                "No chats yet",
+                "Join a channel from Discover or use the field above.",
+            );
+            ui.add_space(sp.md);
+            if button(ui, th, "Open Discover").clicked() {
+                state.tab = crate::state::Tab::Discover;
+            }
+        } else {
+            empty_state(
+                ui,
+                th,
+                "No matching channels",
+                "Try a different channel name.",
+            );
         }
         return action;
     }

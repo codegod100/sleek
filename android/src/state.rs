@@ -1242,6 +1242,8 @@ pub struct AppState {
     pub avatars: crate::avatar_cache::AvatarCache,
     pub search: String,
     pub join_input: String,
+    /// Filters the conversation list by channel or display name.
+    pub channel_search: String,
     pub discover_input: String,
     /// Raw IRC command typed in the settings server console.
     pub console_input: String,
@@ -1422,6 +1424,7 @@ impl AppState {
             avatars: crate::avatar_cache::AvatarCache::default(),
             search: String::new(),
             join_input: String::new(),
+            channel_search: String::new(),
             discover_input: String::new(),
             console_input: String::new(),
             show_members: false,

@@ -39,6 +39,7 @@ struct App {
     pending_reply: Option<(String, String, String)>,
     history_settle_at: HashMap<String, Instant>,
     mobile: bool,
+    channel_search: String,
     /// Whether the message list should auto-follow new content. Shared with
     /// the scroll adjustment's own closures (see `message_overlay` setup),
     /// which flip it as the user scrolls, and read from `render_messages`'
@@ -86,6 +87,7 @@ enum Input {
     Disconnect,
     ToggleChannels,
     ToggleUsers,
+    SearchChannels(String),
     SelectChannel(String),
     OpenDm(String),
     SendMessage(String),
@@ -127,10 +129,12 @@ struct Widgets {
     topic: gtk::Label,
     login_status: gtk::Label,
     heading: gtk::Label,
+    channel_search: gtk::SearchEntry,
     channel_list: gtk::Box,
-    channel_scroll: gtk::ScrolledWindow,
+    channel_panel: gtk::Box,
     channel_separator: gtk::Separator,
     compact_channel_list: gtk::Box,
+    compact_channel_search: gtk::SearchEntry,
     compact_channels: gtk::Revealer,
     compact_channels_button: gtk::Button,
     compact_user_list: gtk::ListBox,
@@ -264,6 +268,9 @@ impl Component for App {
         topic.set_visible(false);
         title.append(&topic);
         header.set_title_widget(Some(&title));
+        let compact_channel_search = gtk::SearchEntry::builder()
+            .placeholder_text("Search channels")
+            .build();
         let compact_channel_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
         compact_channel_list.set_margin_top(6);
         compact_channel_list.set_margin_bottom(6);
@@ -275,8 +282,14 @@ impl Component for App {
             .min_content_width(220)
             .vexpand(true)
             .build();
+        let compact_channel_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        compact_channel_panel.set_margin_top(6);
+        compact_channel_panel.set_margin_start(6);
+        compact_channel_panel.set_margin_end(6);
+        compact_channel_panel.append(&compact_channel_search);
+        compact_channel_panel.append(&compact_channel_scroll);
         let compact_channels = gtk::Revealer::builder()
-            .child(&compact_channel_scroll)
+            .child(&compact_channel_panel)
             .transition_type(gtk::RevealerTransitionType::SlideRight)
             .hexpand(true)
             .build();
@@ -319,6 +332,9 @@ impl Component for App {
         status.set_margin_bottom(6);
         status.add_css_class("dim-label");
 
+        let channel_search = gtk::SearchEntry::builder()
+            .placeholder_text("Search channels")
+            .build();
         let channel_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
         channel_list.set_width_request(220);
         channel_list.set_margin_top(8);
@@ -332,6 +348,14 @@ impl Component for App {
             .max_content_width(220)
             .vexpand(true)
             .build();
+        let channel_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        channel_panel.set_width_request(220);
+        channel_panel.set_margin_top(8);
+        channel_panel.set_margin_bottom(8);
+        channel_panel.set_margin_start(8);
+        channel_panel.set_margin_end(8);
+        channel_panel.append(&channel_search);
+        channel_panel.append(&channel_scroll);
 
         let message_list = gtk::ListBox::new();
         message_list.set_selection_mode(gtk::SelectionMode::None);
@@ -492,7 +516,7 @@ impl Component for App {
         layout.set_margin_start(8);
         layout.set_margin_end(8);
         layout.append(&compact_channels);
-        layout.append(&channel_scroll);
+        layout.append(&channel_panel);
         let channel_separator = gtk::Separator::new(gtk::Orientation::Vertical);
         layout.append(&channel_separator);
         conversation.set_hexpand(true);
@@ -589,14 +613,26 @@ impl Component for App {
             move |root| sender.input(Input::Viewport(root.width()))
         });
 
-        gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
-            sender.input(Input::Tick);
-            gtk::glib::ControlFlow::Continue
+        gtk::glib::timeout_add_local(Duration::from_millis(100), {
+            let sender = sender.clone();
+            move || {
+                sender.input(Input::Tick);
+                gtk::glib::ControlFlow::Continue
+            }
         });
 
         let net = NetBridge::start();
         let saved_session =
             sleek::auth::SavedSession::load().filter(sleek::auth::SavedSession::has_session);
+        channel_search.connect_search_changed({
+            let sender = sender.clone();
+            move |entry| sender.input(Input::SearchChannels(entry.text().to_string()))
+        });
+        compact_channel_search.connect_search_changed({
+            let sender = sender.clone();
+            move |entry| sender.input(Input::SearchChannels(entry.text().to_string()))
+        });
+
         let pending_auth_server = saved_session.as_ref().map(|session| {
             if session.server.trim().is_empty() {
                 sleek::auth::DEFAULT_IRC_SERVER.into()
@@ -632,6 +668,7 @@ impl Component for App {
             pending_reply: None,
             history_settle_at: HashMap::new(),
             mobile: false,
+            channel_search: String::new(),
             pinned_to_bottom: pinned_to_bottom.clone(),
         };
         let widgets = Widgets {
@@ -642,10 +679,12 @@ impl Component for App {
             topic,
             login_status,
             heading,
+            channel_search,
             channel_list,
-            channel_scroll,
+            channel_panel,
             channel_separator,
             compact_channel_list,
+            compact_channel_search,
             compact_channels,
             compact_channels_button,
             compact_user_list,
@@ -677,7 +716,7 @@ impl Component for App {
         &mut self,
         widgets: &mut Widgets,
         message: Input,
-        _sender: ComponentSender<Self>,
+        sender: ComponentSender<Self>,
         root: &Self::Root,
     ) {
         match message {
@@ -714,6 +753,10 @@ impl Component for App {
                     auto_join: vec!["#general".into(), "#test".into()],
                     web_token: None,
                 });
+            }
+            Input::SearchChannels(query) => {
+                self.channel_search = query;
+                self.render_channels(widgets, &sender);
             }
             #[cfg(target_os = "android")]
             Input::DeepLink(url) => {
@@ -807,16 +850,16 @@ impl Component for App {
                 widgets.compact_channels.set_reveal_child(false);
                 widgets.compact_channels.set_visible(false);
                 widgets.conversation.set_visible(true);
-                self.render_channels(widgets, &_sender);
+                self.render_channels(widgets, &sender);
                 self.render_topic(widgets);
                 if self.history_settle_at.contains_key(
                     self.active_channel.as_deref().unwrap_or_default(),
                 ) {
                     clear_list(&widgets.message_list);
                 } else {
-                    self.render_messages(widgets, &_sender);
+                    self.render_messages(widgets, &sender);
                 }
-                self.render_users(widgets, &_sender);
+                self.render_users(widgets, &sender);
                 self.render_call_controls(widgets);
                 widgets.compose.grab_focus();
             }
@@ -842,16 +885,16 @@ impl Component for App {
                         count: 100,
                     });
                 }
-                self.render_channels(widgets, &_sender);
+                self.render_channels(widgets, &sender);
                 self.render_topic(widgets);
                 if self.history_settle_at.contains_key(
                     self.active_channel.as_deref().unwrap_or_default(),
                 ) {
                     clear_list(&widgets.message_list);
                 } else {
-                    self.render_messages(widgets, &_sender);
+                    self.render_messages(widgets, &sender);
                 }
-                self.render_users(widgets, &_sender);
+                self.render_users(widgets, &sender);
                 self.render_call_controls(widgets);
                 widgets.compose.grab_focus();
             }
@@ -876,7 +919,7 @@ impl Component for App {
                     widgets.compose.set_placeholder_text(Some("Message"));
                     widgets.compose.set_text("");
                     widgets.edit_cancel_button.set_visible(false);
-                    self.render_messages(widgets, &_sender);
+                    self.render_messages(widgets, &sender);
                     return;
                 }
                 if let Some((target, msgid, _)) = self.pending_reply.take() {
@@ -899,7 +942,7 @@ impl Component for App {
                     widgets.compose.set_placeholder_text(Some("Message"));
                     widgets.compose.set_text("");
                     widgets.edit_cancel_button.set_visible(false);
-                    self.render_messages(widgets, &_sender);
+                    self.render_messages(widgets, &sender);
                     return;
                 }
                 let Some(target) = self.active_channel.clone() else {
@@ -922,7 +965,7 @@ impl Component for App {
                     HashMap::new(),
                 );
                 widgets.compose.set_text("");
-                self.render_messages(widgets, &_sender);
+                self.render_messages(widgets, &sender);
             }
             Input::Edit {
                 target,
@@ -1003,7 +1046,7 @@ impl Component for App {
                 let compact = width < 980;
                 let mobile = width < 700;
                 self.mobile = mobile;
-                widgets.channel_scroll.set_visible(!mobile);
+                widgets.channel_panel.set_visible(!mobile);
                 widgets.channel_separator.set_visible(!mobile);
                 widgets.user_scroll.set_visible(!compact);
                 widgets.user_separator.set_visible(!compact);
@@ -1066,7 +1109,7 @@ impl Component for App {
                         &target,
                         message_index,
                         message,
-                        &_sender,
+                        &sender,
                     );
                 }
             }
@@ -1078,7 +1121,7 @@ impl Component for App {
                 }) {
                     Ok(texture) => {
                         self.image_previews.insert(url, texture);
-                        self.render_messages(widgets, &_sender);
+                        self.render_messages(widgets, &sender);
                     }
                     Err(error) => eprintln!("image preview failed for {url}: {error}"),
                 }
@@ -1109,7 +1152,7 @@ impl Component for App {
                         }
                         NetEvent::Sdk(event) if self.connected => {
                             refresh_chat = true;
-                            self.handle_sdk_event(event, widgets, &_sender)
+                            self.handle_sdk_event(event, widgets, &sender)
                         }
                         NetEvent::AvSignalingSent {
                             channel,
@@ -1158,17 +1201,17 @@ impl Component for App {
                     }
                 }
                 if refresh_chat {
-                    self.render_channels(widgets, &_sender);
+                    self.render_channels(widgets, &sender);
                     let active_is_loading = self.active_channel.as_ref().is_some_and(|channel| {
                         self.history_settle_at.contains_key(channel)
                     });
                     if !active_is_loading {
-                        self.render_messages(widgets, &_sender);
+                        self.render_messages(widgets, &sender);
                     }
-                    self.render_users(widgets, &_sender);
+                    self.render_users(widgets, &sender);
                     self.render_call_controls(widgets);
                 } else if history_ready {
-                    self.render_messages(widgets, &_sender);
+                    self.render_messages(widgets, &sender);
                 }
                 self.render_video(widgets);
             }
@@ -1645,7 +1688,12 @@ impl App {
     fn render_channels(&self, widgets: &Widgets, sender: &ComponentSender<Self>) {
         clear_box(&widgets.channel_list);
         clear_box(&widgets.compact_channel_list);
-        for channel in &self.channels {
+        let query = self.channel_search.trim().to_lowercase();
+        for channel in self
+            .channels
+            .iter()
+            .filter(|channel| channel.to_lowercase().contains(&query))
+        {
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
             for list in [&widgets.channel_list, &widgets.compact_channel_list] {
                 let label = gtk::Label::new(Some(channel));
