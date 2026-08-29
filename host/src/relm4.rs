@@ -2707,6 +2707,13 @@ fn install_deep_link_handler(app: &adw::Application) {
         // A cold start opens instead of activating, so without this the window
         // would never be built and the tick loop would never drain the link.
         app.activate();
+        // On a warm callback Relm4 already has a window, and activate() alone
+        // does not present it. Present synchronously while ToplevelActivity's
+        // callback instance is still GTK's latest activity so the existing
+        // surface binds there instead of leaving a blank Android screen.
+        if let Some(window) = app.active_window() {
+            window.present();
+        }
     });
 }
 
