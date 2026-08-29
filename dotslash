@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Bootstraps the `dotslash` CLI itself, so this repository's dotslash-based
+# tooling (see buck2.dotslash) works in a fully isolated environment that
+# has never had dotslash installed — no system package, no PATH assumption,
+# no manual setup step.
+#
+# Usage: identical to the real `dotslash` binary — ./dotslash <file> [args...]
+#
+# Fast path: if `dotslash` is already on PATH (nix devShell, apt, brew, a CI
+# image that installs it), just use that — this script only exists to cover
+# the case where nothing has provided one yet.
+#
+# Otherwise, download the pinned release below for this platform, verify its
+# sha256 against the digest recorded here, cache it, and exec it. The Linux
+# builds are the musl variant (same reasoning as buck2.dotslash choosing
+# buck2-x86_64-unknown-linux-musl.zst): no glibc-version coupling to whatever
+# happens to be on the box.
+set -euo pipefail
+
+DOTSLASH_VERSION="0.5.9"
+RELEASE_URL="https://github.com/facebook/dotslash/releases/download/v${DOTSLASH_VERSION}"
+
+if command -v dotslash >/dev/null 2>&1; then
+  exec dotslash "$@"
+fi
+
+os="$(uname -s)"
+arch="$(uname -m)"
+
+case "${os}-${arch}" in
+  Linux-x86_64)
+    asset="dotslash-linux-musl.x86_64.tar.gz"
+    sha256="5cefa0f258e0a58ae53c7a9a5be3890574ddd33d57c66bc9c143cb411012d72a"
+    ;;
+  Linux-aarch64 | Linux-arm64)
+    asset="dotslash-linux-musl.aarch64.tar.gz"
+    sha256="11323ef72fac5885d7c54bff70d666486bd800a8d908d0acd3bd838fd8a9b0db"
+    ;;
+  Darwin-x86_64)
+    asset="dotslash-macos-x86_64.tar.gz"
+    sha256="b334a08e50f74ef68f3caeba212cdaedccb3786a06e26f11a92af714c35b01a3"
+    ;;
+  Darwin-arm64)
+    asset="dotslash-macos-arm64.tar.gz"
+    sha256="32c38c615d55c1a4e806c0c22296b3de9dad5fcffb6659fe8b36451cd085f8cc"
+    ;;
+  *)
+    echo "dotslash: no pinned build for ${os}-${arch}." >&2
+    echo "  Install dotslash yourself: https://dotslash-cli.com/docs/installation/" >&2
+    exit 1
+    ;;
+esac
+
+cache_dir="${SLEEK_DOTSLASH_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/sleek-dotslash}/${DOTSLASH_VERSION}"
+bin="${cache_dir}/dotslash"
+
+verify_sha256() {
+  # file, expected -> 0 on match. Portable across musl/glibc Linux and macOS,
+  # none of which are guaranteed to share the same checksum tool.
+  local file="$1" expected="$2" actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$file" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$file" | cut -d' ' -f1)"
+  elif command -v openssl >/dev/null 2>&1; then
+    actual="$(openssl dgst -sha256 "$file" | awk '{print $NF}')"
+  else
+    echo "dotslash: no sha256sum/shasum/openssl available to verify the download" >&2
+    return 1
+  fi
+  [[ "$actual" == "$expected" ]]
+}
+
+if [[ ! -x "$bin" ]]; then
+  mkdir -p "$cache_dir"
+  tmp="$(mktemp -d "${cache_dir}/.download.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+
+  echo "dotslash: bootstrapping dotslash ${DOTSLASH_VERSION} for ${os}-${arch}…" >&2
+  curl -fsSL -o "${tmp}/${asset}" "${RELEASE_URL}/${asset}"
+
+  if ! verify_sha256 "${tmp}/${asset}" "$sha256"; then
+    echo "dotslash: checksum mismatch for ${asset} — refusing to run an unverified binary" >&2
+    exit 1
+  fi
+
+  tar -xzf "${tmp}/${asset}" -C "$tmp" dotslash
+  chmod +x "${tmp}/dotslash"
+  mv -f "${tmp}/dotslash" "${bin}.tmp"
+  mv -f "${bin}.tmp" "$bin"
+
+  trap - EXIT
+  rm -rf "$tmp"
+fi
+
+exec "$bin" "$@"

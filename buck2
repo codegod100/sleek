@@ -14,4 +14,9 @@ fi
 # Keep this repository on a daemon started by this wrapper. A daemon launched
 # earlier by a system `buck2` binary retains its original environment and
 # therefore cannot expand credentials loaded from this repository's `.env`.
-exec dotslash "${repo_root}/buck2.dotslash" --isolation-dir sleek-buildbuddy "$@"
+#
+# Go through the vendored ./dotslash bootstrap rather than a bare `dotslash`
+# on PATH, so this works in a fully isolated checkout that has never had
+# dotslash installed (it transparently prefers a system dotslash when one is
+# already present).
+exec "${repo_root}/dotslash" "${repo_root}/buck2.dotslash" --isolation-dir sleek-buildbuddy "$@"
