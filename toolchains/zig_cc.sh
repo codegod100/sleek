@@ -1,4 +1,23 @@
 #!/usr/bin/env bash
+# TEMPORARY DIAGNOSTIC — remove once we know whether this script's own
+# stdout/stderr actually reach cc-rs's captured Command output for a
+# cargo-buildscript C/C++ compile, or whether something upstream of here
+# (buck2 prelude's auto-generated __cxx_shim.sh / from_any_dir.py, see the
+# nested-script comment in cxx_zig_toolchain.bzl) swallows it before cc-rs
+# ever sees it. Every openh264-sys2 failure so far has come back with
+# empty stdout/stderr despite this script's own unconditional
+# `echo ... "retrying verbosely"` on the failure path below, which should
+# be impossible to lose without some kind of redirection/truncation
+# upstream of this script. Fail fast and loud on the very first
+# openh264-sys2 file compiled so we don't have to wait for a real
+# (nondeterministic) failure to test this.
+if [[ "$*" == *upstream/codec/* ]]; then
+    echo "CANARY_STDERR: zig_cc.sh reached for openh264-sys2, pid=$$" >&2
+    echo "CANARY_STDOUT: zig_cc.sh reached for openh264-sys2, pid=$$"
+    exit 1
+fi
+# END TEMPORARY DIAGNOSTIC
+
 # Zig rejects nested response files. Expand Buck's response files before
 # handing the argument vector to Zig. Cargo build scripts normally pass no
 # response files, but using the same wrapper keeps one hermetic compiler.
