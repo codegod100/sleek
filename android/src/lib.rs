@@ -30,6 +30,7 @@ mod android_camera;
 mod nv12_orient;
 
 pub use app::run_desktop;
+pub use state::api_base_for_server;
 
 #[cfg(target_os = "android")]
 pub use app::run_android;

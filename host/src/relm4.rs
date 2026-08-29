@@ -22,6 +22,7 @@ struct App {
     net: NetBridge,
     connected: bool,
     nick: String,
+    did: Option<String>,
     server: String,
     pending_auth_server: Option<String>,
     channels: Vec<String>,
@@ -101,6 +102,7 @@ enum Input {
     SelectChannel(String),
     OpenDm(String),
     SendMessage(String),
+    PasteImage(Vec<u8>),
     ToggleCall,
     ToggleMute,
     ToggleSpeaker,
@@ -466,6 +468,32 @@ impl Component for App {
             .placeholder_text("Message")
             .hexpand(true)
             .build();
+        let paste_controller = gtk::EventControllerKey::new();
+        paste_controller.connect_key_pressed({
+            let sender = sender.clone();
+            let compose = compose.clone();
+            move |_, key, _, modifiers| {
+                if key == gtk::gdk::Key::v
+                    && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                {
+                    compose.display().clipboard().read_texture_async(
+                        None::<&gtk::gio::Cancellable>,
+                        {
+                            let sender = sender.clone();
+                            move |result| {
+                                if let Ok(Some(texture)) = result {
+                                    sender.input(Input::PasteImage(
+                                        texture.save_to_png_bytes().as_ref().to_vec(),
+                                    ));
+                                }
+                            }
+                        },
+                    );
+                }
+                gtk::glib::Propagation::Proceed
+            }
+        });
+        compose.add_controller(paste_controller);
         let edit_cancel_button = gtk::Button::with_label("Cancel");
         edit_cancel_button.add_css_class("flat");
         edit_cancel_button.set_tooltip_text(Some("Cancel message edit"));
@@ -675,6 +703,7 @@ impl Component for App {
             net,
             connected: false,
             nick: String::new(),
+            did: saved_session.as_ref().map(|session| session.did.clone()),
             server: String::new(),
             pending_auth_server,
             channels: Vec::new(),
@@ -1024,6 +1053,30 @@ impl Component for App {
                 widgets.compose.set_text("");
                 self.render_channels(widgets, &sender);
                 self.render_messages(widgets, &sender);
+            }
+            Input::PasteImage(bytes) => {
+                let Some(target) = self.active_channel.clone() else {
+                    widgets.status.set_text("Select a chat before pasting an image");
+                    return;
+                };
+                let Some(did) = self.did.clone() else {
+                    widgets
+                        .status
+                        .set_text("Sign in with ATProto before sending an image");
+                    return;
+                };
+                let caption = widgets.compose.text().trim().to_owned();
+                widgets.status.set_text("Uploading pasted image…");
+                widgets.compose.set_text("");
+                self.net.send(NetCmd::UploadAndSend {
+                    upload_id: 0,
+                    target,
+                    caption,
+                    bytes,
+                    content_type: "image/png".into(),
+                    did,
+                    api_base: sleek::api_base_for_server(&self.server),
+                });
             }
             Input::Edit {
                 target,
@@ -2239,6 +2292,7 @@ impl App {
         }
         self.connected = true;
         self.nick = tokens.nick.clone();
+        self.did = Some(tokens.did.clone());
         self.server = server.clone();
         root.set_titlebar(Some(&widgets.header));
         widgets.stack.set_visible_child_name("shell");
