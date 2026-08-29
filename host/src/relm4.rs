@@ -578,6 +578,10 @@ impl Component for App {
         shell.append(&layout);
         stack.add_named(&shell, Some("shell"));
 
+        // Android's GTK backend cannot replace a titlebar after the native
+        // surface is realized. Install it once and only toggle visibility.
+        header.set_visible(false);
+        root.set_titlebar(Some(&header));
         root.set_child(Some(&stack));
 
         connect_button.connect_clicked({
@@ -806,7 +810,7 @@ impl Component for App {
                 self.local_call = None;
                 self.video = None;
                 self.video_generations.clear();
-                root.set_titlebar(Some(&widgets.header));
+                widgets.header.set_visible(true);
                 widgets.stack.set_visible_child_name("shell");
                 widgets.status.set_text("Connecting…");
                 self.net.send(NetCmd::Connect {
@@ -882,7 +886,7 @@ impl Component for App {
                 clear_flow_box(&widgets.video_grid);
                 widgets.video_grid.set_visible(false);
                 widgets.call_bar.set_visible(false);
-                root.set_titlebar(None::<&gtk::Widget>);
+                widgets.header.set_visible(false);
                 widgets.stack.set_visible_child_name("connect");
             }
             Input::ToggleChannels => {
@@ -1177,6 +1181,9 @@ impl Component for App {
                 // Compact drawers stay beside the conversation until phone
                 // width, where the open drawer expands to replace it.
                 self.mobile = width < 560;
+                // The full text call action makes the header wider than a
+                // phone surface. Call controls remain available in-chat.
+                widgets.call_button.set_visible(!self.mobile);
                 let transition = if self.mobile {
                     gtk::RevealerTransitionType::None
                 } else {
@@ -2323,7 +2330,7 @@ impl App {
         self.nick = tokens.nick.clone();
         self.did = Some(tokens.did.clone());
         self.server = server.clone();
-        root.set_titlebar(Some(&widgets.header));
+        widgets.header.set_visible(true);
         widgets.stack.set_visible_child_name("shell");
         widgets.status.set_text("Signing in…");
         self.net.send(NetCmd::Connect {
