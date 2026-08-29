@@ -36,6 +36,7 @@ struct App {
     pending_edit: Option<(String, usize, String)>,
     pending_reply: Option<(String, String, String)>,
     history_settle_at: HashMap<String, Instant>,
+    mobile: bool,
 }
 
 struct ChatLine {
@@ -110,6 +111,7 @@ enum Input {
 struct Widgets {
     stack: gtk::Stack,
     header: gtk::HeaderBar,
+    disconnect: gtk::Button,
     status: gtk::Label,
     topic: gtk::Label,
     login_status: gtk::Label,
@@ -128,6 +130,7 @@ struct Widgets {
     user_separator: gtk::Separator,
     message_list: gtk::ListBox,
     message_scroll: gtk::ScrolledWindow,
+    conversation: gtk::Box,
     video_grid: gtk::FlowBox,
     compose: gtk::Entry,
     edit_cancel_button: gtk::Button,
@@ -263,6 +266,7 @@ impl Component for App {
         let compact_channels = gtk::Revealer::builder()
             .child(&compact_channel_scroll)
             .transition_type(gtk::RevealerTransitionType::SlideRight)
+            .hexpand(true)
             .build();
         compact_channels.set_reveal_child(false);
         compact_channels.set_visible(false);
@@ -283,6 +287,7 @@ impl Component for App {
         let compact_users = gtk::Revealer::builder()
             .child(&compact_user_scroll)
             .transition_type(gtk::RevealerTransitionType::SlideLeft)
+            .hexpand(true)
             .build();
         compact_users.set_visible(false);
         let compact_users_button = gtk::Button::builder()
@@ -549,10 +554,12 @@ impl Component for App {
             pending_edit: None,
             pending_reply: None,
             history_settle_at: HashMap::new(),
+            mobile: false,
         };
         let widgets = Widgets {
             stack,
             header,
+            disconnect,
             status,
             topic,
             login_status,
@@ -571,6 +578,7 @@ impl Component for App {
             user_separator,
             message_list,
             message_scroll,
+            conversation,
             video_grid,
             compose,
             edit_cancel_button,
@@ -669,6 +677,9 @@ impl Component for App {
                 widgets.compact_users.set_visible(false);
                 widgets.compact_channels.set_visible(open);
                 widgets.compact_channels.set_reveal_child(open);
+                if self.mobile {
+                    widgets.conversation.set_visible(!open);
+                }
             }
             Input::ToggleUsers => {
                 let open = !widgets.compact_users.is_visible();
@@ -676,6 +687,9 @@ impl Component for App {
                 widgets.compact_channels.set_visible(false);
                 widgets.compact_users.set_visible(open);
                 widgets.compact_users.set_reveal_child(open);
+                if self.mobile {
+                    widgets.conversation.set_visible(!open);
+                }
             }
             Input::SelectChannel(channel) => {
                 self.active_channel = Some(channel);
@@ -686,6 +700,7 @@ impl Component for App {
                 widgets.edit_cancel_button.set_visible(false);
                 widgets.compact_channels.set_reveal_child(false);
                 widgets.compact_channels.set_visible(false);
+                widgets.conversation.set_visible(true);
                 self.render_channels(widgets, &_sender);
                 self.render_topic(widgets);
                 if self.history_settle_at.contains_key(
@@ -710,6 +725,7 @@ impl Component for App {
                 widgets.edit_cancel_button.set_visible(false);
                 widgets.compact_users.set_reveal_child(false);
                 widgets.compact_users.set_visible(false);
+                widgets.conversation.set_visible(true);
                 if is_new {
                     self.history_settle_at
                         .insert(nick.clone(), Instant::now() + Duration::from_millis(350));
@@ -874,20 +890,29 @@ impl Component for App {
                 // retains useful space instead of abruptly switching layouts.
                 let compact = width < 980;
                 let mobile = width < 700;
+                self.mobile = mobile;
                 widgets.channel_scroll.set_visible(!mobile);
                 widgets.channel_separator.set_visible(!mobile);
                 widgets.user_scroll.set_visible(!compact);
                 widgets.user_separator.set_visible(!compact);
                 widgets.compact_channels_button.set_visible(mobile);
                 widgets.compact_users_button.set_visible(compact);
+                if mobile {
+                    widgets.disconnect.set_icon_name("application-exit-symbolic");
+                } else {
+                    widgets.disconnect.set_label("Disconnect");
+                }
+                widgets.disconnect.set_tooltip_text(Some("Disconnect"));
                 if !mobile {
                     widgets.compact_channels.set_reveal_child(false);
                     widgets.compact_channels.set_visible(false);
+                    widgets.conversation.set_visible(true);
                 }
                 if !compact {
                     widgets.compact_users.set_reveal_child(false);
                     widgets.compact_users.set_visible(false);
                 }
+                self.render_call_controls(widgets);
             }
             Input::React {
                 target,
@@ -1361,7 +1386,12 @@ impl App {
         };
         widgets.call_button.set_sensitive(true);
         if let Some(call) = &self.local_call {
-            widgets.call_button.set_label("Leave Call");
+            if self.mobile {
+                widgets.call_button.set_icon_name("call-stop-symbolic");
+            } else {
+                widgets.call_button.set_label("Leave Call");
+            }
+            widgets.call_button.set_tooltip_text(Some("Leave call"));
             widgets.call_button.remove_css_class("suggested-action");
             widgets.call_button.add_css_class("destructive-action");
             widgets.call_bar.set_visible(true);
@@ -1380,13 +1410,16 @@ impl App {
             widgets.call_button.remove_css_class("destructive-action");
             widgets.call_button.add_css_class("suggested-action");
             widgets.call_bar.set_visible(false);
-            if let Some(call) = self.channel_calls.get(channel) {
+            if self.mobile {
+                widgets.call_button.set_icon_name("call-start-symbolic");
+            } else if let Some(call) = self.channel_calls.get(channel) {
                 widgets
                     .call_button
                     .set_label(&format!("Join Call ({})", call.participants));
             } else {
                 widgets.call_button.set_label("Start Call");
             }
+            widgets.call_button.set_tooltip_text(Some("Start or join call"));
         }
     }
 
@@ -1941,9 +1974,13 @@ fn default_nick() -> String {
     format!("sleek{suffix:04}")
 }
 
-fn main() {
+pub fn run() {
     adw::init().expect("failed to initialize libadwaita");
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
     let app = RelmApp::new("uk.nandi.sleek");
     app.run::<App>(());
+}
+
+fn main() {
+    run();
 }

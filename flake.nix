@@ -936,6 +936,28 @@
               "aarch64-linux-android"
             ];
           };
+          pixiewoodPerl = pkgs.perl.withPackages (perl: with perl; [
+            Glib
+            GlibObjectIntrospection
+            IPCRun
+            JSON
+            SetScalar
+            XMLLibXML
+            XMLLibXSLT
+          ]);
+          pixiewood = pkgs.stdenvNoCC.mkDerivation {
+            pname = "pixiewood";
+            version = "482e8aba2158a40f3bccdf24022c883da3303910";
+            src = ./gtk-android-builder;
+            installPhase = ''
+              mkdir -p "$out/libexec" "$out/bin"
+              cp -R . "$out/libexec/pixiewood"
+              substituteInPlace "$out/libexec/pixiewood/pixiewood" \
+                --replace-fail '#!/usr/bin/perl' '#!${pixiewoodPerl}/bin/perl'
+              chmod +x "$out/libexec/pixiewood/pixiewood"
+              ln -s "$out/libexec/pixiewood/pixiewood" "$out/bin/pixiewood"
+            '';
+          };
         in
         {
           default = pkgs.mkShell (
@@ -956,6 +978,13 @@
                 # Desktop host build's dev-shell env (pixi.toml/pixi.lock) —
                 # see scripts/pixi-activate.sh.
                 pkgs.pixi
+                pixiewood
+                pkgs.appstream
+                pkgs.meson
+                pkgs.ninja
+                pkgs.sassc
+                pkgs.shaderc
+                pkgs.temurin-bin-17
               ]
               ++ buildLibs
               ++ cliTools;

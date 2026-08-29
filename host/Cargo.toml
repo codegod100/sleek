@@ -9,6 +9,11 @@ build = "build.rs"
 
 [workspace]
 
+[lib]
+name = "sleek_relm4"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
 # Keep in sync with android/Cargo.toml — host is its own workspace root.
 # Dev iteration: default rustc debuginfo=2 makes `sleek` ~800MB and slow to link.
 # Line tables on workspace crates; no debuginfo on deps (biggest link/disk win).
@@ -33,18 +38,6 @@ freeq-sdk = { path = "../patched-crates/freeq/freeq-sdk", default-features = fal
     "aws-lc-rs",
     "rustls-tls",
     "websocket",
-] }
-# Host needs winit backends; android package only enables glow in its base deps.
-eframe = { version = "0.31", default-features = false, features = [
-    "default_fonts",
-    "glow",
-    "wayland",
-    "x11",
-] }
-# Gleam slash guest (compose-box parser) via wasmtime.
-wasmtime = { version = "29", default-features = false, features = [
-    "cranelift",
-    "runtime",
 ] }
 relm4 = "0.9"
 libadwaita = "0.7"
@@ -88,3 +81,18 @@ cpal = { path = "../third-party/cpal" }
 # See android/Cargo.toml — feature-unify native PipeWire host for moq-media audio.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 cpal = { path = "../third-party/cpal", features = ["pipewire"] }
+# Host needs winit backends; the Relm4 Android cdylib does not.
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+# Gleam slash guest (compose-box parser) via wasmtime.
+wasmtime = { version = "29", default-features = false, features = [
+    "cranelift",
+    "runtime",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
