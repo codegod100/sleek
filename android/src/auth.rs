@@ -532,10 +532,33 @@ h1{color:#8b7cf6;font-size:1.25rem} p{color:#a0a0b8;line-height:1.5}
 })();
 </script></body></html>"#;
 
+/// Platform browser opener installed by the frontend, when the default one
+/// cannot work.
+///
+/// `android_media::open_url` needs the `AndroidApp` that android-activity
+/// stores, which only exists in the egui/NativeActivity frontend. The GTK
+/// frontend runs under GTK's own Android runtime and has no such handle, so it
+/// installs an opener here (see `sleek_relm4`) that goes through GTK instead.
+#[cfg(target_os = "android")]
+static BROWSER_OPENER: std::sync::OnceLock<
+    Box<dyn Fn(&str) -> std::result::Result<(), String> + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+/// Install the frontend's browser opener. First caller wins.
+#[cfg(target_os = "android")]
+pub fn set_browser_opener(
+    opener: impl Fn(&str) -> std::result::Result<(), String> + Send + Sync + 'static,
+) {
+    let _ = BROWSER_OPENER.set(Box::new(opener));
+}
+
 /// Open `url` in the platform browser.
 fn open_system_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "android")]
     {
+        if let Some(opener) = BROWSER_OPENER.get() {
+            return opener(url).map_err(|e| anyhow::anyhow!(e));
+        }
         crate::android_media::open_url(url).map_err(|e| anyhow::anyhow!(e))
     }
     #[cfg(not(target_os = "android"))]

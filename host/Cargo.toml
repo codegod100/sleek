@@ -41,6 +41,8 @@ freeq-sdk = { path = "../patched-crates/freeq/freeq-sdk", default-features = fal
 ] }
 relm4 = "0.9"
 libadwaita = "0.7"
+# GtkFileLauncher (GTK 4.10) — the Android browser opener in src/relm4.rs.
+gtk4 = { version = "0.9", features = ["v4_10"] }
 
 # Same patches as android/ (host is its own workspace root).
 [patch.crates-io]

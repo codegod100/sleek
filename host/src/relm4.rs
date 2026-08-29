@@ -72,6 +72,9 @@ enum Input {
         handle: String,
         server: String,
     },
+    /// A `freeq://auth` callback delivered by Android as a VIEW intent.
+    #[cfg(target_os = "android")]
+    DeepLink(String),
     Disconnect,
     ToggleChannels,
     ToggleUsers,
@@ -636,6 +639,26 @@ impl Component for App {
                     web_token: None,
                 });
             }
+            #[cfg(target_os = "android")]
+            Input::DeepLink(url) => {
+                match sleek::auth::parse_freeq_auth_url(&url) {
+                    Ok(tokens) => self.apply_auth_tokens(tokens, root, widgets),
+                    Err(error) => {
+                        let message = format!("Invalid freeq://auth callback: {error}");
+                        relm4::gtk::glib::g_warning!("sleek", "{message}");
+                        widgets.status.set_text(&message);
+                        if !self.connected {
+                            widgets.login_status.set_text(&message);
+                        }
+                    }
+                }
+                // GTK has no onNewIntent hook, so the callback always spawns a
+                // fresh ToplevelActivity with no toplevel to bind to — the user
+                // is left on a blank activity and has to switch back by hand.
+                // This at least guarantees the real window exists and is mapped
+                // (it matters on a cold start); it cannot re-front the activity.
+                root.present();
+            }
             Input::AtprotoLogin { handle, server } => {
                 let handle = sleek::bsky::normalize_handle_query(&handle);
                 if handle.is_empty() || server.trim().is_empty() {
@@ -977,6 +1000,10 @@ impl Component for App {
                 }
             }
             Input::Tick => {
+                #[cfg(target_os = "android")]
+                if let Some(url) = take_pending_deep_link() {
+                    _sender.input(Input::DeepLink(url));
+                }
                 let mut refresh_chat = false;
                 for event in self.net.poll() {
                     match event {
@@ -994,56 +1021,7 @@ impl Component for App {
                             }
                         }
                         NetEvent::AuthReady(tokens) => {
-                            let server = self
-                                .pending_auth_server
-                                .take()
-                                .unwrap_or_else(|| sleek::auth::DEFAULT_IRC_SERVER.into());
-                            let session = sleek::auth::SavedSession {
-                                broker_token: tokens.broker_token.clone(),
-                                did: tokens.did.clone(),
-                                handle: tokens.handle.clone(),
-                                nick: tokens.nick.clone(),
-                                server: server.clone(),
-                                last_login_unix: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|duration| duration.as_secs() as i64)
-                                    .unwrap_or_default(),
-                                guest: false,
-                                use_tls: true,
-                                use_websocket: false,
-                            };
-                            if let Err(error) = session.save() {
-                                widgets
-                                    .status
-                                    .set_text(&format!("Could not save ATProto session: {error}"));
-                            }
-                            let mut prefs = sleek::auth::SavedPrefs::load();
-                            let handle = tokens.handle.trim().trim_start_matches('@');
-                            if !handle.is_empty() {
-                                prefs
-                                    .recent_handles
-                                    .retain(|saved| !saved.eq_ignore_ascii_case(handle));
-                                prefs.recent_handles.insert(0, handle.to_owned());
-                                prefs.recent_handles.truncate(8);
-                                prefs.last_bsky_handle = Some(handle.to_owned());
-                                if let Err(error) = prefs.save() {
-                                    eprintln!("could not save recent ATProto handle: {error}");
-                                }
-                            }
-                            self.connected = true;
-                            self.nick = tokens.nick.clone();
-                            self.server = server.clone();
-                            root.set_titlebar(Some(&widgets.header));
-                            widgets.stack.set_visible_child_name("shell");
-                            widgets.status.set_text("Signing in…");
-                            self.net.send(NetCmd::Connect {
-                                nick: tokens.nick,
-                                server,
-                                tls: true,
-                                websocket: false,
-                                auto_join: vec!["#general".into(), "#test".into()],
-                                web_token: Some(tokens.token),
-                            });
+                            self.apply_auth_tokens(tokens, root, widgets);
                         }
                         NetEvent::Sdk(event) if self.connected => {
                             refresh_chat = true;
@@ -1769,6 +1747,68 @@ impl App {
         });
     }
 
+    /// Persist an ATProto session and connect with the issued web token.
+    ///
+    /// Shared by the broker callback (`NetEvent::AuthReady`) and the Android
+    /// `freeq://auth` deep link, which reach us by different routes.
+    fn apply_auth_tokens(
+        &mut self,
+        tokens: sleek::auth::AuthTokens,
+        root: &gtk::ApplicationWindow,
+        widgets: &mut Widgets,
+    ) {
+        let server = self
+            .pending_auth_server
+            .take()
+            .unwrap_or_else(|| sleek::auth::DEFAULT_IRC_SERVER.into());
+        let session = sleek::auth::SavedSession {
+            broker_token: tokens.broker_token.clone(),
+            did: tokens.did.clone(),
+            handle: tokens.handle.clone(),
+            nick: tokens.nick.clone(),
+            server: server.clone(),
+            last_login_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or_default(),
+            guest: false,
+            use_tls: true,
+            use_websocket: false,
+        };
+        if let Err(error) = session.save() {
+            widgets
+                .status
+                .set_text(&format!("Could not save ATProto session: {error}"));
+        }
+        let mut prefs = sleek::auth::SavedPrefs::load();
+        let handle = tokens.handle.trim().trim_start_matches('@');
+        if !handle.is_empty() {
+            prefs
+                .recent_handles
+                .retain(|saved| !saved.eq_ignore_ascii_case(handle));
+            prefs.recent_handles.insert(0, handle.to_owned());
+            prefs.recent_handles.truncate(8);
+            prefs.last_bsky_handle = Some(handle.to_owned());
+            if let Err(error) = prefs.save() {
+                eprintln!("could not save recent ATProto handle: {error}");
+            }
+        }
+        self.connected = true;
+        self.nick = tokens.nick.clone();
+        self.server = server.clone();
+        root.set_titlebar(Some(&widgets.header));
+        widgets.stack.set_visible_child_name("shell");
+        widgets.status.set_text("Signing in…");
+        self.net.send(NetCmd::Connect {
+            nick: tokens.nick,
+            server,
+            tls: true,
+            websocket: false,
+            auto_join: vec!["#general".into(), "#test".into()],
+            web_token: Some(tokens.token),
+        });
+    }
+
     fn render_reaction_bar(
         &self,
         reactions: &gtk::Box,
@@ -2037,8 +2077,85 @@ fn default_nick() -> String {
 pub fn run() {
     adw::init().expect("failed to initialize libadwaita");
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::PreferDark);
+    #[cfg(target_os = "android")]
+    install_browser_opener();
+    #[cfg(target_os = "android")]
+    let app = {
+        use relm4::gtk::gio;
+        // HANDLES_OPEN has to be set before the application registers, or GDK
+        // falls back to activate() and drops the intent's URI on the floor.
+        let app = adw::Application::builder()
+            .application_id("uk.nandi.sleek")
+            .flags(gio::ApplicationFlags::HANDLES_OPEN)
+            .build();
+        install_deep_link_handler(&app);
+        RelmApp::from_app(app)
+    };
+    #[cfg(not(target_os = "android"))]
     let app = RelmApp::new("uk.nandi.sleek");
     app.run::<App>(());
+}
+
+/// Route auth's "open the browser" through GTK.
+///
+/// The default Android opener needs android-activity's `AndroidApp`, which only
+/// the egui frontend stores; here it always fails and sign-in stalls with just
+/// the URL printed. GtkFileLauncher's Android path turns the file's URI into the
+/// `ACTION_VIEW` intent we want. It needs the GTK thread and a parent window,
+/// and auth calls us from the network thread, so hop back to the main context.
+#[cfg(target_os = "android")]
+fn install_browser_opener() {
+    use relm4::gtk::gio;
+    sleek::auth::set_browser_opener(|url| {
+        let url = url.to_owned();
+        relm4::gtk::glib::idle_add_once(move || {
+            let Some(window) = relm4::main_application().active_window() else {
+                // The Android launch path dereferences the parent's surface.
+                eprintln!("sleek: no active window; cannot open {url}");
+                return;
+            };
+            let launcher = gtk::FileLauncher::new(Some(&gio::File::for_uri(&url)));
+            launcher.launch(Some(&window), gio::Cancellable::NONE, move |result| {
+                if let Err(error) = result {
+                    eprintln!("sleek: failed to open browser: {error}");
+                }
+            });
+        });
+        Ok(())
+    });
+}
+
+/// `freeq://auth` callbacks arrive as Android VIEW intents.
+///
+/// GDK hands an intent carrying data to `g_application_open` when the
+/// application claims `HANDLES_OPEN`, so no JNI is needed — but the flag has to
+/// be set before the app is registered. The URL is parked here rather than
+/// pushed straight into the component, because `open` can fire before the
+/// component exists; the tick loop drains it.
+#[cfg(target_os = "android")]
+static PENDING_DEEP_LINK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "android")]
+fn take_pending_deep_link() -> Option<String> {
+    PENDING_DEEP_LINK.lock().ok()?.take()
+}
+
+#[cfg(target_os = "android")]
+fn install_deep_link_handler(app: &adw::Application) {
+    app.connect_open(|app, files, _hint| {
+        for file in files {
+            let uri = file.uri();
+            relm4::gtk::glib::g_message!("sleek", "deep link: {uri}");
+            if uri.starts_with("freeq://") {
+                if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+                    *pending = Some(uri.to_string());
+                }
+            }
+        }
+        // A cold start opens instead of activating, so without this the window
+        // would never be built and the tick loop would never drain the link.
+        app.activate();
+    });
 }
 
 fn main() {

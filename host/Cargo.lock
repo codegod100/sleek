@@ -7613,6 +7613,7 @@ dependencies = [
  "cpal",
  "eframe",
  "freeq-sdk",
+ "gtk4",
  "jni 0.21.1",
  "libadwaita",
  "relm4",

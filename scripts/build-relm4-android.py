@@ -28,6 +28,38 @@ def find_android_home(explicit: str | None) -> Path:
     raise SystemExit("Android SDK not found; set ANDROID_HOME")
 
 
+# The freeq auth broker redirects to freeq://auth?… after ATProto sign-in.
+# Pixiewood only emits MAIN/LAUNCHER, so without this filter the callback has
+# nowhere to land and sign-in never completes. GDK forwards intents carrying
+# data to g_application_open, which the Relm4 frontend handles.
+DEEP_LINK_FILTER = """      <intent-filter>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="freeq"/>
+      </intent-filter>
+"""
+
+
+def patch_manifest(manifest: Path) -> None:
+    text = manifest.read_text()
+
+    permission = '  <uses-permission android:name="android.permission.INTERNET"/>\n'
+    if "android.permission.INTERNET" not in text:
+        marker = '  <uses-permission android:name="android.permission.REORDER_TASKS"/>'
+        if marker not in text:
+            raise RuntimeError("Pixiewood manifest permission marker is missing")
+        text = text.replace(marker, permission + marker)
+
+    if 'android:scheme="freeq"' not in text:
+        marker = "      </intent-filter>\n"
+        if marker not in text:
+            raise RuntimeError("Pixiewood manifest intent-filter marker is missing")
+        text = text.replace(marker, marker + DEEP_LINK_FILTER, 1)
+
+    manifest.write_text(text)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--android-home")
@@ -44,13 +76,7 @@ def main() -> None:
     run(pixiewood, "-C", str(root), "generate")
 
     manifest = root / ".pixiewood/android/app/src/main/AndroidManifest.xml"
-    text = manifest.read_text()
-    permission = '  <uses-permission android:name="android.permission.INTERNET"/>\n'
-    if "android.permission.INTERNET" not in text:
-        marker = '  <uses-permission android:name="android.permission.REORDER_TASKS"/>'
-        if marker not in text:
-            raise RuntimeError("Pixiewood manifest permission marker is missing")
-        manifest.write_text(text.replace(marker, permission + marker))
+    patch_manifest(manifest)
 
     run(pixiewood, "-C", str(root), "build")
     output_root = root / ".pixiewood/android/app/build/outputs/apk"
