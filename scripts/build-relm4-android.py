@@ -88,8 +88,9 @@ rootProject.name='Sleek'; include ':app'
     put(out/"app/build.gradle", f"""plugins {{ alias(libs.plugins.android.application) }}
 android {{
  namespace='uk.nandi.sleek'; compileSdk {{ version=release(35) }}
- defaultConfig {{ applicationId 'uk.nandi.sleek'; minSdk 31; targetSdk 35; versionCode 1; versionName '0.1.0'; ndk {{ abiFilters {abis} }} }}
- buildTypes {{ debug {{ minifyEnabled false }}; release {{ minifyEnabled false }} }}
+ signingConfigs {{ sleek {{ storeFile file('{root / "android/ci.keystore"}'); storePassword 'android'; keyAlias 'androiddebugkey'; keyPassword 'android' }} }}
+ defaultConfig {{ applicationId 'uk.nandi.sleek'; minSdk 31; targetSdk 35; versionCode 16777474; versionName '0.1.2'; ndk {{ abiFilters {abis} }} }}
+ buildTypes {{ debug {{ minifyEnabled false; signingConfig signingConfigs.sleek }}; release {{ minifyEnabled false; signingConfig signingConfigs.sleek }} }}
  compileOptions {{ sourceCompatibility JavaVersion.VERSION_11; targetCompatibility JavaVersion.VERSION_11 }}
  enableKotlin=false
  splits {{ abi {{ enable=true; reset(); include {abis}; universalApk=true }} }}
