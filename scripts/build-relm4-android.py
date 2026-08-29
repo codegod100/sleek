@@ -98,10 +98,10 @@ android {{
 dependencies {{ implementation libs.androidx.annotation }}
 """)
     put(out/"app/src/main/AndroidManifest.xml", """<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/><uses-permission android:name="android.permission.REORDER_TASKS"/>
 <application android:name="org.gtk.android.RuntimeApplication" android:icon="@mipmap/ic_launcher" android:label="@string/app_name" android:theme="@style/Theme.Gtk">
 <meta-data android:name="gtk.android.lib_name" android:value="sleek_relm4"/>
-<activity android:name="org.gtk.android.ToplevelActivity" android:configChanges="density|orientation|screenLayout|screenSize|touchscreen|uiMode" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.GtkSurface" android:exported="true">
+<activity android:name="org.gtk.android.ToplevelActivity" android:launchMode="singleTop" android:configChanges="density|orientation|screenLayout|screenSize|touchscreen|uiMode" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.GtkSurface" android:exported="true">
 <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
 <intent-filter><action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><category android:name="android.intent.category.BROWSABLE"/><data android:scheme="freeq"/></intent-filter>
 </activity></application></manifest>""")
@@ -112,6 +112,31 @@ dependencies {{ implementation libs.androidx.annotation }}
     for density in ("mdpi","hdpi","xhdpi","xxhdpi"):
         target=out/f"app/src/main/res/mipmap-{density}/ic_launcher.png"; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(icon,target)
     java=root/"subprojects/gtk/gdk/android/glue/java/org/gtk/android"
+    activity=java/"ToplevelActivity.java"
+    activity_source=activity.read_text()
+    marker="\t@Keep\n\t@GlibContext.GtkThread\n\tprivate void attachToplevelSurface() {"
+    new_intent="""\t@Override
+\tprotected void onNewIntent(Intent intent) {
+\t\tsuper.onNewIntent(intent);
+\t\tsetIntent(intent);
+
+\t\tif (intent.getData() == null)
+\t\t\treturn;
+
+\t\tString hint = "";
+\t\tif (intent.getAction() != null) {
+\t\t\tString[] action = intent.getAction().split("\\\\.");
+\t\t\thint = action[action.length - 1].toLowerCase();
+\t\t}
+\t\tString finalHint = hint;
+\t\tGlibContext.runOnMain(() -> GdkContext.open(intent.getData(), finalHint));
+\t}
+
+"""
+    if "protected void onNewIntent(Intent intent)" not in activity_source:
+        if marker not in activity_source:
+            raise RuntimeError("GTK ToplevelActivity insertion point changed")
+        activity.write_text(activity_source.replace(marker, new_intent+marker, 1))
     target=out/"app/src/main/java/org/gtk/android"; target.parent.mkdir(parents=True,exist_ok=True)
     if not java.is_dir(): raise RuntimeError(f"GTK Java glue missing: {java}")
     target.symlink_to(java.resolve(), target_is_directory=True)
