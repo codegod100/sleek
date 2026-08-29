@@ -398,9 +398,23 @@ impl Component for App {
             let message_scroll = message_scroll.clone();
             move |button| {
                 pinned_to_bottom.set(true);
+                button.set_visible(false);
                 let adjustment = message_scroll.vadjustment();
                 adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
-                button.set_visible(false);
+                // As in `render_messages`: GTK may not have finished
+                // measuring the last wrapped row yet, so `upper` here can
+                // still be a frame stale (most noticeable right after a
+                // burst of live messages) — the click lands short of the
+                // true bottom and settles a moment later, reading as a
+                // janky double-jump. Land on the authoritative size once
+                // layout catches up, same as auto-follow does.
+                let pinned_to_bottom = pinned_to_bottom.clone();
+                gtk::glib::timeout_add_local_once(Duration::from_millis(32), move || {
+                    if pinned_to_bottom.get() {
+                        adjustment
+                            .set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+                    }
+                });
             }
         });
 
