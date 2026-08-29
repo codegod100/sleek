@@ -4,7 +4,9 @@
 //! migrated screen by screen. The Android/egui frontend remains available as
 //! `sleek-egui` during the transition.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use freeq_sdk::av::{parse_av_state, AvAction};
@@ -37,6 +39,12 @@ struct App {
     pending_reply: Option<(String, String, String)>,
     history_settle_at: HashMap<String, Instant>,
     mobile: bool,
+    /// Whether the message list should auto-follow new content. Shared with
+    /// the scroll adjustment's own closures (see `message_overlay` setup),
+    /// which flip it as the user scrolls, and read from `render_messages`'
+    /// follow-to-bottom pass so scrolling up to read history is not undone
+    /// by the next incoming event.
+    pinned_to_bottom: Rc<Cell<bool>>,
 }
 
 struct ChatLine {
@@ -133,6 +141,7 @@ struct Widgets {
     user_separator: gtk::Separator,
     message_list: gtk::ListBox,
     message_scroll: gtk::ScrolledWindow,
+    jump_to_present: gtk::Button,
     conversation: gtk::Box,
     video_grid: gtk::FlowBox,
     compose: gtk::Entry,
@@ -335,14 +344,65 @@ impl Component for App {
             .vexpand(true)
             .build();
         message_scroll.add_css_class("view");
+
+        let pinned_to_bottom = Rc::new(Cell::new(true));
+
+        let jump_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        jump_content.append(&gtk::Image::from_icon_name("go-down-symbolic"));
+        jump_content.append(&gtk::Label::new(Some("Jump to Present")));
+        let jump_to_present = gtk::Button::builder().child(&jump_content).build();
+        jump_to_present.add_css_class("osd");
+        jump_to_present.add_css_class("pill");
+        jump_to_present.add_css_class("suggested-action");
+        jump_to_present.set_halign(gtk::Align::Center);
+        jump_to_present.set_valign(gtk::Align::End);
+        jump_to_present.set_margin_bottom(12);
+        jump_to_present.set_visible(false);
+        jump_to_present.set_tooltip_text(Some("Jump to the latest messages"));
+
+        let message_overlay = gtk::Overlay::new();
+        message_overlay.set_hexpand(true);
+        message_overlay.set_vexpand(true);
+        message_overlay.set_child(Some(&message_scroll));
+        message_overlay.add_overlay(&jump_to_present);
+
+        let adjustment = message_scroll.vadjustment();
         // GTK updates the adjustment only after wrapped rows have been
         // measured. Follow that authoritative size change so live messages
-        // reach the bottom even when allocation takes multiple frames.
-        message_scroll
-            .vadjustment()
-            .connect_upper_notify(|adjustment| {
+        // reach the bottom even when allocation takes multiple frames — but
+        // only while the user is not reading back through history, or every
+        // incoming message/reaction would yank the view out from under them.
+        adjustment.connect_upper_notify({
+            let pinned_to_bottom = pinned_to_bottom.clone();
+            move |adjustment| {
+                if pinned_to_bottom.get() {
+                    adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+                }
+            }
+        });
+        // Distance-from-bottom is how we notice the user scrolled away (or
+        // back), whether by drag, wheel, or our own programmatic jumps.
+        adjustment.connect_value_changed({
+            let pinned_to_bottom = pinned_to_bottom.clone();
+            let jump_to_present = jump_to_present.clone();
+            move |adjustment| {
+                let distance =
+                    (adjustment.upper() - adjustment.page_size()) - adjustment.value();
+                let near_bottom = distance <= 48.0;
+                pinned_to_bottom.set(near_bottom);
+                jump_to_present.set_visible(!near_bottom);
+            }
+        });
+        jump_to_present.connect_clicked({
+            let pinned_to_bottom = pinned_to_bottom.clone();
+            let message_scroll = message_scroll.clone();
+            move |button| {
+                pinned_to_bottom.set(true);
+                let adjustment = message_scroll.vadjustment();
                 adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
-            });
+                button.set_visible(false);
+            }
+        });
 
         let compose = gtk::Entry::builder()
             .placeholder_text("Message")
@@ -376,7 +436,7 @@ impl Component for App {
         video_grid.set_margin_end(12);
         video_grid.set_visible(false);
         conversation.append(&video_grid);
-        conversation.append(&message_scroll);
+        conversation.append(&message_overlay);
 
         let call_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         call_bar.set_margin_top(8);
@@ -558,6 +618,7 @@ impl Component for App {
             pending_reply: None,
             history_settle_at: HashMap::new(),
             mobile: false,
+            pinned_to_bottom: pinned_to_bottom.clone(),
         };
         let widgets = Widgets {
             stack,
@@ -581,6 +642,7 @@ impl Component for App {
             user_separator,
             message_list,
             message_scroll,
+            jump_to_present,
             conversation,
             video_grid,
             compose,
@@ -720,6 +782,8 @@ impl Component for App {
                 }
             }
             Input::SelectChannel(channel) => {
+                self.pinned_to_bottom.set(true);
+                widgets.jump_to_present.set_visible(false);
                 self.active_channel = Some(channel);
                 self.pending_edit = None;
                 self.pending_reply = None;
@@ -743,6 +807,8 @@ impl Component for App {
                 widgets.compose.grab_focus();
             }
             Input::OpenDm(nick) => {
+                self.pinned_to_bottom.set(true);
+                widgets.jump_to_present.set_visible(false);
                 let is_new = !self.channels.iter().any(|target| target == &nick);
                 self.ensure_channel(&nick);
                 self.active_channel = Some(nick.clone());
@@ -800,6 +866,8 @@ impl Component for App {
                     return;
                 }
                 if let Some((target, msgid, _)) = self.pending_reply.take() {
+                    self.pinned_to_bottom.set(true);
+                    widgets.jump_to_present.set_visible(false);
                     self.net.send(NetCmd::Reply {
                         target: target.clone(),
                         msgid: msgid.clone(),
@@ -824,6 +892,8 @@ impl Component for App {
                     widgets.status.set_text("Select a chat before sending");
                     return;
                 };
+                self.pinned_to_bottom.set(true);
+                widgets.jump_to_present.set_visible(false);
                 self.net.send(NetCmd::Privmsg {
                     target: target.clone(),
                     text: text.to_owned(),
@@ -1120,6 +1190,8 @@ impl App {
                     if self.active_channel.is_none() {
                         self.active_channel = Some(channel.clone());
                     }
+                    self.pinned_to_bottom.set(true);
+                    widgets.jump_to_present.set_visible(false);
                     self.render_channels(widgets, sender);
                     self.render_messages(widgets, sender);
                 }
@@ -1755,11 +1827,17 @@ impl App {
             }
         }
         let adjustment = widgets.message_scroll.vadjustment();
+        let pinned_to_bottom = self.pinned_to_bottom.clone();
         // ListBox geometry is not final during this render pass. Waiting for
         // the next frame ensures `upper` includes newly appended/wrapped rows
-        // before moving the viewport, which matters most for live DMs.
+        // before moving the viewport, which matters most for live DMs. Only
+        // follow if the user has not scrolled away to read history — callers
+        // that must always land at the bottom (switching chats, sending)
+        // force `pinned_to_bottom` before calling this.
         gtk::glib::timeout_add_local_once(Duration::from_millis(32), move || {
-            adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+            if pinned_to_bottom.get() {
+                adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+            }
         });
     }
 
