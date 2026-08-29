@@ -653,10 +653,9 @@ pub fn chat_screen(
     // yanks us back to the bottom before stuck is recomputed, and the search
     // jump looks like a no-op.
     //
-    // Keep ScrollArea animation enabled during the hold: `animated(false)`
-    // applies the jump without clearing kinetic `vel`, so a prior fling undoes
-    // it. `ScrollAnimation::none()` still lands in one frame via offset_target,
-    // which zeroes velocity.
+    // (`ScrollArea::animated(false)` below only turns off animation for
+    // `scroll_to_*` requests, not for the passive stick-to-bottom follow — so
+    // it doesn't fight `stick_to_bottom` below.)
     let hold_search_scroll =
         state.scroll_to_msgid.is_some() || state.highlight_msgid.is_some();
 
@@ -665,9 +664,21 @@ pub fn chat_screen(
     // target (often ~top) and the jump appears to do nothing / go the wrong way.
     // Per-channel id: shared "chat_scroll" reused offset/stuck state across rooms
     // and made search jumps land in the wrong place after switching buffers.
+    //
+    // `.animated(false)`: `ScrollArea::animated` (default true) governs the
+    // *builder's own* `scroll_to_*` requests, separately from the
+    // `ScrollAnimation` we pass at the call site. With it left at the default,
+    // a `ScrollAnimation::none()` request still goes through the interpolated
+    // offset_target path and only resolves (and zeroes residual kinetic vel)
+    // on the *following* frame — so both this jump-to-bottom button and the
+    // search-result jump below spent 2+ frames re-issuing a slightly
+    // different cursor-based target each time, reading as a stutter/teleport
+    // instead of one clean jump. `.animated(false)` makes `ScrollAnimation::none()`
+    // apply immediately, in the same frame it's requested.
     let scroll_out = ScrollArea::vertical()
         .id_salt(("chat_scroll", channel))
         .stick_to_bottom(!hold_search_scroll)
+        .animated(false)
         .auto_shrink([false, false])
         .max_height(msg_h)
         .show(ui, |ui| {
