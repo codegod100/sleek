@@ -604,7 +604,12 @@ impl Component for App {
         match message {
             Input::Connect { nick, server } => {
                 if nick.trim().is_empty() || server.trim().is_empty() {
-                    widgets.status.set_text("Nickname and server are required");
+                    // `status` lives on the shell page, which is not on screen
+                    // yet — validation has to speak through the login page's
+                    // own label or it is silently swallowed.
+                    widgets
+                        .login_status
+                        .set_text("Nickname and server are required");
                     return;
                 }
                 self.connected = true;
@@ -635,7 +640,7 @@ impl Component for App {
                 let handle = sleek::bsky::normalize_handle_query(&handle);
                 if handle.is_empty() || server.trim().is_empty() {
                     widgets
-                        .status
+                        .login_status
                         .set_text("Bluesky handle and server are required");
                     return;
                 }

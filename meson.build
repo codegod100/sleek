@@ -13,6 +13,17 @@ rust_target = ''
 build_deps = []
 extra_env = environment()
 
+# GTK bundles only its own small icon set, and adwaita-icon-theme is not one of
+# pixiewood's dependency wraps — without this every icon name outside GTK's set
+# (Disconnect, call, sidebar, reply, edit, users) renders as a broken image on
+# device. pixiewood copies the staged share/ tree into the APK assets, which
+# GTK's Android runtime unpacks under XDG_DATA_HOME, so the theme is found.
+install_subdir(
+  'assets/icons/hicolor',
+  install_dir: get_option('datadir') / 'icons',
+  install_tag: 'runtime',
+)
+
 if meson.is_cross_build()
   cpu_family = host_machine.cpu_family()
   if cpu_family == 'aarch64'

@@ -1,0 +1,28 @@
+The symbolic icons under scalable/actions/ are taken verbatim from the GNOME
+Project's adwaita-icon-theme:
+
+    https://gitlab.gnome.org/GNOME/adwaita-icon-theme
+
+They are dual licensed under the GNU LGPL v3 or the Creative Commons
+Attribution-Share Alike 3.0 United States License, at your option. Upstream
+states that attributing the artwork to the "GNOME Project" is sufficient.
+
+    CC-BY-SA 3.0: http://creativecommons.org/licenses/by-sa/3.0/
+    LGPL v3:      https://www.gnu.org/licenses/lgpl-3.0.html
+
+Artwork copyright the GNOME Project. The rest of Sleek remains under the
+repository's own licence; these files keep the licence above.
+
+They are vendored because the Android build packages only GTK's own small
+built-in icon set — adwaita-icon-theme is not one of pixiewood's dependency
+wraps, so every icon name outside GTK's set renders as a broken image on
+device. See meson.build, which installs this tree into share/icons.
+
+Vendored icons:
+    application-exit-symbolic.svg     (Adwaita/symbolic/actions)
+    call-start-symbolic.svg           (Adwaita/symbolic/actions)
+    call-stop-symbolic.svg            (Adwaita/symbolic/actions)
+    document-edit-symbolic.svg        (Adwaita/symbolic/actions)
+    mail-reply-sender-symbolic.svg    (Adwaita/symbolic/actions)
+    sidebar-show-symbolic.svg         (Adwaita/symbolic/actions)
+    system-users-symbolic.svg         (Adwaita/symbolic/legacy)
