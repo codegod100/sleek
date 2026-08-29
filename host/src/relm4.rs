@@ -312,6 +312,7 @@ impl Component for App {
             .hexpand(false)
             .build();
         compact_channels.set_reveal_child(false);
+        compact_channels.set_visible(false);
         let compact_channels_button = gtk::Button::builder()
             .icon_name("sidebar-show-symbolic")
             .tooltip_text("Open channel list")
@@ -336,6 +337,7 @@ impl Component for App {
             .hexpand(false)
             .build();
         compact_users.set_reveal_child(false);
+        compact_users.set_visible(false);
         let compact_users_button = gtk::Button::builder()
             .icon_name("system-users-symbolic")
             .tooltip_text("Open user list")
@@ -891,6 +893,9 @@ impl Component for App {
             Input::ToggleChannels => {
                 let open = !widgets.compact_channels.reveals_child();
                 let full_width = root.width() < 560;
+                if open {
+                    widgets.compact_channels.set_visible(true);
+                }
                 widgets
                     .compact_channels
                     .set_hexpand(full_width && open);
@@ -904,8 +909,12 @@ impl Component for App {
                     widgets.conversation.set_visible(!open);
                     widgets.compact_users.set_reveal_child(false);
                     widgets.compact_users.set_hexpand(false);
+                    widgets.compact_users.set_visible(false);
                 }
                 widgets.compact_channels.set_reveal_child(open);
+                if full_width && !open {
+                    widgets.compact_channels.set_visible(false);
+                }
                 if !full_width {
                     widgets.conversation.set_visible(true);
                 }
@@ -913,6 +922,9 @@ impl Component for App {
             Input::ToggleUsers => {
                 let open = !widgets.compact_users.reveals_child();
                 let full_width = root.width() < 560;
+                if open {
+                    widgets.compact_users.set_visible(true);
+                }
                 widgets.compact_users.set_hexpand(full_width && open);
                 if full_width {
                     widgets
@@ -924,8 +936,12 @@ impl Component for App {
                     widgets.conversation.set_visible(!open);
                     widgets.compact_channels.set_reveal_child(false);
                     widgets.compact_channels.set_hexpand(false);
+                    widgets.compact_channels.set_visible(false);
                 }
                 widgets.compact_users.set_reveal_child(open);
+                if full_width && !open {
+                    widgets.compact_users.set_visible(false);
+                }
                 if !full_width {
                     widgets.conversation.set_visible(true);
                 }
@@ -955,6 +971,7 @@ impl Component for App {
                 // surface and the Android backend can stop dispatching frames.
                 widgets.compact_channels.set_reveal_child(false);
                 widgets.compact_channels.set_hexpand(false);
+                widgets.compact_channels.set_visible(false);
                 widgets.conversation.set_visible(true);
                 self.render_channels(widgets, &sender);
                 self.render_topic(widgets);
@@ -984,6 +1001,7 @@ impl Component for App {
                 widgets.edit_cancel_button.set_visible(false);
                 widgets.compact_users.set_reveal_child(false);
                 widgets.compact_users.set_hexpand(false);
+                widgets.compact_users.set_visible(false);
                 widgets.conversation.set_visible(true);
                 if is_new {
                     self.history_settle_at
@@ -1206,6 +1224,12 @@ impl Component for App {
                 widgets
                     .compact_users
                     .set_hexpand(self.mobile && widgets.compact_users.reveals_child());
+                widgets.compact_channels.set_visible(
+                    !self.mobile || widgets.compact_channels.reveals_child(),
+                );
+                widgets
+                    .compact_users
+                    .set_visible(!self.mobile || widgets.compact_users.reveals_child());
                 widgets.channel_panel.set_visible(!compact_channels);
                 widgets.channel_separator.set_visible(!compact_channels);
                 widgets.user_scroll.set_visible(!compact);
