@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jdk-headless python3-pip ninja-build cmake sassc \
     && mkdir -p /usr/lib/lib \
     && ln -s ../x86_64-linux-gnu /usr/lib/lib/x86_64-linux-gnu \
-    && python3 -m pip install --no-cache-dir meson==1.9.1 \
+    && python3 -m pip install --no-cache-dir meson==1.11.0 \
     && rm -rf /var/lib/apt/lists/*
 
 # scripts/pixi-activate.sh copies /usr/include/linux/{videodev2.h,
