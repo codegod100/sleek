@@ -3,7 +3,9 @@
 import argparse, configparser, os, secrets, shutil, subprocess, tarfile
 from pathlib import Path
 
-ARCHES = {"aarch64": "arm64-v8a", "x86_64": "x86_64"}
+# The production APK targets physical Android devices. Keeping this arm64-only
+# also avoids building a second complete GTK stack for emulator-only x86_64.
+ARCHES = {"aarch64": "arm64-v8a"}
 
 def run(*args, cwd=None, env=None):
     print("+", *args, flush=True)
