@@ -949,6 +949,12 @@ impl Component for App {
                 widgets.compose.set_placeholder_text(Some("Message"));
                 widgets.compose.set_text("");
                 widgets.edit_cancel_button.set_visible(false);
+                // A phone drawer owns the full content width while open. Close
+                // and release it before remapping the conversation; otherwise
+                // GTK lays out two expanding children on the same narrow
+                // surface and the Android backend can stop dispatching frames.
+                widgets.compact_channels.set_reveal_child(false);
+                widgets.compact_channels.set_hexpand(false);
                 widgets.conversation.set_visible(true);
                 self.render_channels(widgets, &sender);
                 self.render_topic(widgets);
