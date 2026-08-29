@@ -7,7 +7,7 @@ mod av_media;
 mod avatar_cache;
 pub mod bsky;
 mod clipboard;
-mod message_store;
+pub mod message_store;
 pub mod net;
 mod policy;
 pub mod preview;

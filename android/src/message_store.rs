@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS read_state (
     last_read_ts INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account, channel)
 );
+CREATE TABLE IF NOT EXISTS channel_counts (
+    account TEXT NOT NULL,
+    channel TEXT NOT NULL COLLATE NOCASE,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (account, channel)
+);
 "#;
 
 #[derive(Debug)]
@@ -196,6 +202,39 @@ impl MessageStore {
         )?;
         Ok(n.max(0) as u32)
     }
+
+    /// Persist the client-owned activity count for a channel.
+    pub fn set_channel_count(&self, account: &str, channel: &str, count: u32) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO channel_counts(account, channel, count) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account, channel) DO UPDATE SET count=excluded.count",
+            params![account, channel, count],
+        )?;
+        Ok(())
+    }
+
+    /// Load a previously persisted client-owned activity count.
+    pub fn channel_count(&self, account: &str, channel: &str) -> Result<u32> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT count FROM channel_counts WHERE account=?1 AND channel=?2",
+                params![account, channel],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or_default()
+            .max(0) as u32)
+    }
+
+    /// Clear every activity count for one account.
+    pub fn clear_channel_counts(&self, account: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE channel_counts SET count=0 WHERE account=?1",
+            params![account],
+        )?;
+        Ok(())
+    }
 }
 
 /// Badge label: show exact count up to 99, then `99+`.
@@ -280,5 +319,19 @@ mod tests {
         assert_eq!(unread_label(0), "0");
         assert_eq!(unread_label(99), "99");
         assert_eq!(unread_label(100), "99+");
+    }
+
+    #[test]
+    fn channel_counts_are_durable_and_account_scoped() {
+        let store = MessageStore::open_in_memory().unwrap();
+        store.set_channel_count("alice", "#general", 3).unwrap();
+        store.set_channel_count("bob", "#general", 7).unwrap();
+
+        assert_eq!(store.channel_count("alice", "#general").unwrap(), 3);
+        assert_eq!(store.channel_count("alice", "#missing").unwrap(), 0);
+
+        store.clear_channel_counts("alice").unwrap();
+        assert_eq!(store.channel_count("alice", "#general").unwrap(), 0);
+        assert_eq!(store.channel_count("bob", "#general").unwrap(), 7);
     }
 }

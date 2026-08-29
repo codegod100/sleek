@@ -5,6 +5,7 @@
 //! `sleek-egui` during the transition.
 
 use std::cell::Cell;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -27,6 +28,9 @@ struct App {
     channels: Vec<String>,
     topics: HashMap<String, String>,
     messages: HashMap<String, Vec<ChatLine>>,
+    message_counts: HashMap<String, usize>,
+    message_store: sleek::message_store::MessageStore,
+    history_batches: HashSet<String>,
     members: HashMap<String, Vec<String>>,
     active_channel: Option<String>,
     channel_calls: HashMap<String, ChannelCall>,
@@ -88,6 +92,7 @@ enum Input {
     ToggleChannels,
     ToggleUsers,
     SearchChannels(String),
+    MarkAllRead,
     SelectChannel(String),
     OpenDm(String),
     SendMessage(String),
@@ -137,6 +142,7 @@ struct Widgets {
     compact_channel_search: gtk::SearchEntry,
     compact_channels: gtk::Revealer,
     compact_channels_button: gtk::Button,
+    mark_all_read_button: gtk::Button,
     compact_user_list: gtk::ListBox,
     compact_users: gtk::Revealer,
     compact_users_button: gtk::Button,
@@ -301,6 +307,10 @@ impl Component for App {
             .build();
         compact_channels_button.set_visible(false);
         header.pack_start(&compact_channels_button);
+        let mark_all_read_button = gtk::Button::with_label("Mark all read");
+        mark_all_read_button.add_css_class("flat");
+        mark_all_read_button.set_sensitive(false);
+        header.pack_start(&mark_all_read_button);
         let compact_user_list = gtk::ListBox::new();
         compact_user_list.set_selection_mode(gtk::SelectionMode::None);
         compact_user_list.add_css_class("navigation-sidebar");
@@ -562,6 +572,10 @@ impl Component for App {
             let sender = sender.clone();
             move |_| sender.input(Input::ToggleChannels)
         });
+        mark_all_read_button.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Input::MarkAllRead)
+        });
         compact_users_button.connect_clicked({
             let sender = sender.clone();
             move |_| sender.input(Input::ToggleUsers)
@@ -656,6 +670,9 @@ impl Component for App {
             channels: Vec::new(),
             topics: HashMap::new(),
             messages: HashMap::new(),
+            message_counts: HashMap::new(),
+            message_store: sleek::message_store::MessageStore::open_default(),
+            history_batches: HashSet::new(),
             members: HashMap::new(),
             active_channel: None,
             channel_calls: HashMap::new(),
@@ -687,6 +704,7 @@ impl Component for App {
             compact_channel_search,
             compact_channels,
             compact_channels_button,
+            mark_all_read_button,
             compact_user_list,
             compact_users,
             compact_users_button,
@@ -736,6 +754,8 @@ impl Component for App {
                 self.channels.clear();
                 self.topics.clear();
                 self.messages.clear();
+                self.message_counts.clear();
+                self.history_batches.clear();
                 self.members.clear();
                 self.active_channel = None;
                 self.channel_calls.clear();
@@ -805,6 +825,8 @@ impl Component for App {
                 self.channels.clear();
                 self.topics.clear();
                 self.messages.clear();
+                self.message_counts.clear();
+                self.history_batches.clear();
                 self.members.clear();
                 self.active_channel = None;
                 self.channel_calls.clear();
@@ -838,9 +860,18 @@ impl Component for App {
                     widgets.conversation.set_visible(!open);
                 }
             }
+            Input::MarkAllRead => {
+                let account = self.account_key();
+                if let Err(error) = self.message_store.clear_channel_counts(&account) {
+                    relm4::gtk::glib::g_warning!("sleek", "clear channel counts: {error:#}");
+                }
+                self.message_counts.clear();
+                self.render_channels(widgets, &_sender);
+            }
             Input::SelectChannel(channel) => {
                 self.pinned_to_bottom.set(true);
                 widgets.jump_to_present.set_visible(false);
+                self.set_message_count(&channel, 0);
                 self.active_channel = Some(channel);
                 self.pending_edit = None;
                 self.pending_reply = None;
@@ -868,6 +899,7 @@ impl Component for App {
                 widgets.jump_to_present.set_visible(false);
                 let is_new = !self.channels.iter().any(|target| target == &nick);
                 self.ensure_channel(&nick);
+                self.set_message_count(&nick, 0);
                 self.active_channel = Some(nick.clone());
                 self.pending_edit = None;
                 self.pending_reply = None;
@@ -939,9 +971,11 @@ impl Component for App {
                         Some(msgid),
                         HashMap::new(),
                     );
+                    self.increment_message_count(&target);
                     widgets.compose.set_placeholder_text(Some("Message"));
                     widgets.compose.set_text("");
                     widgets.edit_cancel_button.set_visible(false);
+                    self.render_channels(widgets, &sender);
                     self.render_messages(widgets, &sender);
                     return;
                 }
@@ -964,7 +998,9 @@ impl Component for App {
                     None,
                     HashMap::new(),
                 );
+                self.increment_message_count(&target);
                 widgets.compose.set_text("");
+                self.render_channels(widgets, &sender);
                 self.render_messages(widgets, &sender);
             }
             Input::Edit {
@@ -1220,6 +1256,39 @@ impl Component for App {
 }
 
 impl App {
+    fn account_key(&self) -> String {
+        format!(
+            "{}:{}",
+            self.server.trim().to_ascii_lowercase(),
+            self.nick.trim().to_ascii_lowercase()
+        )
+    }
+
+    fn set_message_count(&mut self, channel: &str, count: usize) {
+        let account = self.account_key();
+        if let Err(error) =
+            self.message_store
+                .set_channel_count(&account, channel, count.min(u32::MAX as usize) as u32)
+        {
+            relm4::gtk::glib::g_warning!("sleek", "save channel count: {error:#}");
+        }
+        if count == 0 {
+            self.message_counts.remove(channel);
+        } else {
+            self.message_counts.insert(channel.to_owned(), count);
+        }
+    }
+
+    fn increment_message_count(&mut self, channel: &str) {
+        let count = self
+            .message_counts
+            .get(channel)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.set_message_count(channel, count);
+    }
+
     fn handle_sdk_event(
         &mut self,
         event: Event,
@@ -1261,6 +1330,7 @@ impl App {
                 if nick.eq_ignore_ascii_case(&self.nick) {
                     self.channels.retain(|item| item != &channel);
                     self.messages.remove(&channel);
+                    self.set_message_count(&channel, 0);
                     self.members.remove(&channel);
                     if self.active_channel.as_deref() == Some(channel.as_str()) {
                         self.active_channel = self.channels.first().cloned();
@@ -1355,11 +1425,25 @@ impl App {
                         })
                     });
                 if !pending_echo {
+                    let is_history = tags
+                        .get("batch")
+                        .is_some_and(|id| self.history_batches.contains(id));
+                    if !is_history {
+                        self.increment_message_count(&channel);
+                    }
                     self.push_message(&channel, id, from, text, reply_to, reactions);
                 }
                 if let Some(deadline) = self.history_settle_at.get_mut(&channel) {
                     *deadline = Instant::now() + Duration::from_millis(150);
                 }
+            }
+            Event::BatchStart { id, batch_type, .. } => {
+                if batch_type == "chathistory" {
+                    self.history_batches.insert(id);
+                }
+            }
+            Event::BatchEnd { id } => {
+                self.history_batches.remove(&id);
             }
             Event::TagMsg {
                 from, target, tags, ..
@@ -1584,6 +1668,18 @@ impl App {
         if !self.channels.iter().any(|item| item == channel) {
             self.channels.push(channel.to_owned());
         }
+        if !self.message_counts.contains_key(channel) {
+            let account = self.account_key();
+            match self.message_store.channel_count(&account, channel) {
+                Ok(count) if count > 0 => {
+                    self.message_counts.insert(channel.to_owned(), count as usize);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    relm4::gtk::glib::g_warning!("sleek", "load channel count: {error:#}");
+                }
+            }
+        }
         self.messages.entry(channel.to_owned()).or_default();
         self.members.entry(channel.to_owned()).or_default();
     }
@@ -1689,18 +1785,43 @@ impl App {
         clear_box(&widgets.channel_list);
         clear_box(&widgets.compact_channel_list);
         let query = self.channel_search.trim().to_lowercase();
-        for channel in self
+        widgets
+            .mark_all_read_button
+            .set_sensitive(self.message_counts.values().any(|count| *count > 0));
+        let mut channels: Vec<&String> = self
             .channels
             .iter()
             .filter(|channel| channel.to_lowercase().contains(&query))
-        {
+            .collect();
+        channels.sort_by_key(|channel| {
+            Reverse(
+                self.message_counts
+                    .get(channel.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        });
+        for channel in channels {
             let selected = self.active_channel.as_deref() == Some(channel.as_str());
+            let message_count = self
+                .message_counts
+                .get(channel)
+                .copied()
+                .unwrap_or_default();
             for list in [&widgets.channel_list, &widgets.compact_channel_list] {
                 let label = gtk::Label::new(Some(channel));
                 label.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 label.set_width_chars(1);
                 label.set_max_width_chars(24);
-                let button = gtk::ToggleButton::builder().child(&label).build();
+                label.set_halign(gtk::Align::Start);
+                label.set_hexpand(true);
+                let count = gtk::Label::new(Some(&message_count.to_string()));
+                count.add_css_class("caption");
+                count.set_visible(message_count > 0);
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                row.append(&label);
+                row.append(&count);
+                let button = gtk::ToggleButton::builder().child(&row).build();
                 button.set_has_frame(false);
                 button.set_halign(gtk::Align::Fill);
                 button.set_hexpand(true);
