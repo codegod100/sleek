@@ -1727,7 +1727,6 @@ impl App {
                 row.set_margin_start(12);
                 // Keep trailing actions clear of the overlay scrollbar.
                 row.set_margin_end(24);
-                let message_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
                 content.set_hexpand(true);
                 if let Some(reply_to) = &message.reply_to {
@@ -1813,11 +1812,13 @@ impl App {
                 self.render_reaction_bar(&reactions, channel, message_index, message, sender);
                 content.append(&reactions);
                 let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                actions.set_valign(gtk::Align::Start);
+                actions.set_halign(gtk::Align::End);
                 self.render_message_actions(&actions, channel, message_index, message, sender);
-                message_line.append(&content);
-                message_line.append(&actions);
-                row.append(&message_line);
+                // Actions sit on their own row above the message body so the
+                // text can use the row's full width instead of wrapping
+                // around the button strip.
+                row.append(&actions);
+                row.append(&content);
                 widgets.reaction_bars.insert(message_index, reactions);
                 if !message.id.is_empty() {
                     row.set_focusable(true);
