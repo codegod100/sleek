@@ -33,5 +33,11 @@ if [ -n "$rust_target" ]; then
     profile_dir="$rust_target/$profile_dir"
 fi
 
-cargo "${cargo_args[@]}"
+if command -v cargo >/dev/null 2>&1; then
+    cargo "${cargo_args[@]}"
+else
+    # Buck's RBE image exposes the Rust toolchain through the repository's
+    # pinned Pixi environment rather than as an ambient cargo executable.
+    pixi run -- cargo "${cargo_args[@]}"
+fi
 cp "$target_dir/$profile_dir/libsleek_relm4.so" "$out"
