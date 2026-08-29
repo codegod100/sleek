@@ -29,7 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git unzip xz-utils bzip2 build-essential \
     libgtk-4-dev libadwaita-1-dev \
-    openjdk-17-jdk-headless python3-pip ninja-build cmake sassc glslc \
+    openjdk-17-jdk-headless python3-pip ninja-build cmake sassc \
     && mkdir -p /usr/lib/lib \
     && ln -s ../x86_64-linux-gnu /usr/lib/lib/x86_64-linux-gnu \
     && python3 -m pip install --no-cache-dir meson==1.9.1 \
@@ -74,7 +74,7 @@ RUN curl -fsSL "https://dl.google.com/android/repository/android-ndk-r29-linux.z
 
 ENV ANDROID_NDK_HOME=/opt/android/ndk
 ENV ANDROID_NDK_ROOT=/opt/android/ndk
-ENV PATH="/opt/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+ENV PATH="/opt/android/ndk/shader-tools/linux-x86_64:/opt/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
 ENV CC_x86_64_linux_android=x86_64-linux-android28-clang
 ENV CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=x86_64-linux-android28-clang
 ENV AR_x86_64_linux_android=llvm-ar
